@@ -1,0 +1,14 @@
+{
+  "name": "@kryeo/ai-server",
+  "version": "0.2.7",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "token": "node scripts/create-token.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,32 @@
+node_modules/
+out/
+release/
+.vite/
+*.log
+
+# Local build, installer, cache, and diagnostic artifacts
+release-*/
+baseline-*/
+tmp/
+ComponentScanStaging/
+$dest/
+launch-video/
+launch-video-node-modules-partial/
+NVIDIA Corporation/
+coverage/
+*.exe
+*.asar
+*.blockmap
+*.7z
+*.zip
+*.dmg
+
+# Local environment files and credentials
+.env
+.env.*
+!.env.example
+**/.data/
+**/.test-data/
+
+# Obsidian workspace metadata
+kryeovault/.obsidian/

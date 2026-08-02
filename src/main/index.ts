@@ -1,0 +1,1021 @@
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import type { OpenDialogOptions } from 'electron';
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import sharp from 'sharp';
+import { AffinityService } from './affinity-service';
+import { LibraryService } from './library-service';
+import { ConnectorService } from './connector-service';
+import { WorkspaceService } from './workspace-service';
+import { buildComponentScan, removeScanDirectory, resetScanDirectory } from './component-scan-service';
+import { LocalAiService, roleForAssetType } from './local-ai-service';
+import { HostedAiService } from './hosted-ai-service';
+import { applyComponentIntelligence } from './component-intelligence-service';
+import { applyComponentSceneContext } from './component-context-service';
+import {
+  applyApprovedFamilies,
+  applyHostedFamilyAnalyses,
+  buildVisualFamilies,
+  reviewCategory,
+  visualStructureAnchor,
+} from './component-family-service';
+import {
+  AssistantService,
+  shouldUseAssistantVision,
+  type AssistantModelPack,
+} from './assistant-service';
+import type { AssistantVisualContext } from './assistant-service';
+import type {
+  ApplyComponentOrganizationRequest,
+  ApplyLayerNamesRequest,
+  AssistantChatRequest,
+  AssistantMessage,
+  AssetPreference,
+  ComponentCandidate,
+  ComponentDecision,
+  ConfiguredToolRequest,
+  HostedAiConfiguration,
+  PlaceAssetRequest,
+  ProjectRecipe,
+  SaveAssetRequest,
+  SaveComponentReviewRequest,
+  SaveProjectNoteRequest,
+  ScriptRunResult,
+  WorkflowPreset,
+} from '../shared/types';
+
+function readableLayerIdentity(value: string): string {
+  return value
+    .replace(/\.(?:png|jpe?g|webp|gif|tiff?)$/i, '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function protectedLayerIdentity(value: string): boolean {
+  const source = readableLayerIdentity(value);
+  if (!source || /^\d+$/.test(source) || /^(?:layer|group|object|shape|image|raster)\s*\d*$/i.test(source)) return false;
+  const structuralWords = /^(?:middle|outer|inner|center|centre|base|main|background|foreground|border|borders|fill|frame|layer)(?:\s+(?:middle|outer|inner|center|centre|base|main|background|foreground|border|borders|fill|frame|layer))*$/i;
+  return source.split(/\s+/).length > 1 && !structuralWords.test(source);
+}
+
+function sourceExplicitlyNamesType(sourceName: string, type: string): boolean {
+  const source = readableLayerIdentity(sourceName);
+  const readableType = readableLayerIdentity(type).replace(/\s+/g, '\\s*');
+  return new RegExp(`\\b${readableType}s?\\b`, 'i').test(source);
+}
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const affinity = new AffinityService();
+const library = new LibraryService();
+const connectors = new ConnectorService();
+const workspace = new WorkspaceService(() => app.getPath('userData'));
+const localAi = new LocalAiService();
+const assistant = new AssistantService(() => app.getPath('userData'));
+const hostedAi = new HostedAiService(() => app.getPath('userData'));
+const execFileAsync = promisify(execFile);
+let autoExportQueue: Promise<void> = Promise.resolve();
+const activeComponentScans = new Map<number, AbortController>();
+
+const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function calibrateComponentConfidence(components: ComponentCandidate[], decisions: ComponentDecision[]): ComponentCandidate[] {
+  const samples = decisions.reduce((total, decision) => total + (decision.confidenceSamples || 0), 0);
+  const correct = decisions.reduce((total, decision) => total + (decision.confidenceCorrect || 0), 0);
+  if (!samples) return components;
+  const observedAccuracy = correct / samples;
+  const weight = Math.min(0.75, samples / (samples + 12));
+  return components.map((component) => {
+    if (component.aiConfidence === undefined) return component;
+    const confidence = component.aiConfidence * (1 - weight) + observedAccuracy * weight;
+    const lowMargin = confidence < 0.72 && Boolean(component.analysisAlternatives?.length);
+    return {
+      ...component,
+      aiConfidence: confidence,
+      semanticConflict: component.semanticConflict || lowMargin,
+      semanticConflictMessage: component.semanticConflictMessage
+        || (lowMargin ? 'The leading interpretation is too close to another plausible type and needs review.' : undefined),
+      analysisState: lowMargin ? 'needs-review' : component.analysisState,
+    };
+  });
+}
+
+async function buildAssistantVisualImages(rawPath: string, directory: string, profile: 'compatibility' | 'balanced' | 'enhanced'): Promise<AssistantVisualContext['images']> {
+  const source = sharp(rawPath, { failOn: 'error' }).toColourspace('srgb').ensureAlpha();
+  const metadata = await source.metadata();
+  const width = metadata.width || 1;
+  const height = metadata.height || 1;
+  const overviewPath = path.join(directory, 'document-overview.png');
+  const overviewMaximum = profile === 'compatibility' ? 512 : 768;
+  await source.clone().resize({ width: overviewMaximum, height: overviewMaximum, fit: 'inside', withoutEnlargement: true }).png({ compressionLevel: 8 }).toFile(overviewPath);
+  const images: AssistantVisualContext['images'] = [{ imagePath: overviewPath, label: `the full document overview (${width} x ${height})` }];
+  if (width <= overviewMaximum * 1.25 && height <= overviewMaximum * 1.25) return images;
+
+  const landscape = width / height >= 1.35;
+  const portrait = height / width >= 1.35;
+  const columns = landscape ? 3 : 2;
+  const rows = portrait ? 3 : 2;
+  const maximumTiles = profile === 'compatibility' ? 4 : 6;
+  for (let row = 0; row < rows && images.length - 1 < maximumTiles; row += 1) {
+    for (let column = 0; column < columns && images.length - 1 < maximumTiles; column += 1) {
+      const cellLeft = Math.floor(column * width / columns);
+      const cellTop = Math.floor(row * height / rows);
+      const cellRight = Math.ceil((column + 1) * width / columns);
+      const cellBottom = Math.ceil((row + 1) * height / rows);
+      const overlapX = Math.round((cellRight - cellLeft) * 0.08);
+      const overlapY = Math.round((cellBottom - cellTop) * 0.08);
+      const left = Math.max(0, cellLeft - overlapX);
+      const top = Math.max(0, cellTop - overlapY);
+      const right = Math.min(width, cellRight + overlapX);
+      const bottom = Math.min(height, cellBottom + overlapY);
+      const tilePath = path.join(directory, `detail-${row + 1}-${column + 1}.png`);
+      await source.clone().extract({ left, top, width: right - left, height: bottom - top })
+        .resize({ width: profile === 'compatibility' ? 512 : 640, height: profile === 'compatibility' ? 512 : 640, fit: 'inside', withoutEnlargement: true })
+        .png({ compressionLevel: 8 }).toFile(tilePath);
+      images.push({ imagePath: tilePath, label: `detail crop row ${row + 1}, column ${column + 1}` });
+    }
+  }
+  return images;
+}
+
+function queueAutoExport(project: string, trigger: 'save' | 'manual'): Promise<ScriptRunResult> {
+  const startedAt = new Date().toISOString();
+  let resolveResult: (result: ScriptRunResult) => void = () => undefined;
+  const resultPromise = new Promise<ScriptRunResult>((resolve) => { resolveResult = resolve; });
+  autoExportQueue = autoExportQueue.then(async () => {
+    const result = await workspace.runJob(
+      'auto-export',
+      `Auto-export ${project}`,
+      { project, trigger },
+      async (update, cancelled) => {
+        const recipe = await workspace.recipe(project);
+        if (!recipe) throw new Error(`Save an Auto-Export recipe for ${project} first.`);
+        if (trigger === 'save' && !recipe.autoExport) {
+          throw new Error(`Auto-Export is disabled for ${project}.`);
+        }
+        await update(14, 'Finding the Affinity export workflow');
+        const exportTool = (await affinity.listTools()).find((tool) => /^Asset Library - Export\s+v/i.test(tool.title));
+        if (!exportTool) throw new Error('Affinity did not report an Asset Library Export workflow.');
+        if (cancelled()) throw new Error('Auto-Export cancelled before Affinity started.');
+        await update(34, 'Rendering the latest Raster assets');
+        const exportResult = await affinity.runConfiguredTool({
+          kind: 'export',
+          title: exportTool.title,
+          values: {
+            project,
+            preset: recipe.preset || 'PNG (Pixel)',
+            latest: true,
+            stable: true,
+          },
+        });
+        if (!exportResult.ok) return exportResult;
+        if (cancelled()) throw new Error('Auto-Export cancelled before publishing files.');
+        await update(76, 'Publishing stable production files');
+        const published = await library.publishProjectExports(project, recipe.outputRoot);
+        if (recipe.targets.includes('roblox')) {
+          await update(90, 'Refreshing the Roblox delivery manifest');
+          const delivery = await library.deliverProject(project, 'roblox');
+          if (!delivery.ok) throw new Error(delivery.message);
+        }
+        const skipped = published.skipped.length
+          ? ` ${published.skipped.length} asset(s) had no Raster PNG and were skipped.`
+          : '';
+        return {
+          ok: true,
+          title: `Auto-export ${project}`,
+          output: `Published ${published.files.length} asset(s) to ${published.destination}.${skipped}`,
+          startedAt,
+          completedAt: new Date().toISOString(),
+        };
+      },
+    );
+    resolveResult(result);
+  }).catch((error) => {
+    resolveResult({
+      ok: false,
+      title: `Auto-export ${project}`,
+      output: error instanceof Error ? error.message : String(error),
+      startedAt,
+      completedAt: new Date().toISOString(),
+    });
+  });
+  return resultPromise;
+}
+
+async function sendAffinityKeys(keys: string, settleMilliseconds = 350): Promise<void> {
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    'Add-Type -AssemblyName Microsoft.VisualBasic',
+    `"Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Threading; public static class KryeoWin32 { [DllImport(\\\"user32.dll\\\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow); [DllImport(\\\"user32.dll\\\")] public static extern bool SetForegroundWindow(IntPtr hWnd); [DllImport(\\\"user32.dll\\\")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra); public static void Chord(byte modifier, byte key) { keybd_event(modifier, 0, 0, UIntPtr.Zero); Thread.Sleep(30); keybd_event(key, 0, 0, UIntPtr.Zero); Thread.Sleep(30); keybd_event(key, 0, 2, UIntPtr.Zero); keybd_event(modifier, 0, 2, UIntPtr.Zero); } }'"`,
+    `$p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -like 'Affinity*' } | Select-Object -First 1`,
+    `if (-not $p) { throw 'Affinity window not found.' }`,
+    '[KryeoWin32]::ShowWindow($p.MainWindowHandle, 9) | Out-Null',
+    '[Microsoft.VisualBasic.Interaction]::AppActivate($p.Id) | Out-Null',
+    '[KryeoWin32]::SetForegroundWindow($p.MainWindowHandle) | Out-Null',
+    'Start-Sleep -Milliseconds 220',
+    `$keys = ${JSON.stringify(keys)}`,
+    `switch ($keys) { '^c' { [KryeoWin32]::Chord(0x11, 0x43) } '^v' { [KryeoWin32]::Chord(0x11, 0x56) } '^{TAB}' { [KryeoWin32]::Chord(0x11, 0x09) } default { throw 'Unsupported key command.' } }`,
+  ].join('; ');
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 12_000 });
+  await wait(settleMilliseconds);
+}
+
+async function affinityClipboardReady(): Promise<boolean> {
+  const script = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetDataObject().GetFormats() | ConvertTo-Json -Compress";
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 8000 });
+  try {
+    const parsed = JSON.parse(stdout.trim()) as string | string[];
+    return (Array.isArray(parsed) ? parsed : [parsed]).includes('Affinity Nodes');
+  } catch {
+    return false;
+  }
+}
+
+async function clearClipboard(): Promise<void> {
+  const script = 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::Clear()';
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 8000 });
+}
+
+async function focusAffinityDocument(sessionUuid: string): Promise<void> {
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const context = await affinity.getDocumentContext();
+    if (context.open && context.sessionUuid === sessionUuid) return;
+    await sendAffinityKeys('^{TAB}', 260);
+  }
+  throw new Error('Could not activate the requested Affinity document.');
+}
+
+async function transferPreparedLayer(
+  sourceSessionUuid: string,
+  targetSessionUuid: string,
+  staged: boolean,
+): Promise<void> {
+  await focusAffinityDocument(sourceSessionUuid);
+  await clearClipboard();
+  await sendAffinityKeys('^c', staged ? 1100 : 700);
+  if (!(await affinityClipboardReady())) throw new Error('Affinity did not copy the selected asset layer.');
+  await focusAffinityDocument(targetSessionUuid);
+  await sendAffinityKeys('^v', staged ? 3000 : 1000);
+}
+
+function preparedPlacement(output: string): {
+  sourceSessionUuid: string;
+  targetNodeCount: number;
+  staged: boolean;
+  expected: string;
+  sourceVisibilities: boolean[];
+} {
+  const marker = 'KRYEO_PLACE_READY:';
+  const index = output.lastIndexOf(marker);
+  if (index < 0) return { sourceSessionUuid: '', targetNodeCount: 0, staged: false, expected: '', sourceVisibilities: [] };
+  const line = output.slice(index + marker.length).split(/\r?\n/, 1)[0];
+  try {
+    const value = JSON.parse(line) as {
+      sourceSessionUuid?: string;
+      targetNodeCount?: number;
+      staged?: boolean;
+      expected?: string;
+      sourceVisibilities?: unknown[];
+    };
+    return {
+      sourceSessionUuid: String(value.sourceSessionUuid || ''),
+      targetNodeCount: Number(value.targetNodeCount || 0),
+      staged: value.staged === true,
+      expected: String(value.expected || ''),
+      sourceVisibilities: Array.isArray(value.sourceVisibilities) ? value.sourceVisibilities.map(Boolean) : [],
+    };
+  } catch {
+    return { sourceSessionUuid: '', targetNodeCount: 0, staged: false, expected: '', sourceVisibilities: [] };
+  }
+}
+
+function createWindow(): void {
+  const qaWidth = app.isPackaged ? 0 : Number(process.env.KRYEO_QA_WIDTH || 0);
+  const qaHeight = app.isPackaged ? 0 : Number(process.env.KRYEO_QA_HEIGHT || 0);
+  const window = new BrowserWindow({
+    width: qaWidth >= 980 ? qaWidth : 1480,
+    height: qaHeight >= 680 ? qaHeight : 920,
+    minWidth: 980,
+    minHeight: 680,
+    show: false,
+    backgroundColor: '#111312',
+    title: 'Kryeo',
+    icon: path.join(app.getAppPath(), 'build-icon.png'),
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#111312',
+      symbolColor: '#e8ece9',
+      height: 44,
+    },
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  window.once('ready-to-show', () => window.show());
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void window.loadURL(process.env.ELECTRON_RENDERER_URL);
+  } else {
+    void window.loadFile(path.join(__dirname, '../renderer/index.html'));
+  }
+}
+
+ipcMain.handle('kryeo:get-status', () => affinity.getStatus());
+ipcMain.handle('kryeo:reconnect', () => affinity.reconnect());
+ipcMain.handle('kryeo:get-document-context', () => affinity.getDocumentContext());
+ipcMain.handle('kryeo:get-connectors', () => connectors.snapshot(affinity.getStatus()));
+ipcMain.handle('kryeo:refresh-connectors', () => connectors.snapshot(affinity.getStatus(), true));
+ipcMain.handle('kryeo:get-asset-library', () => library.snapshot());
+ipcMain.handle('kryeo:get-library-logs', () => library.logs());
+ipcMain.handle('kryeo:get-workspace', () => workspace.snapshot());
+ipcMain.handle('kryeo:list-tools', () => affinity.listTools());
+ipcMain.handle('kryeo:analyze-components', (_event, input: unknown) => {
+  if (!Array.isArray(input) || input.length > 320) throw new Error('Invalid local vision review.');
+  return localAi.analyze(input as ComponentCandidate[]);
+});
+ipcMain.handle('kryeo:apply-component-organization', async (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid component organization request.');
+  const request = input as ApplyComponentOrganizationRequest;
+  if (typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.components) || request.components.length > 160) {
+    throw new Error('Invalid component organization request.');
+  }
+  const components = request.components.map((component) => {
+    if (!component || typeof component.name !== 'string' || component.name.length > 80 || !Array.isArray(component.memberPaths) || component.memberPaths.length > 80) {
+      throw new Error('Invalid component organization plan.');
+    }
+    const memberPaths = component.memberPaths.map((memberPath) => {
+      if (!Array.isArray(memberPath) || memberPath.length < 2 || memberPath.length > 30 || memberPath.some((value) => !Number.isInteger(value))) {
+        throw new Error('Invalid Affinity layer path.');
+      }
+      return memberPath;
+    });
+    return { name: component.name.trim() || 'UI Component', memberPaths };
+  });
+  return affinity.applyComponentOrganization({ documentSessionUuid: request.documentSessionUuid, components });
+});
+ipcMain.handle('kryeo:apply-layer-names', async (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid layer naming request.');
+  const request = input as ApplyLayerNamesRequest;
+  if (typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.layers) || request.layers.length > 320) {
+    throw new Error('Invalid layer naming request.');
+  }
+  const layers = request.layers.map((layer) => {
+    if (!layer || typeof layer.name !== 'string' || !layer.name.trim() || layer.name.length > 80 || !Array.isArray(layer.path) || layer.path.length < 2 || layer.path.length > 30 || layer.path.some((value) => !Number.isInteger(value))) {
+      throw new Error('Invalid Affinity layer naming entry.');
+    }
+    return { name: layer.name.trim(), path: layer.path };
+  });
+  return affinity.applyLayerNames({ documentSessionUuid: request.documentSessionUuid, layers });
+});
+ipcMain.handle('kryeo:forget-component-decision', (_event, visualHash: unknown) => {
+  if (typeof visualHash !== 'string' || !/^[a-f0-9]{64}$/i.test(visualHash)) throw new Error('Invalid learned visual.');
+  return workspace.forgetComponentDecision(visualHash);
+});
+ipcMain.handle('kryeo:set-component-decision-scope', (_event, visualHash: unknown, scope: unknown) => {
+  if (typeof visualHash !== 'string' || !/^[a-f0-9]{64}$/i.test(visualHash) || !['project', 'global'].includes(String(scope))) {
+    throw new Error('Invalid learned visual scope.');
+  }
+  return workspace.setComponentDecisionScope(visualHash, scope as 'project' | 'global');
+});
+ipcMain.handle('kryeo:clear-component-decisions', () => workspace.clearComponentDecisions());
+ipcMain.handle('kryeo:save-component-review', (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid component review.');
+  const request = input as SaveComponentReviewRequest;
+  if (typeof request.documentTitle !== 'string' || request.documentTitle.length > 180 || typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.components) || request.components.length > 320 || !Array.isArray(request.includedIds) || request.includedIds.length > 320) {
+    throw new Error('Invalid component review.');
+  }
+  for (const component of request.components) {
+    if (!component || typeof component.id !== 'string' || typeof component.visualHash !== 'string' || !/^[a-f0-9]{64}$/i.test(component.visualHash)) {
+      throw new Error('Invalid component review entry.');
+    }
+  }
+  return workspace.saveComponentReview(request);
+});
+ipcMain.handle('kryeo:save-component-decisions', (_event, input: unknown) => {
+  if (!Array.isArray(input) || input.length > 320) throw new Error('Invalid Component Scan review.');
+  const allowedRoles = ['Unknown', 'ImageButton', 'ImageLabel', 'Frame', 'TextButton', 'TextLabel', 'TextBox'];
+  const allowedTypes = ['Unknown', 'Frame', 'Button', 'Icon', 'Panel', 'Slot', 'Bar', 'Badge', 'Label', 'Text', 'TextBox', 'ScrollBar', 'Divider', 'Background', 'Wallpaper', 'Texture', 'Overlay', 'Cursor', 'Tooltip', 'Modal', 'Input', 'Tab', 'Tile', 'Ornament', 'Border', 'Corner', 'Edge', 'Fill', 'FX'];
+  const allowedDiveModes = ['keep-together', 'children-only', 'parent-and-children'];
+  const decisions = input.map((item) => {
+    if (!item || typeof item !== 'object') throw new Error('Invalid component decision.');
+    const candidate = item as ComponentDecision;
+    if (
+      typeof candidate.visualHash !== 'string'
+      || !/^[a-f0-9]{64}$/i.test(candidate.visualHash)
+      || typeof candidate.role !== 'string'
+      || !allowedRoles.includes(candidate.role)
+      || typeof candidate.familyName !== 'string'
+      || candidate.familyName.length > 120
+      || (candidate.assetType !== undefined && !allowedTypes.includes(candidate.assetType))
+      || (candidate.suggestedType !== undefined && !allowedTypes.includes(candidate.suggestedType))
+      || (candidate.suggestedRole !== undefined && !allowedRoles.includes(candidate.suggestedRole))
+      || (candidate.diveMode !== undefined && !allowedDiveModes.includes(candidate.diveMode))
+      || (candidate.embedding !== undefined && (typeof candidate.embedding !== 'string' || candidate.embedding.length > 1200))
+    ) throw new Error('Invalid component decision.');
+    return {
+      ...candidate,
+      familyName: candidate.familyName.trim().slice(0, 120),
+      semanticHint: candidate.semanticHint?.slice(0, 160),
+      suggestedName: candidate.suggestedName?.slice(0, 120),
+      correctionCount: Number.isFinite(candidate.correctionCount) ? Math.max(0, Math.floor(candidate.correctionCount || 0)) : 0,
+      diveMode: candidate.diveMode || 'keep-together',
+      documentTitle: candidate.documentTitle?.slice(0, 180),
+    };
+  });
+  return workspace.saveComponentDecisions(decisions);
+});
+ipcMain.handle('kryeo:save-project-note', (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid project note.');
+  const request = input as SaveProjectNoteRequest;
+  if (typeof request.project !== 'string' || request.project.length > 100 || typeof request.text !== 'string' || !request.text.trim() || request.text.length > 1200 || !Array.isArray(request.tags) || request.tags.length > 12 || request.tags.some((tag) => typeof tag !== 'string' || tag.length > 40) || (request.id !== undefined && (typeof request.id !== 'string' || request.id.length > 100))) {
+    throw new Error('Invalid project note.');
+  }
+  return workspace.saveProjectNote(request);
+});
+ipcMain.handle('kryeo:delete-project-note', (_event, project: unknown, id: unknown) => {
+  if (typeof project !== 'string' || project.length > 100 || typeof id !== 'string' || id.length > 100) throw new Error('Invalid project note.');
+  return workspace.deleteProjectNote(project, id);
+});
+ipcMain.handle('kryeo:export-project-knowledge', async (_event, project: unknown) => {
+  if (typeof project !== 'string' || project.length > 100) throw new Error('Invalid project.');
+  const snapshot = await workspace.snapshot();
+  const knowledge = snapshot.projectKnowledge.find((item) => item.project === project) || { project, notes: [], metadata: {}, updatedAt: new Date().toISOString() };
+  const parent = BrowserWindow.getFocusedWindow();
+  const options = {
+    title: 'Export Kryeo project notes',
+    defaultPath: `${project.replace(/[<>:"/\\|?*]/g, '-') || 'General'} - Kryeo notes.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  };
+  const result = parent ? await dialog.showSaveDialog(parent, options) : await dialog.showSaveDialog(options);
+  if (result.canceled || !result.filePath) return false;
+  await fs.writeFile(result.filePath, `${JSON.stringify(knowledge, null, 2)}\n`, 'utf8');
+  return true;
+});
+ipcMain.handle('kryeo:import-project-knowledge', async (_event, project: unknown) => {
+  if (typeof project !== 'string' || project.length > 100) throw new Error('Invalid project.');
+  const parent = BrowserWindow.getFocusedWindow();
+  const options: OpenDialogOptions = { title: 'Import Kryeo project notes', properties: ['openFile'], filters: [{ name: 'JSON', extensions: ['json'] }] };
+  const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  if (result.canceled || !result.filePaths[0]) return workspace.snapshot();
+  const parsed = JSON.parse(await fs.readFile(result.filePaths[0], 'utf8')) as unknown;
+  if (!parsed || typeof parsed !== 'object') throw new Error('This project notes file is invalid.');
+  return workspace.mergeProjectKnowledge(project, parsed);
+});
+ipcMain.handle('kryeo:run-tool', (_event, title: unknown) => {
+  if (typeof title !== 'string' || title.length > 180) throw new Error('Invalid tool title.');
+  return workspace.runJob('tool', title, { title }, async (update) => {
+    await update(20, 'Sending workflow to Affinity');
+    const result = await affinity.runTool(title);
+    await update(92, 'Refreshing workflow state');
+    return result;
+  });
+});
+ipcMain.handle('kryeo:open-asset', async (_event, candidate: unknown, displayName: unknown) => {
+  if (typeof candidate !== 'string' || typeof displayName !== 'string' || displayName.length > 180 || !await library.isAllowedAssetFile(candidate)) {
+    throw new Error('Invalid asset file.');
+  }
+  return workspace.runJob('open', `Open ${displayName}`, { path: candidate, displayName }, async (update) => {
+    await update(25, 'Opening asset document');
+    return affinity.openAsset(candidate, displayName);
+  });
+});
+ipcMain.handle('kryeo:save-asset', async (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid save request.');
+  const candidate = input as Record<string, unknown>;
+  const textFields = ['displayName', 'codeName', 'project', 'category', 'subcategory', 'tags', 'notes'];
+  const booleanFields = ['batch', 'update', 'baseCopy', 'rasterCopy'];
+  for (const field of textFields) {
+    if (typeof candidate[field] !== 'string' || String(candidate[field]).length > 500) throw new Error(`Invalid ${field}.`);
+  }
+  for (const field of booleanFields) {
+    if (typeof candidate[field] !== 'boolean') throw new Error(`Invalid ${field}.`);
+  }
+  if (!String(candidate.displayName).trim() || !String(candidate.codeName).trim() || !String(candidate.project).trim()) {
+    throw new Error('Display name, code name, and project are required.');
+  }
+  const request = candidate as unknown as SaveAssetRequest;
+  return workspace.runJob('save', `Save ${request.displayName}`, request, async (update, cancelled) => {
+    await update(12, 'Preparing the asset library');
+    await Promise.all([library.prepareKryeoStaging(), library.prepareSaveDestination(request)]);
+    if (cancelled()) throw new Error('Save cancelled before Affinity started.');
+    await update(28, 'Building Master, Base, and Raster');
+    const result = await affinity.saveAsset(request);
+    if (!result.ok) return result;
+    const recipe = await workspace.recipe(request.project);
+    if (recipe?.autoExport && !cancelled()) {
+      await update(72, 'Queuing Auto-Export');
+      const exportResult = await queueAutoExport(request.project, 'save');
+      result.output = `${result.output}\n${exportResult.ok ? exportResult.output : `Auto-Export needs attention: ${exportResult.output}`}`;
+    }
+    await update(94, 'Updating the library index');
+    return result;
+  });
+});
+ipcMain.handle('kryeo:run-configured-tool', async (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid workflow request.');
+  const request = input as ConfiguredToolRequest;
+  const titlePatterns = {
+    export: /^Asset Library - Export\s+v/i,
+    setup: /^Asset Library - Setup\s+v/i,
+    update: /^Asset Library - Update\s+v/i,
+    shade: /^Pixel Helper - Hand Shade\s+v/i,
+  };
+  if (!request.kind || !request.title || !request.values || !titlePatterns[request.kind]?.test(request.title)) {
+    throw new Error('Unsupported configured workflow.');
+  }
+  for (const value of Object.values(request.values)) {
+    if (!['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'string' && value.length > 500)) {
+      throw new Error('Invalid workflow value.');
+    }
+  }
+  if (request.kind === 'setup') {
+    await library.prepareSetupPaths(String(request.values.home || ''), String(request.values.assets || ''), String(request.values.exports || ''));
+  }
+  return workspace.runJob('configured', request.title, request, async (update, cancelled) => {
+    await update(22, 'Applying workflow settings');
+    if (cancelled()) throw new Error('Workflow cancelled before Affinity started.');
+    return affinity.runConfiguredTool(request);
+  });
+});
+ipcMain.handle('kryeo:cancel-job', (_event, id: unknown) => {
+  if (typeof id !== 'string' || id.length > 180) return false;
+  return workspace.cancelJob(id);
+});
+ipcMain.handle('kryeo:save-recipe', async (_event, input: unknown) => {
+  const recipe = input as ProjectRecipe;
+  if (!recipe || typeof recipe.project !== 'string' || !recipe.project.trim() || typeof recipe.autoExport !== 'boolean' || !['master', 'base', 'raster'].includes(String(recipe.source)) || !Array.isArray(recipe.targets)) {
+    throw new Error('Invalid project recipe.');
+  }
+  if (recipe.targets.some((target) => !['folder', 'roblox'].includes(String(target)))) throw new Error('Invalid recipe target.');
+  const outputRoot = String(recipe.outputRoot || '').trim().slice(0, 500);
+  await library.exportDestination(outputRoot);
+  const targets: ProjectRecipe['targets'] = ['folder'];
+  if (recipe.targets.includes('roblox')) targets.push('roblox');
+  return workspace.saveRecipe({
+    project: recipe.project.trim(),
+    autoExport: recipe.autoExport,
+    outputRoot,
+    preset: String(recipe.preset || 'PNG (Pixel)').slice(0, 180),
+    source: 'raster',
+    targets,
+  });
+});
+ipcMain.handle('kryeo:choose-export-folder', async () => {
+  const parent = BrowserWindow.getFocusedWindow();
+  const options: OpenDialogOptions = { title: 'Choose Auto-Export destination', properties: ['openDirectory', 'createDirectory'] };
+  const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  return result.canceled ? '' : result.filePaths[0] || '';
+});
+ipcMain.handle('kryeo:run-auto-export', (_event, project: unknown) => {
+  if (typeof project !== 'string' || !project.trim() || project.length > 180) throw new Error('Invalid Auto-Export project.');
+  return queueAutoExport(project.trim(), 'manual');
+});
+ipcMain.handle('kryeo:open-export-folder', async (_event, project: unknown) => {
+  if (typeof project !== 'string' || !project.trim() || project.length > 180) return false;
+  const recipe = await workspace.recipe(project.trim());
+  if (!recipe) return false;
+  const destination = await library.exportDestination(recipe.outputRoot);
+  return !(await shell.openPath(destination));
+});
+ipcMain.handle('kryeo:save-preset', (_event, input: unknown) => {
+  const preset = input as WorkflowPreset;
+  if (!preset || !['export', 'setup', 'update', 'shade'].includes(String(preset.kind)) || typeof preset.name !== 'string' || !preset.name.trim() || !preset.values || typeof preset.values !== 'object') {
+    throw new Error('Invalid workflow preset.');
+  }
+  return workspace.savePreset({ id: typeof preset.id === 'string' ? preset.id : undefined, kind: preset.kind, name: preset.name.trim().slice(0, 100), values: preset.values });
+});
+ipcMain.handle('kryeo:delete-preset', (_event, id: unknown) => {
+  if (typeof id !== 'string' || id.length > 180) throw new Error('Invalid preset.');
+  return workspace.deletePreset(id);
+});
+ipcMain.handle('kryeo:set-asset-preference', (_event, input: unknown) => {
+  const preference = input as AssetPreference;
+  if (!preference || typeof preference.assetId !== 'string' || typeof preference.favourite !== 'boolean' || !Array.isArray(preference.collections)) {
+    throw new Error('Invalid asset preference.');
+  }
+  return workspace.setAssetPreference({
+    assetId: preference.assetId,
+    favourite: preference.favourite,
+    collections: preference.collections.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 20),
+  });
+});
+ipcMain.handle('kryeo:deliver-project', (_event, project: unknown, target: unknown) => {
+  if (typeof project !== 'string' || !project.trim() || target !== 'roblox') throw new Error('Invalid delivery request.');
+  return library.deliverProject(project.trim(), 'roblox');
+});
+ipcMain.handle('kryeo:cleanup-staging', () => workspace.runJob('cleanup', 'Clean staging files', {}, async (update) => {
+  await update(30, 'Inspecting old staging files');
+  const result = await library.cleanupStaging();
+  const now = new Date().toISOString();
+  return { ok: true, title: 'Clean staging files', output: `Removed ${result.removed} old staging file(s) from ${result.path}.`, startedAt: now, completedAt: now };
+}));
+ipcMain.handle('kryeo:reveal-path', async (_event, candidate: unknown) => {
+  if (typeof candidate !== 'string' || !await library.isAllowedPath(candidate)) return false;
+  shell.showItemInFolder(candidate);
+  return true;
+});
+ipcMain.handle('kryeo:place-asset', async (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid placement request.');
+  const request = input as PlaceAssetRequest;
+  if (
+    typeof request.path !== 'string'
+    || typeof request.displayName !== 'string'
+    || request.displayName.length > 180
+    || typeof request.targetSessionUuid !== 'string'
+    || request.targetSessionUuid.length > 180
+    || !['master', 'base', 'raster'].includes(String(request.layerKind))
+    || !await library.isAllowedAssetFile(request.path)
+  ) throw new Error('Invalid asset placement request.');
+  return workspace.runJob('place', `Place ${request.layerKind}: ${request.displayName}`, request, async (update, cancelled) => {
+    await update(12, 'Preparing an invisible source layer');
+    const prepared = await affinity.preparePlaceAsset(request);
+    if (!prepared.ok) return prepared;
+    const placement = preparedPlacement(prepared.output);
+    if (!placement.sourceSessionUuid || placement.targetNodeCount < 1) {
+      return { ...prepared, ok: false, output: 'Affinity did not identify the loaded asset document.', completedAt: new Date().toISOString() };
+    }
+    try {
+      if (cancelled()) throw new Error('Placement cancelled before the clipboard transfer.');
+      await update(40, 'Copying the prepared layer');
+      await transferPreparedLayer(placement.sourceSessionUuid, request.targetSessionUuid, placement.staged);
+    } catch (error) {
+      return { ...prepared, ok: false, output: error instanceof Error ? error.message : String(error), completedAt: new Date().toISOString() };
+    }
+    await update(70, 'Verifying the placed layer');
+    const verified = await affinity.verifyPlacedAsset(request, placement.targetNodeCount);
+    if (!verified.ok) return verified;
+    const recordPlacement = async () => {
+      const asset = await library.assetByPath(request.path);
+      if (!asset) return;
+      await workspace.recordPlacement({
+        assetId: asset.id,
+        assetPath: asset.path,
+        displayName: asset.displayName || asset.name,
+        version: asset.version,
+        layerKind: request.layerKind,
+        targetDocument: (await affinity.getDocumentContext()).title,
+        targetSessionUuid: request.targetSessionUuid,
+      });
+    };
+    if (!placement.staged) {
+      await recordPlacement();
+      return verified;
+    }
+    try {
+      await wait(5_000);
+      await clearClipboard();
+      await wait(750);
+      await focusAffinityDocument(placement.sourceSessionUuid);
+      await affinity.cleanupPreparedPlace(placement.sourceSessionUuid, true, placement.expected, placement.sourceVisibilities);
+      await focusAffinityDocument(request.targetSessionUuid);
+      await recordPlacement();
+      await update(96, 'Cleaning the hidden staging copy');
+      return verified;
+    } catch (error) {
+      return {
+        ...verified,
+        ok: false,
+        output: `The Master was placed, but Kryeo could not remove its hidden staging copy: ${error instanceof Error ? error.message : String(error)}`,
+        completedAt: new Date().toISOString(),
+      };
+    }
+  });
+});
+ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
+  activeComponentScans.get(event.sender.id)?.abort();
+  const scanController = new AbortController();
+  activeComponentScans.set(event.sender.id, scanController);
+  const scope = input === 'selection' ? 'selection' : 'document';
+  const directory = path.join(app.getPath('desktop'), 'Kryeo', 'ComponentScanStaging', randomUUID());
+  const progress = (phase: string, label: string, detail: string, value: number) => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('kryeo:scan-progress', { phase, label, detail, progress: value });
+    }
+  };
+  progress('preparing', 'Preparing scan', `Creating a clean workspace for the ${scope}.`, 4);
+  await resetScanDirectory(directory);
+  try {
+    let documentPreviewUrl = '';
+    if (scope === 'document') {
+      progress('capturing-context', 'Capturing document context', 'Rendering a compact overview so visual families can be judged in context.', 10);
+      try {
+        const previewPath = path.join(directory, 'document-context.png');
+        await affinity.exportAssistantPreview(previewPath, 'document');
+        const preview = await sharp(previewPath)
+          .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
+          .png({ compressionLevel: 8 })
+          .toBuffer();
+        documentPreviewUrl = `data:image/png;base64,${preview.toString('base64')}`;
+      } catch {
+        // Family analysis remains available when Affinity cannot render context.
+      }
+    }
+    progress('discovering-layers', 'Finding component layers', 'Walking spreads, nested groups, and independently editable visual layers.', 22);
+    const batch = await affinity.exportComponentCandidates(directory, scope);
+    if (batch.components.length === 0) throw new Error(`No component layers were found in the ${scope}.`);
+    const snapshot = await workspace.snapshot();
+    progress('local-analysis', 'Grouping visual families', `Comparing ${batch.components.length} candidates locally and collapsing exact duplicates.`, 43);
+    const scan = await buildComponentScan(batch, snapshot.componentDecisions);
+    const embeddingByHash = await localAi.embed(scan.components).catch(() => new Map<string, string>());
+    const embedded = scan.components.map((component) => ({
+      ...component,
+      visualEmbedding: embeddingByHash.get(component.visualHash) || component.visualEmbedding,
+    }));
+    const localSuggestions = await localAi.analyze(embedded).catch(() => []);
+    const suggestionByHash = new Map(localSuggestions.map((suggestion) => [suggestion.visualHash, suggestion]));
+    const locallyClassified = embedded.map((component) => {
+      const suggestion = suggestionByHash.get(component.visualHash);
+      if (!suggestion || component.remembered) return component;
+      return {
+        ...component,
+        familyName: suggestion.name || component.familyName,
+        assetType: suggestion.assetType,
+        role: suggestion.role,
+        aiSuggestedName: suggestion.name,
+        aiSuggestedType: suggestion.assetType,
+        aiSuggestedRole: suggestion.role,
+        aiSource: suggestion.source,
+        aiReason: suggestion.reason,
+        semanticHint: suggestion.semanticHint,
+        semanticType: suggestion.semanticType,
+        visualStructureType: suggestion.visualStructureType,
+        visualStructureConfidence: suggestion.visualStructureConfidence,
+        semanticConflict: suggestion.semanticConflict,
+        semanticConflictMessage: suggestion.semanticConflictMessage,
+        reviewCategory: suggestion.reviewCategory,
+        nameSource: suggestion.nameSource,
+        visualEmbedding: suggestion.embedding || component.visualEmbedding,
+        learnedFrom: suggestion.learnedFrom,
+        nearestLearnedSimilarity: suggestion.nearestLearnedSimilarity,
+        recommendedDiveMode: suggestion.learnedDiveMode || component.recommendedDiveMode,
+      };
+    });
+    const clustered = applyComponentIntelligence(locallyClassified);
+    const project = batch.sourceName || scan.documentTitle || 'General';
+    const families = buildVisualFamilies(clustered, snapshot.componentDecisions, project, scan.documentTitle);
+    await workspace.recordComponentInfluences(
+      families.filter((family) => family.approvedDecision).map((family) => family.fingerprint),
+    );
+    let reviewed = applyApprovedFamilies(clustered, families);
+    let reconciliation = undefined;
+    let hostedAnalysisAvailable = false;
+    let hostedAnalysisError = '';
+    try {
+      const unresolvedFamilies = families.filter((family) => !family.approvedDecision).length;
+      progress(
+        'hosted-analysis',
+        'Analysing new visual families',
+        unresolvedFamilies
+          ? `Qwen is reviewing ${unresolvedFamilies} uncached ${unresolvedFamilies === 1 ? 'family' : 'families'}. First-time scans can take a minute.`
+          : 'All visual families are already known; applying learned decisions.',
+        62,
+      );
+      const request = {
+        project,
+        documentTitle: scan.documentTitle,
+        documentSessionUuid: scan.documentSessionUuid,
+        families,
+        documentPreviewUrl,
+        instructions: snapshot.assistantMemories
+          .filter((memory) => memory.scope === 'global' || memory.project === project)
+          .map((memory) => memory.text),
+        projectKnowledge: snapshot.projectKnowledge.find((knowledge) => knowledge.project === project),
+      };
+      const hostedAnalyses: Awaited<ReturnType<typeof hostedAi.analyzeFamilies>>['analyses'] = [];
+      let cachedFamilies = 0;
+      let failedFamilies = 0;
+      const response = await hostedAi.analyzeFamiliesProgressively(request, (completed, total, partial) => {
+        hostedAnalyses.push(...partial.analyses);
+        cachedFamilies += partial.cached;
+        failedFamilies += partial.failures.length;
+        const partialComponents = applyComponentSceneContext(
+          applyComponentIntelligence(calibrateComponentConfidence(
+            applyHostedFamilyAnalyses(reviewed, families, hostedAnalyses),
+            snapshot.componentDecisions,
+          )),
+        );
+        progress(
+          'hosted-analysis',
+          'Analysing new visual families',
+          `Qwen completed ${completed} of ${total} ${total === 1 ? 'family' : 'families'}.`,
+          62 + Math.round((completed / Math.max(1, total)) * 18),
+        );
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('kryeo:scan-progress', {
+            phase: 'hosted-analysis',
+            label: 'Analysing new visual families',
+            detail: `Qwen completed ${completed} of ${total} ${total === 1 ? 'family' : 'families'}.`,
+            progress: 62 + Math.round((completed / Math.max(1, total)) * 18),
+            completedFamilies: completed,
+            totalFamilies: total,
+            cachedFamilies,
+            failedFamilies,
+            partialResult: { ...scan, components: partialComponents },
+          });
+        }
+      }, scanController.signal);
+      reviewed = calibrateComponentConfidence(
+        applyHostedFamilyAnalyses(reviewed, families, response.analyses),
+        snapshot.componentDecisions,
+      );
+      hostedAnalysisAvailable = response.analyses.length > 0;
+      if (!hostedAnalysisAvailable && response.failures.length) {
+        hostedAnalysisError = response.failures[0].message;
+      }
+      progress(
+        'reconciliation',
+        'Applying local consistency checks',
+        'Aligning hierarchy and family context without another model request.',
+        84,
+      );
+      // The family pass already receives sibling and hierarchy context. The final
+      // local context pass is enough for the normal scan and avoids another series
+      // of slow model calls over the same document.
+      reconciliation = {
+        summary: 'Local consistency pass applied after visual analysis.',
+        issues: [],
+      };
+    } catch (error) {
+      hostedAnalysisError = error instanceof Error ? error.message : String(error);
+      reviewed = applyHostedFamilyAnalyses(reviewed, families, []);
+    }
+    progress('finalizing', 'Preparing review', 'Applying hierarchy context and arranging the final component list.', 94);
+    reviewed = applyComponentSceneContext(applyComponentIntelligence(reviewed));
+    progress('complete', 'Scan complete', `${reviewed.length} proposed components are ready to review.`, 100);
+    return {
+      ...scan,
+      components: reviewed,
+      reconciliation,
+      hostedAnalysisAvailable,
+      hostedAnalysisError,
+    };
+  } catch (error) {
+    if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
+    throw error;
+  } finally {
+    if (activeComponentScans.get(event.sender.id) === scanController) activeComponentScans.delete(event.sender.id);
+    await removeScanDirectory(directory).catch(() => undefined);
+  }
+});
+
+ipcMain.handle('kryeo:cancel-component-scan', (event) => {
+  const controller = activeComponentScans.get(event.sender.id);
+  if (!controller) return false;
+  controller.abort();
+  activeComponentScans.delete(event.sender.id);
+  return true;
+});
+
+ipcMain.handle('kryeo:get-local-ai-status', () => localAi.status());
+ipcMain.handle('kryeo:get-hosted-ai-status', () => hostedAi.status());
+ipcMain.handle('kryeo:configure-hosted-ai', (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid Kryeo AI configuration.');
+  const configuration = input as Partial<HostedAiConfiguration>;
+  if (typeof configuration.endpoint !== 'string' || typeof configuration.token !== 'string') {
+    throw new Error('Invalid Kryeo AI configuration.');
+  }
+  return hostedAi.configure({ endpoint: configuration.endpoint, token: configuration.token });
+});
+ipcMain.handle('kryeo:get-assistant-status', () => assistant.status());
+ipcMain.handle('kryeo:install-assistant', (_event, input: unknown) => {
+  const pack: AssistantModelPack = input === 'balanced' ? 'balanced' : 'portable';
+  return assistant.install(pack);
+});
+ipcMain.handle('kryeo:chat-with-assistant', async (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid assistant request.');
+  const request = input as Partial<AssistantChatRequest>;
+  if (typeof request.message !== 'string' || !request.message.trim() || request.message.length > 1200 || typeof request.project !== 'string' || request.project.length > 100 || typeof request.sessionId !== 'string' || !request.sessionId || !request.document) {
+    throw new Error('Invalid assistant request.');
+  }
+  const safeRequest: AssistantChatRequest = {
+    project: request.project.trim() || 'General',
+    sessionId: request.sessionId,
+    message: request.message.trim(),
+    document: request.document,
+    useVision: request.useVision !== false,
+  };
+  const snapshot = await workspace.snapshot();
+  let visualDirectory = '';
+  let visualContext: AssistantVisualContext | undefined;
+  if (safeRequest.useVision && safeRequest.document.open && shouldUseAssistantVision(safeRequest.message)) {
+    visualDirectory = path.join(app.getPath('desktop'), 'Kryeo', 'ComponentScanStaging', `assistant-${randomUUID()}`);
+    await resetScanDirectory(visualDirectory);
+    try {
+      const rawPath = path.join(visualDirectory, 'document-source.png');
+      const preview = await affinity.exportAssistantPreview(rawPath, safeRequest.document.selectionCount > 0 ? 'selection' : 'document');
+      const status = await assistant.status();
+      const images = await buildAssistantVisualImages(rawPath, visualDirectory, status.profile);
+      visualContext = { images, documentTitle: preview.documentTitle, documentSessionUuid: preview.documentSessionUuid };
+    } catch {
+      visualContext = undefined;
+    }
+  }
+  let result;
+  try {
+    try {
+      result = await hostedAi.chat(safeRequest, snapshot, visualContext);
+    } catch {
+      result = await assistant.chat(safeRequest, snapshot, visualContext);
+    }
+  } finally {
+    if (visualDirectory) await removeScanDirectory(visualDirectory).catch(() => undefined);
+  }
+  const createdAt = new Date().toISOString();
+  const userMessage: AssistantMessage = { id: randomUUID(), project: safeRequest.project, sessionId: safeRequest.sessionId, role: 'user', text: safeRequest.message, createdAt };
+  const assistantMessage: AssistantMessage = { id: randomUUID(), project: safeRequest.project, sessionId: safeRequest.sessionId, role: 'assistant', text: result.text, visionUsed: result.visionUsed, createdAt: new Date().toISOString() };
+  const nextWorkspace = await workspace.saveAssistantExchange(userMessage, assistantMessage, result.memories);
+  return { message: assistantMessage, memories: result.memories, actions: result.actions, visionUsed: result.visionUsed, workspace: nextWorkspace };
+});
+ipcMain.handle('kryeo:forget-assistant-memory', (_event, id: unknown) => {
+  if (typeof id !== 'string' || id.length > 100) throw new Error('Invalid assistant memory.');
+  return workspace.forgetAssistantMemory(id);
+});
+ipcMain.handle('kryeo:clear-assistant-memories', () => workspace.clearAssistantMemories());
+ipcMain.handle('kryeo:set-assistant-memory-scope', (_event, id: unknown, scope: unknown, project: unknown) => {
+  if (typeof id !== 'string' || (scope !== 'project' && scope !== 'global') || typeof project !== 'string' || project.length > 100) throw new Error('Invalid assistant memory scope.');
+  return workspace.setAssistantMemoryScope(id, scope, project);
+});
+ipcMain.handle('kryeo:create-assistant-session', (_event, project: unknown) => {
+  if (typeof project !== 'string' || project.length > 100) throw new Error('Invalid project name.');
+  return workspace.createAssistantSession(project);
+});
+ipcMain.handle('kryeo:update-assistant-session', (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid conversation update.');
+  const request = input as { id?: unknown; title?: unknown; pinned?: unknown; archived?: unknown };
+  if (typeof request.id !== 'string') throw new Error('Invalid conversation update.');
+  return workspace.updateAssistantSession(request.id, {
+    ...(typeof request.title === 'string' ? { title: request.title } : {}),
+    ...(typeof request.pinned === 'boolean' ? { pinned: request.pinned } : {}),
+    ...(typeof request.archived === 'boolean' ? { archived: request.archived } : {}),
+  });
+});
+ipcMain.handle('kryeo:delete-assistant-session', (_event, id: unknown) => {
+  if (typeof id !== 'string') throw new Error('Invalid conversation.');
+  return workspace.deleteAssistantSession(id);
+});
+ipcMain.handle('kryeo:export-assistant-session', async (_event, id: unknown) => {
+  if (typeof id !== 'string') throw new Error('Invalid conversation.');
+  const record = await workspace.assistantSession(id);
+  if (!record) throw new Error('Conversation was not found.');
+  const parent = BrowserWindow.getFocusedWindow();
+  const saveOptions = {
+    title: 'Export Kryeo conversation',
+    defaultPath: `${record.session.title.replace(/[<>:"/\\|?*]/g, '-')} - Kryeo.md`,
+    filters: [{ name: 'Markdown', extensions: ['md'] }],
+  };
+  const result = parent ? await dialog.showSaveDialog(parent, saveOptions) : await dialog.showSaveDialog(saveOptions);
+  if (result.canceled || !result.filePath) return false;
+  const markdown = [`# ${record.session.title}`, '', `Project: ${record.session.project}`, `Exported: ${new Date().toISOString()}`, '']
+    .concat(record.messages.flatMap((message) => [`## ${message.role === 'user' ? 'You' : 'Kryeo'}`, '', message.text, '']))
+    .join('\n');
+  await fs.writeFile(result.filePath, `${markdown}\n`, 'utf8');
+  return true;
+});
+ipcMain.handle('kryeo:import-assistant-session', async (_event, project: unknown) => {
+  if (typeof project !== 'string' || project.length > 100) throw new Error('Invalid project name.');
+  const parent = BrowserWindow.getFocusedWindow();
+  const importOptions: OpenDialogOptions = { title: 'Import Kryeo conversation', properties: ['openFile'], filters: [{ name: 'Markdown', extensions: ['md'] }] };
+  const result = parent ? await dialog.showOpenDialog(parent, importOptions) : await dialog.showOpenDialog(importOptions);
+  if (result.canceled || !result.filePaths[0]) return workspace.snapshot();
+  const markdown = await fs.readFile(result.filePaths[0], 'utf8');
+  const title = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || path.basename(result.filePaths[0], path.extname(result.filePaths[0]));
+  const parts = [...markdown.matchAll(/^##\s+(You|Kryeo)\s*\r?\n+([\s\S]*?)(?=^##\s+|\s*$)/gim)];
+  const messages = parts.map(([_, role, text]) => ({
+    role: role === 'You' ? 'user' : 'assistant' as const,
+    text: text.trim(),
+    createdAt: new Date().toISOString(),
+    id: randomUUID(),
+    project,
+    sessionId: randomUUID(),
+  })) as AssistantMessage[];
+  if (!messages.length) return workspace.snapshot();
+  const sessionId = randomUUID();
+  const session = { id: sessionId, project, title, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), pinned: false, archived: false };
+  return await workspace.importAssistantSession(project, title, messages);
+});
+
+function createApp(): void {
+  createWindow();
+  void affinity.reconnect();
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+}
+
+app.whenReady().then(createApp);
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+app.on('before-quit', () => {
+  void affinity.close();
+});

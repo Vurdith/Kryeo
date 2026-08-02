@@ -1,0 +1,1383 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import type {
+  AffinityStatus,
+  ConfiguredToolRequest,
+  ComponentBounds,
+  DocumentContext,
+  KryeoTool,
+  PlaceAssetRequest,
+  ScriptRunResult,
+  SaveAssetRequest,
+  ToolCategory,
+  ApplyComponentOrganizationRequest,
+  ApplyLayerNamesRequest,
+} from '../shared/types';
+
+export interface AffinityComponentExport {
+  index: number;
+  name: string;
+  affinityType: string;
+  bounds: ComponentBounds;
+  childCount: number;
+  descendantCount: number;
+  textCount: number;
+  semanticNames: string[];
+  path: string;
+  hierarchyKey: string;
+  parentHierarchyKey: string;
+  hierarchyDepth: number;
+  previewFallback?: boolean;
+  members: Array<{ path: number[]; name: string; affinityType: string; bounds: ComponentBounds }>;
+  grouping: 'single' | 'existing-group' | 'overlap';
+}
+
+export interface AffinityComponentExportBatch {
+  documentTitle: string;
+  documentSessionUuid: string;
+  sourceName: string;
+  components: AffinityComponentExport[];
+}
+
+export interface AffinityAssistantPreview {
+  path: string;
+  documentTitle: string;
+  documentSessionUuid: string;
+}
+
+const SERVER_URL = 'http://localhost:6767/sse';
+const CONNECT_TIMEOUT_MS = 3500;
+const REQUEST_TIMEOUT_MS = 6500;
+
+type TextContent = { type: 'text'; text: string };
+
+function textFromResult(result: { content?: unknown[] }): string {
+  return (result.content ?? [])
+    .filter((item): item is TextContent => {
+      if (!item || typeof item !== 'object') return false;
+      const candidate = item as Partial<TextContent>;
+      return candidate.type === 'text' && typeof candidate.text === 'string';
+    })
+    .map((item) => item.text)
+    .join('\n')
+    .trim();
+}
+
+function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error('Affinity did not respond in time.')), milliseconds);
+    }),
+  ]);
+}
+
+function versionParts(value: string): number[] {
+  return value.split('.').map((part) => Number(part) || 0);
+}
+
+function compareVersions(left: string, right: string): number {
+  const a = versionParts(left);
+  const b = versionParts(right);
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+function toolFromTitle(title: string): KryeoTool {
+  const versionMatch = title.match(/\bv(\d+(?:\.\d+)*)\b/i);
+  const version = versionMatch?.[1] ?? '1';
+  const baseTitle = title.replace(/\s+v\d+(?:\.\d+)*\s*$/i, '').trim();
+  let category: ToolCategory = 'Utilities';
+  let icon: KryeoTool['icon'] = 'script';
+  let description = 'Run this Affinity workflow against the current document.';
+  let displayName = baseTitle;
+  let featured = false;
+
+  if (/asset library\s*-\s*save/i.test(title)) {
+    category = 'Assets';
+    icon = 'save';
+    displayName = 'Save asset';
+    description = 'Package the current selection as a centred, versioned asset document.';
+    featured = true;
+  } else if (/asset library\s*-\s*load/i.test(title)) {
+    category = 'Assets';
+    icon = 'folder-open';
+    displayName = 'Load asset';
+    description = 'Load a saved asset document from your indexed library.';
+    featured = true;
+  } else if (/asset library\s*-\s*update/i.test(title)) {
+    category = 'Assets';
+    icon = 'refresh';
+    displayName = 'Update asset';
+    description = 'Create the next version while preserving the asset structure.';
+  } else if (/asset library\s*-\s*export/i.test(title)) {
+    category = 'Assets';
+    icon = 'package';
+    displayName = 'Export asset';
+    description = 'Export the prepared raster version from an asset document.';
+  } else if (/asset library\s*-\s*setup/i.test(title)) {
+    category = 'Utilities';
+    icon = 'script';
+    displayName = 'Set up library';
+    description = 'Create or refresh the Asset Library folders and support files.';
+  } else if (/pixel helper/i.test(title)) {
+    category = 'Pixel tools';
+    icon = 'wand';
+    displayName = baseTitle.replace(/^Pixel Helper\s*-\s*/i, '');
+    description = /shade/i.test(title)
+      ? 'Apply controlled pixel shading to the selected artwork.'
+      : 'Run a pixel-focused Affinity workflow.';
+    featured = /hand shade/i.test(title);
+  } else if (/mirror|symmetr|corner mirror/i.test(title)) {
+    category = 'Symmetry';
+    icon = 'symmetry';
+    displayName = baseTitle
+      .replace(/^Mirror Helper\s*-\s*/i, '')
+      .replace(/^Corner Mirror\s*-\s*/i, '');
+    description = 'Align or transform selected artwork for mirrored construction.';
+  }
+
+  const id = baseTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return { id, title, displayName, description, category, version, icon, featured };
+}
+
+function newestTools(titles: string[]): KryeoTool[] {
+  const newest = new Map<string, KryeoTool>();
+  for (const title of titles) {
+    const tool = toolFromTitle(title);
+    const current = newest.get(tool.id);
+    if (!current || compareVersions(tool.version, current.version) > 0) newest.set(tool.id, tool);
+  }
+  return [...newest.values()].sort((left, right) => {
+    if (left.category !== right.category) return left.category.localeCompare(right.category);
+    if (left.featured !== right.featured) return left.featured ? -1 : 1;
+    return left.displayName.localeCompare(right.displayName);
+  });
+}
+
+function replaceModalBlock(code: string, startNeedle: string, injected: string): string {
+  const start = code.indexOf(startNeedle);
+  if (start < 0) throw new Error('The installed script no longer matches Kryeo\'s workflow adapter.');
+  const modalNeedle = 'if (dlg.runModal().value != DialogResult.Ok) return;';
+  const alternateNeedle = 'if (dialogResult.value != DialogResult.Ok) return;';
+  let modal = code.indexOf(modalNeedle, start);
+  let endLength = modalNeedle.length;
+  if (modal < 0) {
+    modal = code.indexOf(alternateNeedle, start);
+    endLength = alternateNeedle.length;
+  }
+  if (modal < 0) throw new Error('Could not locate the installed script dialog boundary.');
+  return code.slice(0, start) + injected + code.slice(modal + endLength);
+}
+
+function instrumentAlerts(code: string): string {
+  const replaced = code.replace(/\bapp\.alert\(/g, 'kryeoAlert(');
+  return replaced.replace(
+    /(['"]use strict['"];?)/,
+    `$1\nfunction kryeoAlert(message, heading) { console.log('KRYEO_ALERT:' + JSON.stringify({ title: heading || 'Affinity', message: String(message) })); }`,
+  );
+}
+
+export class AffinityService {
+  private client: Client | null = null;
+  private transport: SSEClientTransport | null = null;
+  private connecting: Promise<void> | null = null;
+  private status: AffinityStatus = {
+    state: 'disconnected',
+    message: 'Affinity is not connected.',
+    serverUrl: SERVER_URL,
+    checkedAt: new Date().toISOString(),
+  };
+
+  getStatus(): AffinityStatus {
+    return this.status;
+  }
+
+  private setStatus(state: AffinityStatus['state'], message: string): void {
+    this.status = { state, message, serverUrl: SERVER_URL, checkedAt: new Date().toISOString() };
+  }
+
+  private markDisconnected(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const transport = this.transport;
+    this.client = null;
+    this.transport = null;
+    this.setStatus('error', `Affinity connection lost: ${message}`);
+    if (transport) {
+      void withTimeout(transport.close(), 800).catch(() => undefined);
+    }
+  }
+
+  private async callTool(name: string, args: Record<string, unknown>, timeout = REQUEST_TIMEOUT_MS): Promise<{
+    content?: unknown[];
+    isError?: boolean;
+  }> {
+    const client = this.client;
+    if (!client) throw new Error('Affinity is not connected.');
+    try {
+      return await withTimeout(
+        client.request(
+          { method: 'tools/call', params: { name, arguments: args } },
+          CallToolResultSchema,
+        ),
+        timeout,
+      );
+    } catch (error) {
+      if (this.client === client) this.markDisconnected(error);
+      throw error;
+    }
+  }
+
+  async connect(force = false): Promise<void> {
+    if (this.client && !force) return;
+    if (this.connecting) return this.connecting;
+
+    this.connecting = (async () => {
+      this.setStatus('connecting', 'Connecting to Affinity...');
+      await this.close();
+
+      try {
+        const client = new Client({ name: 'kryeo-desktop', version: '0.1.0' });
+        const transport = new SSEClientTransport(new URL(SERVER_URL));
+        transport.onerror = () => {
+          if (this.transport === transport) this.markDisconnected(new Error('The Affinity connection was interrupted.'));
+        };
+        await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS);
+        this.client = client;
+        this.transport = transport;
+
+        const preamble = await this.callTool('read_sdk_documentation_topic', { filename: 'preamble' });
+        if (preamble.isError) throw new Error('Affinity rejected the SDK preamble request.');
+        this.setStatus('connected', 'Affinity is connected and ready.');
+      } catch (error) {
+        await this.close();
+        const message = error instanceof Error ? error.message : String(error);
+        this.setStatus('error', message);
+        throw error;
+      }
+    })();
+
+    try {
+      await this.connecting;
+    } finally {
+      this.connecting = null;
+    }
+  }
+
+  async reconnect(): Promise<AffinityStatus> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.connect(true);
+        return this.status;
+      } catch (error) {
+        lastError = error;
+        await this.close();
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    const message = lastError instanceof Error ? lastError.message : String(lastError || 'Affinity did not respond.');
+    this.setStatus('error', `Affinity could not reconnect after two attempts: ${message}`);
+    return this.status;
+  }
+
+  async listTools(): Promise<KryeoTool[]> {
+    await this.connect();
+    try {
+      const result = await this.callTool('list_library_scripts', {});
+      const text = textFromResult(result);
+      if (result.isError || !text) throw new Error('Affinity returned no scripts.');
+      const titles = text.split(',').map((title) => title.trim()).filter(Boolean);
+      const tools = newestTools(titles);
+      tools.push({
+        id: 'place-asset',
+        title: 'Kryeo - Place Asset',
+        displayName: 'Place asset',
+        description: 'Place a saved Master, Base, or Raster layer into the active document.',
+        category: 'Assets',
+        version: '1',
+        icon: 'package',
+        featured: true,
+      });
+      return tools;
+    } catch (error) {
+      this.client = null;
+      throw error;
+    }
+  }
+
+  async runTool(title: string): Promise<ScriptRunResult> {
+    const startedAt = new Date().toISOString();
+    await this.connect();
+    try {
+      const scriptResult = await this.callTool('read_library_script', { title });
+      const code = textFromResult(scriptResult);
+      if (scriptResult.isError || !code) throw new Error(`Could not read "${title}" from Affinity.`);
+
+      const runResult = await this.callTool('execute_script', { script: code });
+      const output = textFromResult(runResult);
+      const failed = runResult.isError || /^ERROR:/im.test(output);
+      return {
+        ok: !failed,
+        title,
+        output: output || (failed ? 'Affinity reported an error.' : 'Workflow started in Affinity.'),
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        title,
+        output: message,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  async openAsset(assetPath: string, displayName: string): Promise<ScriptRunResult> {
+    const startedAt = new Date().toISOString();
+    const title = `Open asset: ${displayName}`;
+    await this.connect();
+    try {
+      const script = `
+'use strict';
+const { Document } = require('/document');
+const assetPath = ${JSON.stringify(assetPath)};
+Document.load(assetPath);
+console.log('KRYEO_ASSET_OPENED:' + assetPath);
+`;
+      const result = await this.callTool('execute_script', { script });
+      const output = textFromResult(result);
+      const failed = result.isError || /^ERROR:/im.test(output);
+      return {
+        ok: !failed,
+        title,
+        output: failed ? (output || 'Affinity could not open the asset.') : `Opened ${displayName} in Affinity.`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        title,
+        output: error instanceof Error ? error.message : String(error),
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  async saveAsset(request: SaveAssetRequest): Promise<ScriptRunResult> {
+    const startedAt = new Date().toISOString();
+    const title = `Save asset: ${request.displayName}`;
+    await this.connect();
+
+    try {
+      const libraryResult = await this.callTool('list_library_scripts', {});
+      const saveTitles = textFromResult(libraryResult)
+        .split(',')
+        .map((value) => value.trim())
+        .filter((value) => /asset library\s*-\s*save\s+v/i.test(value))
+        .sort((left, right) => {
+          const leftVersion = left.match(/\bv(\d+(?:\.\d+)*)/i)?.[1] ?? '0';
+          const rightVersion = right.match(/\bv(\d+(?:\.\d+)*)/i)?.[1] ?? '0';
+          return compareVersions(rightVersion, leftVersion);
+        });
+      const saveTitle = saveTitles[0];
+      if (!saveTitle) throw new Error('No Asset Library Save script is installed in Affinity.');
+
+      const scriptResult = await this.callTool('read_library_script', { title: saveTitle });
+      let code = textFromResult(scriptResult);
+      if (scriptResult.isError || !code) throw new Error(`Could not read "${saveTitle}" from Affinity.`);
+
+      const dialogStart = code.indexOf('const dlg = buildDialog(defaultName, {');
+      const saveStart = code.indexOf('// FIX (v4.24)', dialogStart);
+      if (dialogStart < 0 || saveStart < 0) {
+        throw new Error(`${saveTitle} is not compatible with Kryeo's guided save workflow.`);
+      }
+
+      const value = (input: unknown) => JSON.stringify(input);
+      const injectedDialog = `const dlg = {
+  displayName: { text: ${value(request.displayName)} },
+  codeName: { text: ${value(request.codeName)} },
+  project: { text: ${value(request.project)} },
+  category: { text: ${value(request.category)} },
+  subcategory: { text: ${value(request.subcategory)} },
+  tags: { text: ${value(request.tags)} },
+  notes: { text: ${value(request.notes)} },
+  batch: { value: ${value(request.batch)} },
+  update: { value: ${value(request.update)} },
+  baseCopy: { value: ${value(request.baseCopy)} },
+  rasterCopy: { value: ${value(request.rasterCopy)} },
+};
+
+const baseConfig = {
+  displayName: dlg.displayName.text,
+  codeName: dlg.codeName.text,
+  name: dlg.codeName.text,
+  project: dlg.project.text,
+  category: dlg.category.text,
+  subcategory: effectiveSubcategory(dlg.category.text, dlg.subcategory.text),
+  tags: dlg.tags.text.split(',').map((tag) => tag.trim()).filter(Boolean),
+  notes: dlg.notes.text || '',
+  update: dlg.update.value,
+  baseCopy: dlg.baseCopy.value,
+  rasterCopy: dlg.rasterCopy.value,
+};
+
+`;
+      code = code.slice(0, dialogStart) + injectedDialog + code.slice(saveStart);
+      code = code.replace(/\.AssetLibraryStaging/g, 'KryeoStaging');
+      code = code.replace(/\bapp\.alert\(/g, 'kryeoAlert(');
+      code = code.replace(
+        /(['"]use strict['"];?)/,
+        `$1\nfunction kryeoAlert(message, heading) { console.log('KRYEO_ALERT:' + JSON.stringify({ title: heading || 'Affinity', message: String(message) })); }`,
+      );
+      code = code.replace(
+        'showSaveConfirmation(saved);',
+        `console.log('KRYEO_SAVE_RESULT:' + JSON.stringify(saved));`,
+      );
+
+      const runResult = await this.callTool('execute_script', { script: code }, 240_000);
+      const output = textFromResult(runResult);
+      const errorMarker = 'KRYEO_ALERT:';
+      const resultMarker = 'KRYEO_SAVE_RESULT:';
+      const resultIndex = output.lastIndexOf(resultMarker);
+
+      if (runResult.isError || resultIndex < 0) {
+        const alertIndex = output.lastIndexOf(errorMarker);
+        if (alertIndex >= 0) {
+          const alertLine = output.slice(alertIndex + errorMarker.length).split(/\r?\n/, 1)[0];
+          try {
+            const alert = JSON.parse(alertLine) as { message?: string };
+            throw new Error(alert.message || 'Affinity could not save the asset.');
+          } catch (error) {
+            if (error instanceof SyntaxError) throw new Error('Affinity could not save the asset.');
+            throw error;
+          }
+        }
+        throw new Error(output || 'Affinity did not return a save confirmation.');
+      }
+
+      const resultLine = output.slice(resultIndex + resultMarker.length).split(/\r?\n/, 1)[0];
+      const records = JSON.parse(resultLine) as Array<{ displayName?: string; version?: number; path?: string }>;
+      const record = records[0];
+      return {
+        ok: true,
+        title,
+        output: record
+          ? `Saved ${record.displayName || request.displayName} v${record.version || 1} to ${record.path || 'the asset library'}.`
+          : `Saved ${request.displayName} to the asset library.`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        title,
+        output: error instanceof Error ? error.message : String(error),
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  async runConfiguredTool(request: ConfiguredToolRequest): Promise<ScriptRunResult> {
+    const startedAt = new Date().toISOString();
+    await this.connect();
+    try {
+      const scriptResult = await this.callTool('read_library_script', { title: request.title });
+      let code = textFromResult(scriptResult);
+      if (scriptResult.isError || !code) throw new Error(`Could not read "${request.title}" from Affinity.`);
+      const value = (key: string, fallback: string | number | boolean) => JSON.stringify(request.values[key] ?? fallback);
+
+      if (request.kind === 'export') {
+        code = replaceModalBlock(code, "const dlg = Dialog.create('Export Project Assets');", `const kryeoProject = ${value('project', 'Default Project')};
+const dlg = {
+  project: { selectedIndex: Math.max(0, projects.indexOf(kryeoProject)) },
+  preset: { text: ${value('preset', 'PNG (Pixel)')} },
+  latest: { value: ${value('latest', true)} },
+  stable: { value: ${value('stable', true)} },
+};`);
+      } else if (request.kind === 'setup') {
+        code = replaceModalBlock(code, 'const dlg = buildDialog(defaults);', `const dlg = {
+  home: { text: ${value('home', '')} },
+  assets: { text: ${value('assets', '')} },
+  exports: { text: ${value('exports', '')} },
+  controlPanel: { value: ${value('controlPanel', true)} },
+  openers: { value: ${value('openers', true)} },
+  overwrite: { value: ${value('overwrite', true)} },
+};`);
+      } else if (request.kind === 'update') {
+        code = replaceModalBlock(code, 'const dlg = buildUpdateDialog(doc, root, globalIndex, currentRecord);', `const dlg = {
+  rebuildBase: { value: ${value('rebuildBase', true)} },
+  rebuildRaster: { value: ${value('rebuildRaster', true)} },
+  defaultVisibility: { value: ${value('defaultVisibility', true)} },
+  changeNote: { text: ${value('changeNote', '')} },
+};`);
+      } else if (request.kind === 'shade') {
+        code = replaceModalBlock(code, "const dlg = Dialog.create('Pixel Helper - Hand Shade');", `const dlg = {
+  light: { selectedIndex: ${value('light', 0)} },
+  mode: { selectedIndex: ${value('mode', 0)} },
+  style: { selectedIndex: ${value('style', 23)} },
+  scope: { selectedIndex: ${value('scope', 0)} },
+  fadeMode: { selectedIndex: ${value('fadeMode', 0)} },
+  palette: { selectedIndex: ${value('palette', 1)} },
+  detailScale: { selectedIndex: ${value('detailScale', 1)} },
+  affect: { selectedIndex: ${value('affect', 0)} },
+  outlineMode: { selectedIndex: ${value('outlineMode', 1)} },
+  protectOutlines: { value: ${value('protectOutlines', false)} },
+  protectHighlights: { value: ${value('protectHighlights', false)} },
+  strength: { selectedIndex: ${value('strength', 1)} },
+  texture: { selectedIndex: ${value('texture', 1)} },
+  highlightVariation: { selectedIndex: ${value('highlightVariation', 1)} },
+  placement: { selectedIndex: ${value('placement', 0)} },
+  dither: { value: ${value('dither', false)} },
+};`);
+      }
+
+      code = instrumentAlerts(code);
+      const runResult = await this.callTool('execute_script', { script: code }, 240_000);
+      const output = textFromResult(runResult);
+      const alerts = [...output.matchAll(/KRYEO_ALERT:(\{[^\r\n]+\})/g)].map((match) => {
+        try { return JSON.parse(match[1]) as { title?: string; message?: string }; } catch { return {}; }
+      });
+      const failure = alerts.find((alert) => /fail|error/i.test(alert.title || ''));
+      if (runResult.isError || failure) throw new Error(failure?.message || output || 'Affinity could not complete the workflow.');
+      const finalAlert = alerts.at(-1);
+      return {
+        ok: true,
+        title: request.title,
+        output: finalAlert?.message || `${request.title} completed in Affinity.`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        title: request.title,
+        output: error instanceof Error ? error.message : String(error),
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  async preparePlaceAsset(request: PlaceAssetRequest): Promise<ScriptRunResult> {
+    const startedAt = new Date().toISOString();
+    const title = `Place ${request.layerKind}: ${request.displayName}`;
+    await this.connect();
+    try {
+      const script = `
+'use strict';
+const { Document } = require('/document');
+const { Selection } = require('/selections');
+const { DocumentCommand } = require('/commands');
+const targetSessionUuid = ${JSON.stringify(request.targetSessionUuid)};
+const assetPath = ${JSON.stringify(request.path)};
+const requestedKind = ${JSON.stringify(request.layerKind)};
+const target = Document.current;
+if (!target || String(target.sessionUuid || '') !== targetSessionUuid) {
+  throw new Error('The active document changed before placement started.');
+}
+function countNodes(doc) {
+  let count = 0;
+  function visit(node) {
+    count += 1;
+    try { for (const child of node.children) visit(child); } catch (_) {}
+  }
+  for (const spread of doc.spreads) for (const node of spread.children) visit(node);
+  return count;
+}
+const targetNodeCount = countNodes(target);
+const assetDoc = Document.load(assetPath);
+const expected = '[' + requestedKind.charAt(0).toUpperCase() + requestedKind.slice(1) + ']';
+const matches = [];
+for (const spread of assetDoc.spreads) {
+  for (const node of spread.children) {
+    const name = String(node.userDescription || node.description || node.defaultDescription || '');
+    if (name.indexOf(expected) === 0) matches.push(node);
+  }
+}
+if (matches.length === 0) throw new Error('This asset does not contain a ' + expected + ' layer.');
+const sourceVisibilities = matches.map((node) => Boolean(node.isVisible));
+let copyNodes = matches;
+let staged = false;
+if (requestedKind === 'master') {
+  const sourceSelection = Selection.create(assetDoc, matches, true);
+  assetDoc.executeCommand(DocumentCommand.createSetVisibility(sourceSelection, false));
+  const duplicates = [];
+  for (const node of matches) {
+    const duplicate = node.duplicate();
+    if (!duplicate) throw new Error('Affinity could not create a hidden staging copy for ' + expected + '.');
+    duplicates.push(duplicate);
+  }
+  const duplicateSelection = Selection.create(assetDoc, duplicates, true);
+  assetDoc.executeCommand(DocumentCommand.createSetVisibility(duplicateSelection, false));
+  copyNodes = duplicates;
+  staged = true;
+} else {
+  assetDoc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(assetDoc, matches, true), true));
+}
+const selection = Selection.create(assetDoc, copyNodes, true);
+assetDoc.selection = selection;
+console.log('KRYEO_PLACE_READY:' + JSON.stringify({
+  count: copyNodes.length,
+  expected,
+  sourceSessionUuid: String(assetDoc.sessionUuid || ''),
+  sourceVisibilities,
+  staged,
+  targetNodeCount,
+  targetSessionUuid,
+}));
+`;
+      const result = await this.callTool('execute_script', { script }, 60_000);
+      const output = textFromResult(result);
+      if (result.isError || output.lastIndexOf('KRYEO_PLACE_READY:') < 0) {
+        throw new Error(output || 'Affinity could not prepare the asset layer.');
+      }
+      return { ok: true, title, output, startedAt, completedAt: new Date().toISOString() };
+    } catch (error) {
+      return { ok: false, title, output: error instanceof Error ? error.message : String(error), startedAt, completedAt: new Date().toISOString() };
+    }
+  }
+
+  async cleanupPreparedPlace(
+    sourceSessionUuid: string,
+    staged: boolean,
+    expected: string,
+    sourceVisibilities: boolean[],
+  ): Promise<void> {
+    if (!staged) return;
+    await this.connect();
+    const script = `
+'use strict';
+const { Document } = require('/document');
+const { Selection } = require('/selections');
+const { DocumentCommand } = require('/commands');
+const expectedSessionUuid = ${JSON.stringify(sourceSessionUuid)};
+const expectedPrefix = ${JSON.stringify(expected)};
+const sourceVisibilities = ${JSON.stringify(sourceVisibilities)};
+const doc = Document.current;
+if (!doc || String(doc.sessionUuid || '') !== expectedSessionUuid) {
+  throw new Error('Affinity changed documents before the temporary Place copy was cleaned up.');
+}
+const staging = [];
+try { for (const node of doc.selection.nodes) staging.push(node); } catch (_) {}
+if (staging.length === 0) throw new Error('Affinity lost the temporary Place copy before cleanup.');
+const stagingSelection = Selection.create(doc, staging, true);
+doc.executeCommand(DocumentCommand.createSetVisibility(stagingSelection, false));
+doc.deleteSelection(stagingSelection);
+const originals = [];
+for (const spread of doc.spreads) {
+  for (const node of spread.children) {
+    const name = String(node.userDescription || node.description || node.defaultDescription || '');
+    if (name.indexOf(expectedPrefix) === 0) originals.push(node);
+  }
+}
+for (let index = 0; index < originals.length; index += 1) {
+  const shouldShow = index < sourceVisibilities.length ? sourceVisibilities[index] : false;
+  doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, originals[index], true), shouldShow));
+}
+doc.selection = Selection.create(doc, originals, true);
+console.log('KRYEO_PLACE_CLEANED:' + JSON.stringify({ count: staging.length, restored: originals.length, sourceSessionUuid: expectedSessionUuid }));
+`;
+    const result = await this.callTool('execute_script', { script });
+    const output = textFromResult(result);
+    if (result.isError || output.lastIndexOf('KRYEO_PLACE_CLEANED:') < 0) {
+      throw new Error(output || 'Affinity could not remove the temporary Place copy.');
+    }
+  }
+
+  async verifyPlacedAsset(request: PlaceAssetRequest, baselineNodeCount: number): Promise<ScriptRunResult> {
+    const startedAt = new Date().toISOString();
+    const title = `Place ${request.layerKind}: ${request.displayName}`;
+    await this.connect();
+    try {
+      const script = `
+'use strict';
+const { Document } = require('/document');
+const { Selection } = require('/selections');
+const { DocumentCommand } = require('/commands');
+const doc = Document.current;
+const expectedSessionUuid = ${JSON.stringify(request.targetSessionUuid)};
+if (!doc || String(doc.sessionUuid || '') !== expectedSessionUuid) {
+  throw new Error('Affinity did not return to the original document after copying.');
+}
+let count = 0;
+const names = [];
+try { count = doc.selection ? doc.selection.length : 0; } catch (_) {}
+if (count === 0) throw new Error('Affinity pasted the asset but did not select the completed copy.');
+const placed = [];
+try { for (const node of doc.selection.nodes) placed.push(node); } catch (_) {}
+if (placed.length === 0) throw new Error('Affinity could not resolve the completed pasted copy.');
+doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, placed, true), true));
+try {
+  for (const node of doc.selection.nodes) names.push(String(node.userDescription || node.description || node.defaultDescription || ''));
+} catch (_) {}
+let nodeCount = 0;
+function visit(node) {
+  nodeCount += 1;
+  try { for (const child of node.children) visit(child); } catch (_) {}
+}
+for (const spread of doc.spreads) for (const node of spread.children) visit(node);
+if (nodeCount <= ${JSON.stringify(baselineNodeCount)}) {
+  throw new Error('Affinity did not add the requested asset to the working document.');
+}
+console.log('KRYEO_PLACE_COMPLETE:' + JSON.stringify({ count, names, nodeCount, title: doc.title || 'Untitled' }));
+`;
+      const result = await this.callTool('execute_script', { script });
+      const output = textFromResult(result);
+      if (result.isError || output.lastIndexOf('KRYEO_PLACE_COMPLETE:') < 0) {
+        throw new Error(output || 'Affinity did not confirm the placed layer.');
+      }
+      return {
+        ok: true,
+        title,
+        output: `Placed the ${request.layerKind} version of ${request.displayName} into the active document.`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      return { ok: false, title, output: error instanceof Error ? error.message : String(error), startedAt, completedAt: new Date().toISOString() };
+    }
+  }
+
+  async getDocumentContext(): Promise<DocumentContext> {
+    await this.connect();
+    const probe = `
+const { Document } = require('/document');
+const doc = Document.current;
+if (!doc) {
+  console.log('KRYEO_CONTEXT:' + JSON.stringify({ open: false, title: '', path: '', selectionCount: 0, selectionNames: [], sessionUuid: '' }));
+} else {
+  let selectionCount = 0;
+  const selectionNames = [];
+  try { selectionCount = doc.selection ? doc.selection.length : 0; } catch (_) {}
+  try {
+    for (const node of doc.selection.nodes) {
+      selectionNames.push(String(node.description || node.userDescription || node.defaultDescription || 'Unnamed layer'));
+      if (selectionNames.length >= 20) break;
+    }
+  } catch (_) {}
+  console.log('KRYEO_CONTEXT:' + JSON.stringify({
+    open: true,
+    title: doc.title || 'Untitled',
+    path: doc.path || '',
+    selectionCount,
+    selectionNames,
+    sessionUuid: doc.sessionUuid || '',
+  }));
+}`;
+    const result = await this.callTool('execute_script', { script: probe });
+    const text = textFromResult(result);
+    const marker = 'KRYEO_CONTEXT:';
+    const index = text.lastIndexOf(marker);
+    if (result.isError || index < 0) {
+      throw new Error(text || 'Could not inspect the active Affinity document.');
+    }
+    const line = text.slice(index + marker.length).split(/\r?\n/, 1)[0];
+    return JSON.parse(line) as DocumentContext;
+  }
+
+  async exportAssistantPreview(outputPath: string, scope: 'document' | 'selection' = 'document'): Promise<AffinityAssistantPreview> {
+    await this.connect();
+    const script = `
+'use strict';
+const { Document, FileExportArea, FileExportOptions } = require('/document');
+const { Selection } = require('/selections');
+const doc = Document.current;
+if (!doc) throw new Error('Open an Affinity document before asking Kryeo to inspect it.');
+const previewScope = ${JSON.stringify(scope)};
+const original = [];
+for (const node of doc.selection.nodes) original.push(node);
+const previewNodes = [];
+if (previewScope === 'selection' && original.length > 0) {
+  for (const node of original) previewNodes.push(node);
+} else {
+  for (const spread of doc.spreads) {
+    for (const node of spread.children) {
+      let visible = true;
+      try { visible = Boolean(node.isVisibleInDomain); } catch (_) {}
+      if (visible) previewNodes.push(node);
+    }
+  }
+}
+if (previewNodes.length === 0) throw new Error('The active document has no visible layers to inspect.');
+const selection = Selection.create(doc, previewNodes, true);
+const options = FileExportOptions.createWithPresetName('PNG');
+let success = false;
+try {
+  doc.selection = selection;
+  const records = doc.export(${JSON.stringify(outputPath)}, options, FileExportArea.createForSelection(selection));
+  for (const record of records.all) if (record.isSuccess) success = true;
+} finally {
+  doc.selection = Selection.create(doc, original, true);
+}
+if (!success) throw new Error('Affinity could not render a preview for Kryeo.');
+console.log('KRYEO_ASSISTANT_PREVIEW:' + JSON.stringify({
+  path: ${JSON.stringify(outputPath)},
+  documentTitle: String(doc.title || 'Untitled'),
+  documentSessionUuid: String(doc.sessionUuid || ''),
+}));`;
+    const result = await this.callTool('execute_script', { script }, 90_000);
+    const output = textFromResult(result);
+    const marker = 'KRYEO_ASSISTANT_PREVIEW:';
+    const index = output.lastIndexOf(marker);
+    if (result.isError || index < 0) throw new Error(output || 'Affinity could not prepare visual context for Kryeo.');
+    const line = output.slice(index + marker.length).split(/\r?\n/, 1)[0];
+    return JSON.parse(line) as AffinityAssistantPreview;
+  }
+
+  async exportComponentCandidates(stagingDirectory: string, scope: 'document' | 'selection' = 'document'): Promise<AffinityComponentExportBatch> {
+    await this.connect();
+    const probe = `
+'use strict';
+const { Document, FileExportArea, FileExportOptions } = require('/document');
+const { Selection } = require('/selections');
+const { DocumentCommand } = require('/commands');
+const doc = Document.current;
+if (!doc) throw new Error('Open an Affinity document before scanning components.');
+const scanScope = ${JSON.stringify(scope)};
+
+function nodeName(node) {
+  return String(node.userDescription || node.description || node.defaultDescriptionForDisplay || node.defaultDescription || 'Unnamed layer');
+}
+function isStorageBoundary(node) {
+  return nodeName(node).trim().toLowerCase() === 'storage';
+}
+function nodeType(node) {
+  try { return String(node.constructor && node.constructor.name || Object.prototype.toString.call(node)); }
+  catch (_) { return 'Node'; }
+}
+function nodeBounds(node) {
+  const boxes = [];
+  try { boxes.push(node.exactSpreadVisibleBox); } catch (_) {}
+  try { boxes.push(node.spreadVisibleBox); } catch (_) {}
+  try { boxes.push(node.spreadBaseBox); } catch (_) {}
+  for (const box of boxes) {
+    if (!box) continue;
+    const result = { x: Number(box.x), y: Number(box.y), width: Number(box.width), height: Number(box.height) };
+    if (Number.isFinite(result.x) && Number.isFinite(result.y) && result.width > 0 && result.height > 0) return result;
+  }
+  return null;
+}
+function mergedBounds(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  const x = Math.min(left.x, right.x);
+  const y = Math.min(left.y, right.y);
+  const rightEdge = Math.max(left.x + left.width, right.x + right.width);
+  const bottomEdge = Math.max(left.y + left.height, right.y + right.height);
+  return { x, y, width: rightEdge - x, height: bottomEdge - y };
+}
+function renderedBounds(node, depth) {
+  const direct = nodeBounds(node);
+  if (direct || depth >= 8) return direct;
+  let result = null;
+  for (const child of childNodes(node)) result = mergedBounds(result, renderedBounds(child, depth + 1));
+  return result;
+}
+function nodeVisible(node) {
+  try { return Boolean(node.isVisibleInDomain); } catch (_) {}
+  try { return Boolean(node.isVisible); } catch (_) {}
+  return true;
+}
+function nodeOwnVisibility(node) {
+  try { return Boolean(node.isVisible); } catch (_) {}
+  return true;
+}
+
+const original = [];
+for (const node of doc.selection.nodes) original.push(node);
+const candidates = [];
+let sourceName = 'Whole document';
+
+function childNodes(node) {
+  const children = [];
+  try {
+    for (const child of node.children) children.push(child);
+  } catch (_) {}
+  return children;
+}
+function isRenderableCandidate(node) {
+  return !/Adjustment|Filter|Mask/i.test(nodeType(node));
+}
+function normalizedSeriesName(node) {
+  return nodeName(node).toLowerCase().replace(/[\\s_-]*\\d+$/g, '').replace(/\\s+/g, ' ').trim();
+}
+function hierarchyKey(path) { return path.join('.'); }
+function genericLayerName(node) {
+  return /^(layer|group|object|shape|curve|pixel|image|raster|rectangle|ellipse|container)[\\s_-]*\\d*$/i.test(nodeName(node));
+}
+function resemblesRepeatedSet(children) {
+  const renderable = children.filter(isRenderableCandidate);
+  if (renderable.length < 3) return false;
+  const names = {};
+  for (const child of renderable) {
+    const key = normalizedSeriesName(child);
+    if (key && !/^(layer|group|object|shape|curve|pixel|image|raster|rectangle|ellipse)$/i.test(key)) names[key] = (names[key] || 0) + 1;
+  }
+  const repeatedName = Object.keys(names).some((key) => names[key] >= 3);
+  const boxes = renderable.map(nodeBounds).filter(Boolean);
+  if (boxes.length < 3) return repeatedName;
+  const widths = boxes.map((box) => box.width).sort((a, b) => a - b);
+  const heights = boxes.map((box) => box.height).sort((a, b) => a - b);
+  const middle = Math.floor(boxes.length / 2);
+  const medianWidth = Math.max(1, widths[middle]);
+  const medianHeight = Math.max(1, heights[middle]);
+  const similarlySized = boxes.filter((box) =>
+    Math.abs(box.width - medianWidth) / medianWidth < 0.25
+    && Math.abs(box.height - medianHeight) / medianHeight < 0.25
+  ).length >= Math.ceil(boxes.length * 0.7);
+  let separatedPairs = 0;
+  let comparedPairs = 0;
+  for (let a = 0; a < boxes.length; a += 1) {
+    for (let b = a + 1; b < boxes.length; b += 1) {
+      comparedPairs += 1;
+      if (intersectionArea(boxes[a], boxes[b]) === 0) separatedPairs += 1;
+    }
+  }
+  return repeatedName && similarlySized && separatedPairs / Math.max(1, comparedPairs) > 0.7;
+}
+function independentChild(node) {
+  if (!isRenderableCandidate(node)) return false;
+  if (genericLayerName(node)) return false;
+  if (childNodes(node).length > 0) return true;
+  return !/^(background|backdrop|border|borders|decoration|ornament|shadow|glow|stroke|fill|mask|base)$/i.test(nodeName(node));
+}
+function addCandidate(node, path, parentPath, parentName, ancestors, parentType, parentHierarchyKey, hierarchyDepth) {
+  candidates.push({
+    node,
+    path,
+    parentPath,
+    parentName,
+    ancestors,
+    canCompose: parentType === 'Spread' && !parentHierarchyKey,
+    hierarchyKey: hierarchyKey(path),
+    parentHierarchyKey,
+    hierarchyDepth,
+  });
+}
+function collectDocumentCandidate(node, path, parentPath, parentName, ancestors, parentType, parentHierarchyKey, hierarchyDepth) {
+  if (isStorageBoundary(node)) return;
+  const children = childNodes(node);
+  if (children.length === 0) {
+    if (isRenderableCandidate(node)) addCandidate(node, path, parentPath, parentName, ancestors, parentType, parentHierarchyKey, hierarchyDepth);
+    return;
+  }
+
+  const type = nodeType(node);
+  const isContainer = /Container|Artboard|Spread/i.test(type);
+  if (isContainer || !isRenderableCandidate(node)) {
+    let childIndex = 0;
+    for (const child of children) {
+      collectDocumentCandidate(child, path.concat(childIndex), path, nodeName(node), ancestors.concat(node), type, parentHierarchyKey, hierarchyDepth);
+      childIndex += 1;
+    }
+    return;
+  }
+
+  const currentHierarchyKey = hierarchyKey(path);
+  addCandidate(node, path, parentPath, parentName, ancestors, parentType, parentHierarchyKey, hierarchyDepth);
+  if (hierarchyDepth >= 5) return;
+  let childIndex = 0;
+  for (const child of children) {
+    if (isRenderableCandidate(child)) {
+      collectDocumentCandidate(child, path.concat(childIndex), path, nodeName(node), ancestors.concat(node), type, currentHierarchyKey, hierarchyDepth + 1);
+    }
+    childIndex += 1;
+  }
+}
+
+if (scanScope === 'selection') {
+  if (original.length === 0) throw new Error('Select a parent group or one or more component layers before scanning the selection.');
+  const selectedRoot = original.length === 1 ? original[0] : null;
+  sourceName = selectedRoot ? nodeName(selectedRoot) : original.length + ' selected layers';
+  if (selectedRoot && isStorageBoundary(selectedRoot)) {
+    // Storage is an explicit component-scan boundary, including when selected directly.
+  } else if (selectedRoot && selectedRoot.firstChild) {
+    // Preserve a selected component group as the reviewable parent. Organizational
+    // containers remain transparent because collectDocumentCandidate handles them.
+    collectDocumentCandidate(selectedRoot, [-1, 0], [-1], 'Selection', [], 'Selection', '', 0);
+  } else {
+    for (let index = 0; index < original.length; index += 1) {
+      collectDocumentCandidate(original[index], [-2, index], [-2], sourceName, [], 'Selection', '', 0);
+    }
+  }
+} else {
+  let spreadIndex = 0;
+  for (const spread of doc.spreads) {
+    let nodeIndex = 0;
+    for (const node of spread.children) {
+      collectDocumentCandidate(node, [spreadIndex, nodeIndex], [spreadIndex], 'Spread ' + (spreadIndex + 1), [], 'Spread', '', 0);
+      nodeIndex += 1;
+    }
+    spreadIndex += 1;
+  }
+}
+if (candidates.length > 320) throw new Error('Component Scan found more than 320 component roots. Scan a selection to narrow the document.');
+
+function area(box) { return Math.max(0, box.width) * Math.max(0, box.height); }
+function intersectionArea(a, b) {
+  const left = Math.max(a.x, b.x);
+  const top = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  return Math.max(0, right - left) * Math.max(0, bottom - top);
+}
+function shouldCompose(a, b) {
+  if (!a.canCompose || !b.canCompose) return false;
+  if (a.parentPath.join('.') !== b.parentPath.join('.')) return false;
+  const boxA = nodeBounds(a.node);
+  const boxB = nodeBounds(b.node);
+  if (!boxA || !boxB) return false;
+  const small = Math.min(area(boxA), area(boxB));
+  const large = Math.max(area(boxA), area(boxB));
+  const documentArea = Math.max(1, Number(doc.widthPixels || 0) * Number(doc.heightPixels || 0));
+  if (small <= 0) return false;
+  if (large / documentArea > 0.55 && small / large < 0.2) return false;
+  return intersectionArea(boxA, boxB) / small >= 0.08;
+}
+const parents = candidates.map((_, index) => index);
+function root(index) {
+  while (parents[index] !== index) {
+    parents[index] = parents[parents[index]];
+    index = parents[index];
+  }
+  return index;
+}
+function join(a, b) {
+  const rootA = root(a);
+  const rootB = root(b);
+  if (rootA !== rootB) parents[rootB] = rootA;
+}
+if (scanScope === 'document') {
+  for (let a = 0; a < candidates.length; a += 1) {
+    for (let b = a + 1; b < candidates.length; b += 1) {
+      if (shouldCompose(candidates[a], candidates[b])) join(a, b);
+    }
+  }
+}
+const clusterMap = {};
+for (let index = 0; index < candidates.length; index += 1) {
+  const key = String(root(index));
+  if (!clusterMap[key]) clusterMap[key] = [];
+  clusterMap[key].push(candidates[index]);
+}
+const clusters = Object.keys(clusterMap).map((key) => clusterMap[key]);
+const scanVisibilityNodes = [];
+for (const candidate of candidates) {
+  for (const ancestor of candidate.ancestors || []) if (scanVisibilityNodes.indexOf(ancestor) < 0) scanVisibilityNodes.push(ancestor);
+  if (scanVisibilityNodes.indexOf(candidate.node) < 0) scanVisibilityNodes.push(candidate.node);
+}
+const scanVisibilityStates = scanVisibilityNodes.map((item) => nodeOwnVisibility(item));
+function restoreVisibility(nodes, states) {
+  for (let visibilityIndex = nodes.length - 1; visibilityIndex >= 0; visibilityIndex -= 1) {
+    doc.executeCommand(DocumentCommand.createSetVisibility(
+      Selection.create(doc, nodes[visibilityIndex], true),
+      Boolean(states[visibilityIndex])
+    ));
+  }
+}
+
+const options = FileExportOptions.createWithPresetName('PNG');
+const exported = [];
+const structuralFallbacks = [];
+try {
+  for (let index = 0; index < clusters.length; index += 1) {
+    const cluster = clusters[index];
+    const nodes = cluster.map((item) => item.node);
+    const node = nodes[0];
+    const selection = Selection.create(doc, nodes, true);
+    doc.selection = selection;
+    let bounds = null;
+    for (const memberNode of nodes) {
+      const memberBox = renderedBounds(memberNode, 0);
+      if (!memberBox) continue;
+      if (!bounds) bounds = { x: memberBox.x, y: memberBox.y, width: memberBox.width, height: memberBox.height };
+      else {
+        const right = Math.max(bounds.x + bounds.width, memberBox.x + memberBox.width);
+        const bottom = Math.max(bounds.y + bounds.height, memberBox.y + memberBox.height);
+        bounds.x = Math.min(bounds.x, memberBox.x);
+        bounds.y = Math.min(bounds.y, memberBox.y);
+        bounds.width = right - bounds.x;
+        bounds.height = bottom - bounds.y;
+      }
+    }
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
+
+    let childCount = 0;
+    let descendantCount = 0;
+    let textCount = /Text/i.test(nodeType(node)) ? 1 : 0;
+    const semanticNames = [];
+    for (const member of cluster) if (semanticNames.length < 16) semanticNames.push(nodeName(member.node));
+    try {
+      for (const child of node.children) childCount += 1;
+      for (const descendant of node.children.all) {
+        descendantCount += 1;
+        if (/Text/i.test(nodeType(descendant))) textCount += 1;
+        if (semanticNames.length < 16) semanticNames.push(nodeName(descendant));
+      }
+    } catch (_) {}
+
+    const outputPath = ${JSON.stringify(stagingDirectory)} + '\\\\component-' + String(index + 1).padStart(3, '0') + '.png';
+    const revealNodes = [];
+    for (const item of cluster) {
+      for (const ancestor of item.ancestors || []) if (revealNodes.indexOf(ancestor) < 0) revealNodes.push(ancestor);
+      if (revealNodes.indexOf(item.node) < 0) revealNodes.push(item.node);
+    }
+    const visibilityStates = revealNodes.map((item) => nodeOwnVisibility(item));
+    if (nodes.length > 0) {
+      // Force Affinity to rebuild rendered adjustments before exporting the preview.
+      doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, nodes, true), false));
+    }
+    if (revealNodes.length > 0) {
+      doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, revealNodes, true), true));
+    }
+    let success = false;
+    try {
+      // Visibility commands can invalidate a live-adjustment group's previous
+      // selection snapshot. Recreate it only after the render tree is rebuilt.
+      const exportSelection = Selection.create(doc, nodes, true);
+      doc.selection = exportSelection;
+      const records = doc.export(outputPath, options, FileExportArea.createForSelection(exportSelection));
+      for (const record of records.all) if (record.isSuccess) success = true;
+    } catch (_) {
+      // Some live-adjustment groups are valid structural parents but cannot be
+      // exported directly. Keep scanning and attach a child preview below.
+      success = false;
+    } finally {
+      restoreVisibility(revealNodes, visibilityStates);
+    }
+    const componentRecord = {
+      index,
+      name: cluster.length > 1 && cluster[0].parentName ? cluster[0].parentName : nodeName(node),
+      affinityType: nodeType(node),
+      bounds: { x: Number(bounds.x), y: Number(bounds.y), width: Number(bounds.width), height: Number(bounds.height) },
+      childCount,
+      descendantCount,
+      textCount,
+      semanticNames,
+      path: outputPath,
+      hierarchyKey: cluster[0].hierarchyKey,
+      parentHierarchyKey: cluster[0].parentHierarchyKey || '',
+      hierarchyDepth: Number(cluster[0].hierarchyDepth || 0),
+      previewFallback: false,
+      members: cluster.map((item) => ({
+        path: item.path,
+        name: nodeName(item.node),
+        affinityType: nodeType(item.node),
+        bounds: nodeBounds(item.node),
+      })),
+      grouping: cluster.length > 1 ? 'overlap' : (childCount > 0 ? 'existing-group' : 'single'),
+    };
+    if (success) exported.push(componentRecord);
+    else if (childCount > 0) structuralFallbacks.push(componentRecord);
+  }
+  for (const parent of structuralFallbacks) {
+    const prefix = parent.hierarchyKey + '.';
+    const childPreview = exported.find((component) => component.hierarchyKey.indexOf(prefix) === 0);
+    if (!childPreview) continue;
+    parent.path = childPreview.path;
+    parent.previewFallback = true;
+    exported.push(parent);
+  }
+  exported.sort((left, right) => left.index - right.index);
+} finally {
+  // Reconcile the complete scan scope once more so a failed export or nested
+  // parent/child visibility command cannot leak a hidden layer into Affinity.
+  restoreVisibility(scanVisibilityNodes, scanVisibilityStates);
+  doc.selection = Selection.create(doc, original, true);
+}
+
+console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
+  documentTitle: String(doc.title || 'Untitled'),
+  documentSessionUuid: String(doc.sessionUuid || ''),
+  sourceName,
+  components: exported,
+}));`;
+    const result = await this.callTool('execute_script', { script: probe }, 120_000);
+    const output = textFromResult(result);
+    const marker = 'KRYEO_COMPONENT_SCAN:';
+    const index = output.lastIndexOf(marker);
+    if (result.isError || index < 0) throw new Error(output || 'Affinity could not scan the document components.');
+    const line = output.slice(index + marker.length).split(/\r?\n/, 1)[0];
+    return JSON.parse(line) as AffinityComponentExportBatch;
+  }
+
+  async applyComponentOrganization(request: ApplyComponentOrganizationRequest): Promise<ScriptRunResult> {
+    const startedAt = new Date().toISOString();
+    const title = 'Organize Affinity components';
+    await this.connect();
+    try {
+      const script = `
+'use strict';
+const { Document } = require('/document');
+const { Selection } = require('/selections');
+const { AddChildNodesCommandBuilder, DocumentCommand, NodeChildType, NodeMoveType } = require('/commands');
+const { ContainerNodeDefinition } = require('/nodes');
+const request = ${JSON.stringify(request)};
+const doc = Document.current;
+if (!doc || String(doc.sessionUuid || '') !== request.documentSessionUuid) {
+  throw new Error('The active Affinity document changed after Component Scan. Scan it again before applying organization.');
+}
+function itemAt(collection, wanted) {
+  let index = 0;
+  for (const item of collection) {
+    if (index === wanted) return item;
+    index += 1;
+  }
+  return null;
+}
+function resolvePath(path) {
+  if (!Array.isArray(path) || path.length < 2 || path[0] < 0) return null;
+  let node = itemAt(doc.spreads, path[0]);
+  if (!node) return null;
+  for (let index = 1; index < path.length; index += 1) {
+    node = itemAt(node.children, path[index]);
+    if (!node) return null;
+  }
+  return node;
+}
+const plans = request.components.map((component) => ({
+  name: String(component.name || 'UI Component').slice(0, 80),
+  nodes: component.memberPaths.map(resolvePath),
+}));
+for (const plan of plans) {
+  if (plan.nodes.some((node) => !node)) throw new Error('The Affinity layer hierarchy changed after scanning. No layers were reorganized; scan the document again.');
+}
+const organized = [];
+for (const plan of plans) {
+  if (plan.nodes.length === 1) {
+    const selection = Selection.create(doc, plan.nodes[0], true);
+    doc.executeCommand(DocumentCommand.createSetDescription(selection, plan.name));
+    organized.push(plan.nodes[0]);
+    continue;
+  }
+  const sourceSelection = Selection.create(doc, plan.nodes, true);
+  doc.selection = sourceSelection;
+  const builder = AddChildNodesCommandBuilder.create();
+  builder.addContainerNode(ContainerNodeDefinition.create(plan.name));
+  builder.setInsertionTargetSelection(sourceSelection);
+  const addCommand = builder.createCommand(false, NodeChildType.Main);
+  doc.executeCommand(addCommand);
+  const group = addCommand.newNodes[0];
+  if (!group) throw new Error('Affinity could not create the proposed component group.');
+  doc.executeCommand(DocumentCommand.createMoveNodes(
+    Selection.create(doc, plan.nodes, true),
+    group,
+    NodeMoveType.Inside,
+    NodeChildType.Main
+  ));
+  doc.executeCommand(DocumentCommand.createSetDescription(Selection.create(doc, group, true), plan.name));
+  organized.push(group);
+}
+doc.selection = Selection.create(doc, organized, true);
+console.log('KRYEO_COMPONENTS_ORGANIZED:' + JSON.stringify({ count: organized.length, title: String(doc.title || 'Untitled') }));`;
+      const result = await this.callTool('execute_script', { script }, 120_000);
+      const output = textFromResult(result);
+      if (result.isError || output.lastIndexOf('KRYEO_COMPONENTS_ORGANIZED:') < 0) {
+        throw new Error(output || 'Affinity could not apply the component organization.');
+      }
+      return {
+        ok: true,
+        title,
+        output: `Organized and named ${request.components.length} ${request.components.length === 1 ? 'component' : 'components'} in Affinity.`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        title,
+        output: error instanceof Error ? error.message : String(error),
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  async applyLayerNames(request: ApplyLayerNamesRequest): Promise<ScriptRunResult> {
+    const startedAt = new Date().toISOString();
+    const title = 'Name Affinity layers';
+    await this.connect();
+    try {
+      const script = `
+'use strict';
+const { Document } = require('/document');
+const { Selection } = require('/selections');
+const { DocumentCommand } = require('/commands');
+const request = ${JSON.stringify(request)};
+const doc = Document.current;
+if (!doc || String(doc.sessionUuid || '') !== request.documentSessionUuid) {
+  throw new Error('The active Affinity document changed after Component Scan. Scan it again before applying names.');
+}
+function itemAt(collection, wanted) {
+  let index = 0;
+  for (const item of collection) {
+    if (index === wanted) return item;
+    index += 1;
+  }
+  return null;
+}
+function resolvePath(path) {
+  if (!Array.isArray(path) || path.length < 2 || path[0] < 0) return null;
+  let node = itemAt(doc.spreads, path[0]);
+  if (!node) return null;
+  for (let index = 1; index < path.length; index += 1) {
+    node = itemAt(node.children, path[index]);
+    if (!node) return null;
+  }
+  return node;
+}
+const resolved = request.layers.map((layer) => ({ name: String(layer.name || '').slice(0, 80), node: resolvePath(layer.path) }));
+if (resolved.some((entry) => !entry.node)) throw new Error('The Affinity layer hierarchy changed after scanning. No names were applied; scan the document again.');
+const renamed = [];
+for (const entry of resolved) {
+  doc.executeCommand(DocumentCommand.createSetDescription(Selection.create(doc, entry.node, true), entry.name));
+  renamed.push(entry.node);
+}
+doc.selection = Selection.create(doc, renamed, true);
+console.log('KRYEO_LAYERS_NAMED:' + JSON.stringify({ count: renamed.length, title: String(doc.title || 'Untitled') }));`;
+      const result = await this.callTool('execute_script', { script }, 120_000);
+      const output = textFromResult(result);
+      if (result.isError || output.lastIndexOf('KRYEO_LAYERS_NAMED:') < 0) throw new Error(output || 'Affinity could not apply the layer names.');
+      return {
+        ok: true,
+        title,
+        output: `Named ${request.layers.length} ${request.layers.length === 1 ? 'layer' : 'layers'} in Affinity.`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        title,
+        output: error instanceof Error ? error.message : String(error),
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  async close(): Promise<void> {
+    const transport = this.transport;
+    this.client = null;
+    this.transport = null;
+    if (transport) {
+      try {
+        await withTimeout(transport.close(), 800);
+      } catch {
+        // Closing a stale transport is best effort.
+      }
+    }
+  }
+}
