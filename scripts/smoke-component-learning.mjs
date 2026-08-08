@@ -38,6 +38,7 @@ const candidate = (overrides = {}) => ({
   recommendedDiveMode: 'parent-and-children',
   diveConfidence: 0.91,
   diveReasons: ['Contains a replaceable nested visual.'],
+  diveStructureSignature: 'v1:1:0:1:bbbbbbbbbbbb',
   visualEmbedding: 'AQIDBA==',
   learnedFrom: 0,
   nearestLearnedSimilarity: 0,
@@ -76,6 +77,10 @@ assert.equal(snapshot.componentDecisions[0].embedding, 'AQIDBA==');
 assert.equal(snapshot.componentDecisions[0].suggestedType, 'Texture');
 assert.equal(snapshot.componentDecisions[0].suggestedRole, 'ImageLabel');
 assert.equal(snapshot.componentDecisions[0].correctionCount, 1);
+assert.deepEqual(snapshot.componentDecisions[0].diveDecisions, [{
+  signature: 'v1:1:0:1:bbbbbbbbbbbb',
+  mode: 'parent-and-children',
+}]);
 assert.equal(snapshot.componentManifests.length, 1);
 assert.equal(snapshot.componentManifests[0].nodes.length, 2);
 assert.equal(snapshot.componentManifests[0].nodes[1].parentId, '0');

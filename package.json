@@ -1,6 +1,6 @@
 {
   "name": "kryeo",
-  "version": "0.15.36",
+  "version": "0.15.37",
   "description": "A free desktop companion for Affinity scripts and creative workflows.",
   "main": "./out/main/index.js",
   "author": "Kryeo",
@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test:affinity-export": "node --experimental-strip-types scripts/smoke-affinity-component-export.mjs",
     "test:component-context": "node --experimental-strip-types scripts/smoke-component-context.mjs",
+    "test:component-learning": "node --experimental-strip-types scripts/smoke-component-learning.mjs",
     "test:component-scan": "node --experimental-strip-types scripts/smoke-component-scan.mjs",
     "test:local-ai": "node --experimental-strip-types scripts/smoke-local-ai.mjs",
     "test:family-ai": "node --experimental-strip-types scripts/smoke-family-ai.mjs"

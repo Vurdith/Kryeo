@@ -54,6 +54,15 @@ import type {
   WorkflowPreset,
 } from '../shared/types';
 
+function prepareComponentsForReview(components: ComponentCandidate[]): ComponentCandidate[] {
+  // Scene context may refine generic child names and construction types. Run
+  // the structural/review pass on both sides so triage reflects the values the
+  // user actually sees rather than the pre-context hosted packet.
+  const structurallyAssessed = applyComponentIntelligence(components, false);
+  applyComponentSceneContext(structurallyAssessed);
+  return applyComponentIntelligence(structurallyAssessed, false);
+}
+
 function readableLayerIdentity(value: string): string {
   return value
     .replace(/\.(?:png|jpe?g|webp|gif|tiff?)$/i, '')
@@ -1041,11 +1050,11 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
             const partialResult = shouldSendPartialResult
               ? {
                 ...scan,
-                components: applyComponentSceneContext(
-                  applyComponentIntelligence(calibrateComponentConfidence(
+                components: prepareComponentsForReview(
+                  calibrateComponentConfidence(
                     applyHostedFamilyAnalyses(reviewed, families, hostedAnalyses),
                     snapshot.componentDecisions,
-                  ), false),
+                  ),
                 ),
               }
               : undefined;
@@ -1129,7 +1138,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     }
     progress('finalizing', 'Preparing review', 'Applying hierarchy context and arranging the final component list.', 94);
     const finalizationStartedAt = Date.now();
-    reviewed = applyComponentSceneContext(applyComponentIntelligence(reviewed, false));
+    reviewed = prepareComponentsForReview(reviewed);
     stageTimings.finalizationMs = Date.now() - finalizationStartedAt;
     progress('complete', 'Scan complete', `${reviewed.length} proposed components are ready to review.`, 100);
     return {

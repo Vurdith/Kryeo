@@ -4,7 +4,7 @@ Kryeo is a free desktop companion for Affinity scripts and local UI asset workfl
 
 ## Current build
 
-Kryeo `0.15.36` is the current packaged Windows build. The repeatable update, rebuild, install, hosted-AI, and cache procedures are documented in [kryeovault/Build.md](kryeovault/Build.md).
+Kryeo `0.15.37` is the current packaged Windows build. The repeatable update, rebuild, install, hosted-AI, and cache procedures are documented in [kryeovault/Build.md](kryeovault/Build.md).
 
 ## What it does
 
@@ -49,7 +49,9 @@ Document scans include hidden component branches. Kryeo treats Affinity containe
 
 Full-document export is split into bounded Affinity requests. Large structural groups are subdivided by descendant size, while smaller groups stay intact for hierarchy and composition; follow-up requests resolve only their active partition. This keeps large scans below Affinity's remote MCP execution window and reports partition progress instead of failing on one monolithic document request.
 
-The review is presented as a collapsible parent-child tree. Every group can stay together, export only its children, or export both the complete parent and reusable nested parts. Kryeo scores that group-dive choice from names, geometry, child roles, reuse, and previous confirmations; the user always has the final choice.
+The review is exception-first rather than a thousand-row checklist. `Needs review` shows weak names, semantic conflicts, incomplete classifications, and disputed group exports; `Group exports`, `Low risk`, and `Everything` provide focused audits without losing full-document coverage. Exact duplicate instances share one decision, and large hierarchies begin collapsed while nested exceptions remain visible. Affinity changes stay locked until the exception queue is resolved.
+
+Every group can stay together, export only its children, or export both the complete parent and reusable nested parts. Kryeo evaluates structure independently of the hosted proposal: separated repeated children favor children-only, overlapping construction favors keep-together, and an assembled parent with reusable independent children favors both. A strong disagreement becomes a blocking review item. Remembered choices remain authoritative only when the direct-child visuals, separation, and parent coverage match, so identical parent pixels cannot transfer a dive choice into a different hierarchy.
 
 **Remember choices** stores the asset type, Roblox role, family name, group-dive choice, correction count, semantic hint, and a compact visual embedding locally. Future visually similar components can learn from those confirmations even when their pixel hash is different. Exact duplicates collapse into one review row with an expandable list of every source instance, while close variants remain separate visual families.
 
@@ -91,7 +93,7 @@ qmd query "component scan naming corrections" -c kryeo --no-rerank -n 3 --full-p
 
 ## Delivery scope
 
-Kryeo 0.15.36 prepares production handoff rather than pretending to be a finished Roblox importer. A Roblox delivery creates `KryeoManifest.json` with asset IDs, versions, raster paths, health, and suggested Roblox UI classes. A Studio-side connector can consume this manifest next.
+Kryeo 0.15.37 prepares production handoff rather than pretending to be a finished Roblox importer. A Roblox delivery creates `KryeoManifest.json` with asset IDs, versions, raster paths, health, and suggested Roblox UI classes. A Studio-side connector can consume this manifest next.
 
 Auto-Export is opt-in per project. Kryeo discovers the newest installed Asset Library Export workflow, asks Affinity to prepare the latest Raster PNGs, and then publishes them into a production folder using stable code-name paths such as `Devil Hunter/Slots/slot_hotbar.png`. The versioned Asset Library files remain untouched.
 

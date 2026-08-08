@@ -298,7 +298,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(health.liteOutputPricePerMillion, 0.13);
     assert.equal(health.costEstimateSafetyFactor, 2);
     assert.equal(health.maxHostedFamiliesPerScan, 0);
-    assert.equal(health.analysisVersion, 'family-v35');
+    assert.equal(health.analysisVersion, 'family-v36');
     assert.equal(health.maxCacheEntries, 1000);
     assert.equal(modelPrompts.length, 0);
     const unauthorized = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`);

@@ -95,6 +95,7 @@ export type ComponentScanScope = 'document' | 'selection';
 export type ComponentDiveMode = 'keep-together' | 'children-only' | 'parent-and-children';
 export type ComponentAnalysisSource = 'approved-family' | 'hosted-family' | 'local-provisional' | 'unavailable';
 export type ComponentAnalysisState = 'approved' | 'analyzed' | 'provisional' | 'needs-review' | 'queued';
+export type ComponentReviewPriority = 'ready' | 'check' | 'critical';
 
 export interface ComponentDecision {
   visualHash: string;
@@ -115,6 +116,7 @@ export interface ComponentDecision {
   correctionCount?: number;
   embedding?: string;
   diveMode?: ComponentDiveMode;
+  diveDecisions?: Array<{ signature: string; mode: ComponentDiveMode }>;
   documentTitle?: string;
   provenance?: {
     source: 'scan-review' | 'learning-editor' | 'assistant';
@@ -189,6 +191,10 @@ export interface ComponentCandidate {
   recommendedDiveMode: ComponentDiveMode;
   diveConfidence: number;
   diveReasons: string[];
+  diveConflict?: boolean;
+  diveConflictMessage?: string;
+  diveStructureSignature?: string;
+  learnedDiveDecisions?: Array<{ signature: string; mode: ComponentDiveMode }>;
   visualEmbedding?: string;
   learnedFrom?: number;
   nearestLearnedSimilarity?: number;
@@ -231,6 +237,8 @@ export interface ComponentCandidate {
   analysisState?: ComponentAnalysisState;
   analysisReason?: string;
   analysisAlternatives?: Array<{ assetType: ComponentAssetType; reason: string }>;
+  reviewPriority?: ComponentReviewPriority;
+  reviewReasons?: string[];
 }
 
 export interface LocalAiStatus {

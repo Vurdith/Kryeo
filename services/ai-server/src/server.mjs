@@ -81,7 +81,7 @@ const MODEL_TIMEOUT_MS = Math.max(10_000, Number(process.env.KRYEO_AI_MODEL_TIME
 const MAX_MODEL_RETRIES = Math.max(0, Math.min(2, Number(process.env.KRYEO_AI_MAX_MODEL_RETRIES || 1)));
 const MODEL_CONCURRENCY = Math.max(1, Number(process.env.KRYEO_AI_MODEL_CONCURRENCY || 2));
 const MAX_INFLIGHT_PER_TOKEN = Math.max(1, Number(process.env.KRYEO_AI_MAX_INFLIGHT_PER_TOKEN || MODEL_CONCURRENCY));
-const ANALYSIS_VERSION = 'family-v35';
+const ANALYSIS_VERSION = 'family-v36';
 const EXPLANATION_VERSION = 'family-explanation-v2';
 
 const ASSET_TYPES = [
@@ -122,6 +122,7 @@ const LITE_CLASSIFICATION_SYSTEM = [
   'Return a complete human-facing name for each family. Preserve meaningful source words after spacing and casing cleanup, but do not use IDs, hashes, filenames, or bare generic type nouns when the artwork supports a clearer identity.',
   'Keep related siblings coherent, but give every row its own complete display name and retain a short shared root only when it helps distinguish the family.',
   'u is 1 only when the image is unreadable or meaningful evidence genuinely conflicts; otherwise 0. d is 0 keep-together, 1 children-only, or 2 parent-and-children.',
+  'For d: use 0 when overlapping pieces form one motif; use 1 only for an organizational parent whose children are reusable and whose parent adds no standalone asset; use 2 when both the assembled parent and independent children are useful exports. When hierarchy evidence is weak, use 0 and set u to 1.',
   `Allowed t values: ${ASSET_TYPES.join(', ')}.`,
   'Return valid JSON only: {"r":["shared identity root"],"f":[["f1",0,"assetType","complete display name",0,0]]}. Each f row is [alias, zero-based r index, t, n, u, d]. Return every requested alias exactly once.',
 ].join('\n');
@@ -1352,7 +1353,7 @@ function familyPrompt(families, context = {}) {
       'Exact duplicate instances reuse one name and one upload. Distinct siblings of the same functional type under one parent use a shared naming root numbered sequentially from 1 with no arbitrary upper limit. Keep a meaningful suffix only for a genuine state, direction, or effect such as Glow.',
       'Trailing digits in source layer names usually identify instances. Remove them from the polished family name unless they communicate a genuine visible state or ordered variant. Exact duplicates must never gain sequential numbers.',
       'Roblox role describes implementation behavior: interactive controls generally use an interactive role; non-interactive artwork generally uses ImageLabel; structural containers may use Frame.',
-      'Recommend children-only only when children are independently reusable assets; otherwise keep the assembled visual together.',
+      'For group export, keep together when overlapping pieces form one motif; use children-only only for an organizational parent whose children are reusable and whose parent adds no standalone asset; use parent-and-children when the assembled parent and independent children are both useful exports. Mark reviewNeeded when hierarchy evidence is insufficient.',
       `Allowed assetType values: ${ASSET_TYPES.join(', ')}.`,
       `Allowed role values: ${ROBLOX_ROLES.join(', ')}.`,
       'Return JSON: {"families":[{"familyId","familyName","assetType","role","memberNames":[{"visualHash","name"}],"diveMode","reason","reviewNeeded","alternatives":[{"assetType","reason"}]}]}.',

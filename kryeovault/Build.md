@@ -4,18 +4,31 @@
 
 ## Current packaged build
 
-- **Release:** `0.15.36`
+- **Release:** `0.15.37`
 - **Built and verified:** 2026-08-08
-- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.36.exe`
-- **Installer size:** `272,210,159` bytes
-- **Installer SHA-256:** `C28E3257AC50C77E2C94670326495EAB544A8759A819E87D369AE43E72A44AC2`
-- **Packaged app.asar SHA-256:** `4BF35C5D337DC6E45C865E464C5877C5E710A312612FE637C91CCAD50405389D`
+- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.37.exe`
+- **Installer size:** `272,213,200` bytes
+- **Installer SHA-256:** `D6AEBEA1AB292C1375558EA78677D6A4C2EF1DD3095DD7F793E5AEA82A195DC3`
+- **Packaged app.asar SHA-256:** `055F3656666BD9A68298E79945D6B5A2784B9C8557C90A8D208A3ABAD5B0AA20`
 - **Authenticode:** not signed
 - **Installed app:** `C:\Users\reece\AppData\Local\Programs\Kryeo\Kryeo.exe`
-- **Installed version at last check:** `0.15.35.0`
-- **Installed app.asar SHA-256:** `B592B2D9D878768D2BFDA47244CA007CB7A3FD15557061515C74275D8D60A5AF`
+- **Installed version at last check:** `0.15.36.0`
+- **Installed app.asar SHA-256:** `4BF35C5D337DC6E45C865E464C5877C5E710A312612FE637C91CCAD50405389D`
 
-The `0.15.36` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The local gateway is running the current `family-v35` source with the existing structured cache preserved.
+The `0.15.37` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The local gateway is running the current `family-v36` source and was idle at the last check.
+
+## Exception-first review and group safety in `0.15.37`
+
+- Component Scan no longer opens large results as one fully expanded form. Above 120 components the hierarchy starts collapsed, while nested exceptions remain discoverable through the focused review lanes.
+- The default `Needs review` lane contains semantic conflicts, generic or type-only names, unknown types, incomplete hosted results, low-confidence decisions, and disputed group exports. `Group exports`, `Low risk`, and `Everything` remain available for targeted auditing.
+- Exact duplicate instances share one review decision. Low-risk families stay included but out of the default queue; Kryeo does not silently rewrite them. Editing a decision or explicitly marking it reviewed clears that exact visual from the exception queue.
+- `Remember choices`, `Apply names`, and `Apply to Affinity` remain locked while exceptions are unresolved. This prevents a thousand-layer scan from applying known weak names or hierarchy decisions merely because the user reached the bottom of the page.
+- Group export has an independent structural vote. Separated repeated children favor `children only`; overlapping pieces that compose one motif favor `keep together`; an assembled UI parent with spatially independent reusable children favors `parent and children`.
+- A strong structural vote that conflicts with the hosted proposal becomes a blocking review item and defaults to the structural-safe option. Saved user choices remain authoritative.
+- Saved group-export choices are keyed by a structural signature containing direct-child visuals, separation, and parent coverage. Identical parent pixels no longer reuse a dive choice when their child structure differs; older image-only dive memory is treated as advisory.
+- Gateway contract `family-v36` explains all three group modes explicitly and asks for review when hierarchy evidence is weak, invalidating older cached prompt results without changing the Qwen3.7 Flash model or cost policy.
+
+Regression coverage verifies all three structural patterns and both hosted/structure conflict directions. Typecheck, all scan/context/local/hosted AI suites, production rendering, NSIS packaging, and packaged-resource verification passed. Windows UI capture automation failed before returning a screenshot, so this release does not claim an automated screenshot inspection.
 
 ## Large-scan recovery and packaging in `0.15.36`
 
@@ -86,7 +99,7 @@ Every unresolved unique family remains eligible for cloud analysis. No local lan
 | Parameter compatibility | `KRYEO_OPENROUTER_REQUIRE_PARAMETERS=false` |
 | Result cache | `services\ai-server\.data\family-cache.json` |
 | Cache cap | `KRYEO_AI_MAX_CACHE_ENTRIES=20000` |
-| Analysis contract | `family-v35` |
+| Analysis contract | `family-v36` |
 
 The gateway reserves against current Qwen pricing with a 2x allowance for repair and token-accounting variance. It records provider-reported cost and the real provider-call count per scan, which the desktop summary displays separately from gateway batches. Valid partial results are stored immediately; missing aliases receive one grouped repair, followed by bounded single-family repairs only for aliases that are still absent.
 
@@ -136,7 +149,7 @@ Start-Process -FilePath 'C:\Program Files\nodejs\node.exe' `
 Invoke-RestMethod http://127.0.0.1:8787/health
 ```
 
-The health response should report `analysisVersion: family-v35`, Qwen3.7 Flash on both lanes, a `$0.01` target, an enforced `$0.03` ceiling, 16-family batching, two model slots, bounded-cache counters, and zero active requests when idle.
+The health response should report `analysisVersion: family-v36`, Qwen3.7 Flash on both lanes, a `$0.01` target, an enforced `$0.03` ceiling, 16-family batching, two model slots, bounded-cache counters, and zero active requests when idle.
 
 ## Build, validate, and install
 
@@ -149,6 +162,7 @@ The health response should report `analysisVersion: family-v35`, Qwen3.7 Flash o
    npm run typecheck
    npm run test:affinity-export
    npm run test:component-context
+   npm run test:component-learning
    npm run test:component-scan
    npm run test:local-ai
    npm run test:family-ai
@@ -160,7 +174,7 @@ The health response should report `analysisVersion: family-v35`, Qwen3.7 Flash o
 
 4. Close only running installed `Kryeo.exe` processes. Run `release\Kryeo-Setup-<version>.exe`, relaunch Kryeo, then verify the installed Windows product version and `resources\app.asar` hash.
 
-Recorded passes for `0.15.36`: `npm install`, typecheck, adaptive Affinity-export recovery and telemetry, component-context, inset component-scan topology, local-AI, family-AI, gateway cache/budget/evidence/recovery suite, syntax check, production build, NSIS package build, and packaged-resource verification. The installer and unpacked package report `0.15.36`; the packaged model is `11,846,843` bytes and taxonomy is `440,707` bytes.
+Recorded passes for `0.15.37`: typecheck, adaptive Affinity-export recovery and telemetry, component-context, component-learning persistence, exception-first component-scan and group-structure conflict coverage, local-AI, family-AI, gateway cache/budget/evidence/recovery suite, syntax check, production build, NSIS package build, and packaged-resource verification. The installer and unpacked package report `0.15.37`; the packaged model is `11,846,843` bytes and taxonomy is `440,707` bytes.
 
 ## Clear generated family results
 

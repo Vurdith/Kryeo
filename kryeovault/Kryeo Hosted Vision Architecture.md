@@ -47,7 +47,7 @@ Live verification on 2026-08-07 measured `$0.00002814` for one uncached family a
 | Strict provider matching | `KRYEO_OPENROUTER_REQUIRE_PARAMETERS=false` |
 | Prompt cache request | `KRYEO_OPENROUTER_PROMPT_CACHE=true` |
 | Response cache | `KRYEO_OPENROUTER_RESPONSE_CACHE=false` |
-| Analysis contract | `family-v35` |
+| Analysis contract | `family-v36` |
 | Structured family cache | `services/ai-server/.data/family-cache.json` |
 | Structured cache cap | `KRYEO_AI_MAX_CACHE_ENTRIES=20000` |
 
@@ -89,7 +89,11 @@ The Lite request carries one contact-sheet image plus compact family metadata: s
 
 The model returns a compact packet with each family alias, type, concise complete display name, uncertainty, and dive mode. The gateway derives deterministic Roblox roles and ordinary review plumbing. Detailed reasons, visual descriptions, confidence evidence, conflicts, and alternatives are generated only when a user opens the evidence panel through `/v1/families/explain`; those results are cached separately.
 
-The `family-v35` naming pass anchors names to the target family and rejects words borrowed only from parent, ancestor, child, sibling, or batch peers. A `GroupNode` or child count is not evidence that decorative artwork is a Roblox `Frame`. Alpha topology is measured relative to the occupied visual bounds, so an inset hollow ornament with transparent canvas padding is recognised from low inner fill, dense perimeter art, and four-side coverage. That geometry locks the final type to `Border` / `ImageLabel` when the model or a target word proposes `Frame`, `Panel`, `Slot`, or another container-like type. The response retains the raw model proposal and a truthful normalization reason.
+The `family-v36` contract anchors names to the target family and rejects words borrowed only from parent, ancestor, child, sibling, or batch peers. A `GroupNode` or child count is not evidence that decorative artwork is a Roblox `Frame`. Alpha topology is measured relative to the occupied visual bounds, so an inset hollow ornament with transparent canvas padding is recognised from low inner fill, dense perimeter art, and four-side coverage. That geometry locks the final type to `Border` / `ImageLabel` when the model or a target word proposes `Frame`, `Panel`, `Slot`, or another container-like type. The response retains the raw model proposal and a truthful normalization reason.
+
+Group export is a two-vote decision. The hosted packet proposes keep-together, children-only, or parent-and-children, while the desktop independently scores child repetition, spatial separation, overlap, parent coverage, reusable child roles, learned choices, and parent semantics. Strong agreement is accepted; strong disagreement enters the blocking exception queue and uses the structural-safe default until a user resolves it. Saved choices are reused only when a versioned signature of direct-child visuals, separation, and coverage matches the current instance. The hosted prompt defines all three modes explicitly and marks weak hierarchy evidence for review.
+
+The desktop review is exception-first. Exact duplicates share a review decision, low-risk families remain included but hidden from the default lane, and generic names, incomplete hosted results, unknown types, semantic conflicts, low confidence, and group disagreements are promoted. Apply and learning actions remain locked until those exceptions are reviewed, preventing large documents from converting scrolling fatigue into silent approval.
 
 Detailed evidence is an independent audit rather than a rationale constrained to the selected result. It reports whether the current classification is supported and may return a suggested name, asset type, or Roblox role. Every requested alias must be returned. Valid entries from a partial response are stored immediately. Missing aliases are repaired together first; any aliases still absent receive bounded single-family recovery without resending successful work.
 

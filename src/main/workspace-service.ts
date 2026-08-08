@@ -289,6 +289,7 @@ export class WorkspaceService {
         correctionCount: (previous?.correctionCount || 0) + (corrected ? 1 : 0),
         embedding: input.embedding,
         diveMode: input.diveMode || 'keep-together',
+        diveDecisions: input.diveDecisions,
         documentTitle: input.documentTitle,
         provenance: input.provenance || previous?.provenance,
         influenceCount: previous?.influenceCount || input.influenceCount || 0,
@@ -378,6 +379,12 @@ export class WorkspaceService {
         correctionCount: 0,
         embedding: component.visualEmbedding,
         diveMode: component.diveMode,
+        diveDecisions: [...new Map(family
+          .filter((member) => member.childHierarchyKeys.length > 0 && member.diveStructureSignature)
+          .map((member) => [member.diveStructureSignature, {
+            signature: member.diveStructureSignature as string,
+            mode: member.diveMode,
+          }])).values()],
         documentTitle: request.documentTitle,
         provenance: {
           source: 'scan-review' as const,

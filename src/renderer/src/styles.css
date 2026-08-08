@@ -5863,6 +5863,34 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
   color: var(--muted);
 }
 
+.scan-review-console {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px 22px;
+  margin-top: 24px;
+  padding: 18px;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  box-shadow: 5px 5px 0 var(--ink);
+}
+
+.scan-review-console-copy { max-width: 700px; }
+.scan-review-console-copy > span { color: var(--focus); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.scan-review-console-copy h2 { margin: 4px 0 5px; font-size: 21px; letter-spacing: -0.025em; }
+.scan-review-console-copy p { max-width: 68ch; margin: 0; color: var(--quiet); font-size: 11px; line-height: 1.5; }
+.scan-review-console-stats { display: grid; grid-template-columns: repeat(3, minmax(66px, 1fr)); align-self: start; border: 2px solid var(--ink); }
+.scan-review-console-stats > div { display: grid; min-height: 62px; padding: 8px 10px; place-items: center; align-content: center; border-left: 1px solid var(--ink); background: #fff; }
+.scan-review-console-stats > div:first-child { border-left: 0; }
+.scan-review-console-stats > div.has-critical { background: #ffe0dc; }
+.scan-review-console-stats strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.scan-review-console-stats span { color: var(--quiet); font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.scan-review-lanes { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.scan-review-lanes button { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 10px; padding: 0 11px; border: 2px solid var(--ink); background: #fff; color: var(--ink); font-size: 10px; font-weight: 760; cursor: pointer; transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease; }
+.scan-review-lanes button:hover { transform: translateY(-1px); box-shadow: 2px 2px 0 var(--ink); }
+.scan-review-lanes button:active { transform: translateY(1px); }
+.scan-review-lanes button.is-active { background: var(--acid); box-shadow: 3px 3px 0 var(--ink); }
+.scan-review-lanes button b { display: grid; min-width: 25px; height: 24px; padding: 0 5px; place-items: center; border: 1px solid var(--ink); background: var(--paper); font-variant-numeric: tabular-nums; }
+
 .scan-review-heading {
   display: flex;
   align-items: end;
@@ -5894,6 +5922,12 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
   gap: 10px;
 }
 
+.component-review-empty { display: flex; min-height: 110px; align-items: center; justify-content: center; gap: 12px; padding: 20px; border: 2px dashed #928f85; background: rgba(250, 249, 243, 0.72); }
+.component-review-empty svg { box-sizing: content-box; padding: 8px; border: 2px solid var(--ink); background: var(--acid); }
+.component-review-empty div { display: grid; gap: 3px; }
+.component-review-empty b { font-size: 13px; }
+.component-review-empty span { color: var(--quiet); font-size: 10px; }
+
 .component-review-row {
   display: grid;
   grid-template-columns: 30px 108px minmax(150px, 1fr) minmax(140px, 190px) minmax(250px, 300px);
@@ -5910,6 +5944,10 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
   opacity: 0.48;
   background: #e8e6dd;
 }
+
+.component-review-row.is-critical { box-shadow: 3px 3px 0 #bd3a2e; }
+.component-review-row.is-check { box-shadow: 3px 3px 0 #b27200; }
+.component-review-row.is-reviewed { box-shadow: 3px 3px 0 #4f7a42; }
 
 .component-review-include {
   display: grid;
@@ -5979,6 +6017,16 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
 .component-review-identity small { display: block; width: fit-content; margin-top: 9px; font-size: 10px; }
 .component-review-identity b { padding: 3px 6px; border: 1px solid var(--ink); background: var(--acid); }
 .component-review-identity small { color: var(--quiet); }
+.component-review-state { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 7px; }
+.component-review-state > span { display: inline-flex; width: fit-content; padding: 3px 6px; overflow: visible; border: 1px solid var(--ink); background: #fff; color: var(--ink); font-size: 8px; font-weight: 800; line-height: 1; text-transform: uppercase; }
+.component-review-state > span.is-critical { background: #ffe0dc; }
+.component-review-state > span.is-check { background: #fff0c9; }
+.component-review-state > span.is-ready { background: #e6f7dc; }
+.component-review-state button { min-height: 22px; padding: 0 6px; border: 1px solid var(--ink); background: #fff; color: var(--ink); font-size: 8px; font-weight: 750; cursor: pointer; }
+.component-review-state button:hover { background: var(--acid); }
+.component-review-reasons { display: grid; gap: 3px; margin-top: 7px; padding: 6px 7px; border-left: 3px solid #b27200; background: #fff8e2; }
+.component-review-reasons.is-critical { border-left-color: #bd3a2e; background: #fff0ed; }
+.component-review-reasons > span { display: block; overflow: visible; color: var(--ink); font-size: 9px; line-height: 1.35; text-overflow: initial; white-space: normal; }
 .component-instances { margin-top: 8px; font-size: 10px; }
 .component-instances summary { width: fit-content; cursor: pointer; font-weight: 750; }
 .component-instances span { margin-top: 4px; padding-left: 8px; color: var(--quiet); font-family: ui-monospace, monospace; }
@@ -6227,6 +6275,10 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
 }
 
 @media (max-width: 1050px) {
+  .scan-review-console { grid-template-columns: 1fr; }
+  .scan-review-console-stats { width: 100%; }
+  .scan-review-lanes { grid-column: 1; grid-template-columns: 1fr 1fr; }
+
   .component-scan-progress-heading {
     grid-template-columns: 40px minmax(0, 1fr);
   }
@@ -6242,6 +6294,11 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
 }
 
 @media (max-width: 620px) {
+  .scan-review-console-stats { grid-template-columns: 1fr; }
+  .scan-review-console-stats > div { min-height: 46px; grid-template-columns: auto auto; gap: 7px; border-top: 1px solid var(--ink); border-left: 0; }
+  .scan-review-console-stats > div:first-child { border-top: 0; }
+  .scan-review-lanes { grid-template-columns: 1fr; }
+
   .component-scan-progress-footer {
     display: grid;
     gap: 5px;

@@ -85,6 +85,35 @@ applyComponentIntelligence([repeatedParent, ...repeatedChildren]);
 if (repeatedParent.recommendedDiveMode !== 'children-only') {
   throw new Error(`Expected repeated slot aggregate to recommend children-only, received ${repeatedParent.recommendedDiveMode}.`);
 }
+if (!repeatedParent.diveStructureSignature) throw new Error('Expected a structural signature for the repeated group.');
+const rememberedRepeatedParent = {
+  ...repeatedParent,
+  diveMode: 'keep-together',
+  diveRemembered: false,
+  learnedDiveDecisions: [{
+    signature: repeatedParent.diveStructureSignature,
+    mode: 'parent-and-children',
+  }],
+};
+applyComponentIntelligence([rememberedRepeatedParent, ...repeatedChildren]);
+if (!rememberedRepeatedParent.diveRemembered || rememberedRepeatedParent.recommendedDiveMode !== 'parent-and-children') {
+  throw new Error('Expected an exact matching structural signature to reuse the saved group choice.');
+}
+const hostedRepeatedParent = {
+  ...repeatedParent,
+  diveMode: 'keep-together',
+  diveRemembered: false,
+  analysisSource: 'hosted-family',
+  analysisState: 'analyzed',
+  familyName: 'Hotbar Slots',
+};
+applyComponentIntelligence([hostedRepeatedParent, ...repeatedChildren]);
+if (hostedRepeatedParent.recommendedDiveMode !== 'children-only' || !hostedRepeatedParent.diveConflict) {
+  throw new Error('Expected strong repeated-child structure to challenge an incorrect hosted keep-together choice.');
+}
+if (hostedRepeatedParent.reviewPriority !== 'critical') {
+  throw new Error('Expected a hosted/structural group-export disagreement to enter the blocking review queue.');
+}
 
 const closeChildren = [
   {
@@ -122,6 +151,72 @@ applyComponentIntelligence([closeParent, ...closeChildren]);
 if (closeParent.recommendedDiveMode !== 'keep-together') {
   throw new Error(`Expected overlapping close-button layers to stay together, received ${closeParent.recommendedDiveMode}.`);
 }
+const mismatchedRememberedCloseParent = {
+  ...closeParent,
+  diveMode: 'children-only',
+  diveRemembered: false,
+  learnedDiveDecisions: rememberedRepeatedParent.learnedDiveDecisions,
+};
+applyComponentIntelligence([mismatchedRememberedCloseParent, ...closeChildren]);
+if (mismatchedRememberedCloseParent.diveRemembered || mismatchedRememberedCloseParent.recommendedDiveMode !== 'keep-together') {
+  throw new Error('Expected a saved choice from a different child structure to be ignored.');
+}
+const hostedCloseParent = {
+  ...closeParent,
+  diveMode: 'children-only',
+  diveRemembered: false,
+  analysisSource: 'hosted-family',
+  analysisState: 'analyzed',
+  familyName: 'Close Button',
+};
+applyComponentIntelligence([hostedCloseParent, ...closeChildren]);
+if (hostedCloseParent.recommendedDiveMode !== 'keep-together' || !hostedCloseParent.diveConflict) {
+  throw new Error('Expected overlapping composition structure to challenge an incorrect hosted children-only choice.');
+}
+
+const panelChildren = [
+  {
+    ...result.components[0],
+    id: 'panel-icon',
+    visualHash: 'panel-icon-hash',
+    similarityFamily: 'panel-icon-family',
+    name: 'Quest Icon',
+    familyName: 'Quest Icon',
+    hierarchyKey: '2.0',
+    parentHierarchyKey: '2',
+    childHierarchyKeys: [],
+    assetType: 'Icon',
+    bounds: { x: 20, y: 20, width: 40, height: 40 },
+  },
+  {
+    ...result.components[1],
+    id: 'panel-button',
+    visualHash: 'panel-button-hash',
+    similarityFamily: 'panel-button-family',
+    name: 'Claim Button',
+    familyName: 'Claim Button',
+    hierarchyKey: '2.1',
+    parentHierarchyKey: '2',
+    childHierarchyKeys: [],
+    assetType: 'Button',
+    bounds: { x: 130, y: 130, width: 50, height: 30 },
+  },
+];
+const panelParent = {
+  ...result.components[2],
+  id: 'quest-panel',
+  name: 'Quest Panel',
+  familyName: 'Quest Panel',
+  hierarchyKey: '2',
+  parentHierarchyKey: '',
+  childHierarchyKeys: panelChildren.map((child) => child.hierarchyKey),
+  assetType: 'Panel',
+  bounds: { x: 0, y: 0, width: 200, height: 200 },
+};
+applyComponentIntelligence([panelParent, ...panelChildren]);
+if (panelParent.recommendedDiveMode !== 'parent-and-children') {
+  throw new Error(`Expected an assembled panel with independent children to recommend both, received ${panelParent.recommendedDiveMode}.`);
+}
 
 console.log(JSON.stringify({
   components: result.components.length,
@@ -132,5 +227,10 @@ console.log(JSON.stringify({
   groupSuggestedRole: groupResult.components[0].suggestedRole,
   insetBorderMetrics: insetMetrics,
   repeatedGroupMode: repeatedParent.recommendedDiveMode,
+  reusedMatchingStructure: rememberedRepeatedParent.recommendedDiveMode,
+  ignoredMismatchedStructure: mismatchedRememberedCloseParent.recommendedDiveMode,
   closeButtonMode: closeParent.recommendedDiveMode,
+  disputedRepeatedGroup: hostedRepeatedParent.diveConflict,
+  disputedCompositeGroup: hostedCloseParent.diveConflict,
+  assembledPanelMode: panelParent.recommendedDiveMode,
 }, null, 2));

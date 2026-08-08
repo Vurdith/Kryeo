@@ -1,4 +1,8 @@
-import type { ComponentCandidate, ComponentDiveMode } from '../shared/types';
+import type {
+  ComponentCandidate,
+  ComponentDiveMode,
+  ComponentReviewPriority,
+} from '../shared/types';
 import { cosineSimilarity, decodeEmbedding } from './embedding-utils.ts';
 
 function intersectionArea(left: ComponentCandidate['bounds'], right: ComponentCandidate['bounds']): number {
@@ -24,6 +28,141 @@ function separatedRatio(children: ComponentCandidate[]): number {
     }
   }
   return compared ? separated / compared : 0;
+}
+
+const COMPOSED_PARENT_TYPES = new Set<ComponentCandidate['assetType']>([
+  'Bar',
+  'Button',
+  'Frame',
+  'Input',
+  'Modal',
+  'Panel',
+  'Slot',
+  'Tab',
+  'TextBox',
+  'Tooltip',
+]);
+
+const INDEPENDENT_CHILD_TYPES = new Set<ComponentCandidate['assetType']>([
+  'Badge',
+  'Bar',
+  'Button',
+  'Cursor',
+  'Icon',
+  'Input',
+  'Label',
+  'ScrollBar',
+  'Slot',
+  'Tab',
+  'Text',
+  'TextBox',
+  'Tile',
+  'Tooltip',
+]);
+
+const GENERIC_GROUP_NAME = /^(?:group|container|layers?|items?|components?|elements?|children|content|holder|wrapper|root)(?:[\s_-]*\d+)?$/i;
+const GENERIC_FAMILY_NAME = /^(?:layer|group|frame|button|icon|panel|slot|element|component|asset|image|object|raster|vector|unknown)(?:[\s_-]*\d+)?$/i;
+
+function childCoverageRatio(component: ComponentCandidate, children: ComponentCandidate[]): number {
+  const parentArea = Math.max(1, area(component.bounds));
+  const covered = children.reduce((total, child) => total + intersectionArea(component.bounds, child.bounds), 0);
+  return Math.min(1, covered / parentArea);
+}
+
+function diveStructureSignature(component: ComponentCandidate, children: ComponentCandidate[]): string {
+  if (!children.length) return 'leaf';
+  const separationBucket = Math.round(separatedRatio(children) * 4);
+  const coverageBucket = Math.round(childCoverageRatio(component, children) * 4);
+  const childVisuals = children.map((child) => child.visualHash.slice(0, 12)).sort().join(',');
+  return `v1:${children.length}:${separationBucket}:${coverageBucket}:${childVisuals}`;
+}
+
+function structuralRecommendation(component: ComponentCandidate, children: ComponentCandidate[]): {
+  mode: ComponentDiveMode;
+  confidence: number;
+  reasons: string[];
+} {
+  const separation = separatedRatio(children);
+  const coverage = childCoverageRatio(component, children);
+  const repeatedChildFamily = children.length >= 2
+    && children.every((child) =>
+      child.visualHash === children[0].visualHash
+      || (
+        Boolean(child.similarityFamily)
+        && child.similarityFamily === children[0].similarityFamily
+      ));
+  const independentChildren = children.filter((child) => INDEPENDENT_CHILD_TYPES.has(child.assetType)).length;
+  const genericContainer = GENERIC_GROUP_NAME.test(component.name.trim());
+
+  if (repeatedChildFamily && separation >= 0.6) {
+    return {
+      mode: 'children-only',
+      confidence: 0.98,
+      reasons: ['Repeated child visuals occupy separate regions, so the parent behaves like an organizational container.'],
+    };
+  }
+
+  if (separation <= 0.35 && coverage >= 0.52) {
+    return {
+      mode: 'keep-together',
+      confidence: 0.94,
+      reasons: ['Child artwork overlaps into one composed visual; exporting the pieces separately would break the component.'],
+    };
+  }
+
+  if (COMPOSED_PARENT_TYPES.has(component.assetType) && independentChildren >= 2 && separation >= 0.45) {
+    return {
+      mode: 'parent-and-children',
+      confidence: 0.86,
+      reasons: ['The parent is a useful assembled UI component and also contains spatially independent reusable children.'],
+    };
+  }
+
+  if (genericContainer && independentChildren >= 2 && separation >= 0.45) {
+    return {
+      mode: 'children-only',
+      confidence: 0.88,
+      reasons: ['A generically named container holds separate reusable child components.'],
+    };
+  }
+
+  return {
+    mode: 'keep-together',
+    confidence: 0.66,
+    reasons: ['The hierarchy is structurally ambiguous, so Kryeo keeps the group intact as the safer reversible default.'],
+  };
+}
+
+function reviewAssessment(component: ComponentCandidate): {
+  priority: ComponentReviewPriority;
+  reasons: string[];
+} {
+  const critical: string[] = [];
+  const checks: string[] = [];
+  if (component.semanticConflict) critical.push(component.semanticConflictMessage || 'Visual and semantic evidence disagree.');
+  if (component.diveConflict) critical.push(component.diveConflictMessage || 'The hosted group-export choice conflicts with structural evidence.');
+  if (component.assetType === 'Unknown') critical.push('No reliable asset type was assigned.');
+  if (component.analysisState === 'needs-review') critical.push('The hosted reviewer explicitly requested human review.');
+  if (component.analysisState === 'provisional' || component.analysisState === 'queued') {
+    critical.push('This family does not have a complete hosted classification.');
+  }
+  const normalizedFamilyName = component.familyName.replace(/[\s_-]+/g, '').toLowerCase();
+  const normalizedAssetType = component.assetType.replace(/[\s_-]+/g, '').toLowerCase();
+  if (GENERIC_FAMILY_NAME.test(component.familyName.trim()) || normalizedFamilyName === normalizedAssetType) {
+    critical.push(`“${component.familyName}” is too generic to be a production layer name.`);
+  }
+  if (component.aiConfidence !== undefined && component.aiConfidence < 0.72) {
+    checks.push(`Classification confidence is ${Math.round(component.aiConfidence * 100)}%.`);
+  }
+  if (component.childHierarchyKeys.length > 0 && component.diveConfidence < 0.8) {
+    checks.push('The group-export decision has ambiguous structural evidence.');
+  }
+  if (component.analysisSource === 'unavailable' || !component.analysisSource) {
+    checks.push('The classification has not been confirmed by hosted analysis or saved learning.');
+  }
+  if (critical.length) return { priority: 'critical', reasons: [...new Set(critical)] };
+  if (checks.length) return { priority: 'check', reasons: [...new Set(checks)] };
+  return { priority: 'ready', reasons: [] };
 }
 
 function applySimilarityFamilies(components: ComponentCandidate[]): void {
@@ -95,15 +234,10 @@ function recommendation(component: ComponentCandidate, children: ComponentCandid
   mode: ComponentDiveMode;
   confidence: number;
   reasons: string[];
+  conflict?: boolean;
+  conflictMessage?: string;
 } {
   if (children.length === 0) return { mode: 'keep-together', confidence: 1, reasons: ['No independently reviewable child components.'] };
-  if (component.analysisSource === 'hosted-family') {
-    return {
-      mode: component.diveMode,
-      confidence: component.analysisState === 'needs-review' ? 0.5 : 1,
-      reasons: [component.analysisReason || 'Using the visual-family group recommendation.'],
-    };
-  }
   if (component.diveRemembered) {
     return {
       mode: component.diveMode,
@@ -111,31 +245,55 @@ function recommendation(component: ComponentCandidate, children: ComponentCandid
       reasons: ['Using the group export choice previously confirmed for this exact visual.'],
     };
   }
+  const structural = structuralRecommendation(component, children);
+  if (component.analysisSource === 'hosted-family') {
+    const hostedMode = component.diveMode;
+    if (hostedMode === structural.mode) {
+      return {
+        ...structural,
+        confidence: Math.max(structural.confidence, component.analysisState === 'needs-review' ? 0.62 : 0.9),
+        reasons: [...structural.reasons, 'Hosted and structural group analysis agree.'],
+      };
+    }
+    if (structural.confidence >= 0.84) {
+      return {
+        ...structural,
+        confidence: Math.min(0.68, structural.confidence),
+        reasons: [...structural.reasons, `Hosted analysis proposed ${hostedMode.replace(/-/g, ' ')}.`],
+        conflict: true,
+        conflictMessage: `Hosted analysis proposed ${hostedMode.replace(/-/g, ' ')}, but strong hierarchy and geometry evidence supports ${structural.mode.replace(/-/g, ' ')}.`,
+      };
+    }
+    return {
+      mode: hostedMode,
+      confidence: component.analysisState === 'needs-review' ? 0.45 : 0.72,
+      reasons: [...structural.reasons, `Hosted analysis selected ${hostedMode.replace(/-/g, ' ')}; review this ambiguous group.`],
+    };
+  }
   if (component.learnedDiveMode && component.nearestLearnedSimilarity && component.nearestLearnedSimilarity >= 0.92) {
+    if (component.learnedDiveMode === structural.mode) {
+      return {
+        ...structural,
+        confidence: Math.max(structural.confidence, Math.min(0.99, component.nearestLearnedSimilarity)),
+        reasons: [...structural.reasons, 'A visually similar saved group choice agrees with the current structure.'],
+      };
+    }
+    if (structural.confidence >= 0.84) {
+      return {
+        ...structural,
+        confidence: Math.min(0.68, structural.confidence),
+        reasons: [...structural.reasons, `Visual memory proposed ${component.learnedDiveMode.replace(/-/g, ' ')}.`],
+        conflict: true,
+        conflictMessage: `A visually similar saved choice proposed ${component.learnedDiveMode.replace(/-/g, ' ')}, but this instance has different strong structural evidence for ${structural.mode.replace(/-/g, ' ')}.`,
+      };
+    }
     return {
       mode: component.learnedDiveMode,
-      confidence: Math.min(0.99, component.nearestLearnedSimilarity),
-      reasons: ['Matched a visually similar group decision remembered on this computer.'],
+      confidence: 0.72,
+      reasons: [...structural.reasons, 'A similar saved group choice was used, but this structure still needs a quick check.'],
     };
   }
-
-  const repeatedChildFamily = children.length >= 2
-    && children.every((child) =>
-      child.visualHash === children[0].visualHash
-      || child.similarityFamily === children[0].similarityFamily
-      || child.duplicateKind === 'exact');
-  if (repeatedChildFamily && separatedRatio(children) >= 0.6) {
-    return {
-      mode: 'children-only',
-      confidence: 1,
-      reasons: ['Repeated child visuals occupy separate regions; the parent is treated as a container.'],
-    };
-  }
-  return {
-    mode: 'keep-together',
-    confidence: 1,
-    reasons: ['Kept together until a visual-family analysis or user decision says otherwise.'],
-  };
+  return structural;
 }
 
 export function applyComponentIntelligence(
@@ -151,11 +309,25 @@ export function applyComponentIntelligence(
     const children = component.childHierarchyKeys
       .map((key) => byKey.get(key))
       .filter((child): child is ComponentCandidate => Boolean(child));
+    component.diveStructureSignature = diveStructureSignature(component, children);
+    const exactDiveDecision = component.learnedDiveDecisions
+      ?.find((decision) => decision.signature === component.diveStructureSignature);
+    if (exactDiveDecision) {
+      component.diveMode = exactDiveDecision.mode;
+      component.diveRemembered = true;
+    } else if (component.learnedDiveDecisions?.length) {
+      component.diveRemembered = false;
+    }
     const proposed = recommendation(component, children);
     component.recommendedDiveMode = proposed.mode;
     component.diveConfidence = proposed.confidence;
     component.diveReasons = proposed.reasons;
+    component.diveConflict = Boolean(proposed.conflict);
+    component.diveConflictMessage = proposed.conflictMessage;
     if (!component.diveRemembered) component.diveMode = proposed.mode;
+    const review = reviewAssessment(component);
+    component.reviewPriority = review.priority;
+    component.reviewReasons = review.reasons;
   }
   return components;
 }

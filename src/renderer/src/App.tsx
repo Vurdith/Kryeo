@@ -1621,6 +1621,24 @@ function hierarchySelection(components: ComponentScanResult['components']): Set<
   return included;
 }
 
+function initialComponentExpansion(components: ComponentScanResult['components']): Set<string> {
+  if (components.length > 120) return new Set();
+  return new Set(components
+    .filter((component) => component.childHierarchyKeys.length > 0)
+    .map((component) => component.hierarchyKey));
+}
+
+function reviewPriority(component: ComponentScanResult['components'][number]): 'ready' | 'check' | 'critical' {
+  if (component.reviewPriority) return component.reviewPriority;
+  if (component.semanticConflict || component.analysisState === 'needs-review' || component.analysisState === 'provisional') return 'critical';
+  return component.analysisState === 'approved' || component.analysisState === 'analyzed' ? 'ready' : 'check';
+}
+
+function componentReviewKey(component: ComponentScanResult['components'][number]): string {
+  if (!component.childHierarchyKeys.length) return component.visualHash;
+  return `${component.visualHash}:group:${component.diveStructureSignature || component.hierarchyKey}`;
+}
+
 function ComponentScanPage({ document, connected, onWorkspace }: {
   document: DocumentContext;
   connected: boolean;
@@ -1640,6 +1658,8 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [evidenceLoading, setEvidenceLoading] = useState<Set<string>>(new Set());
   const [reviewFilter, setReviewFilter] = useState<'all' | 'ui' | 'construction' | 'background'>('all');
+  const [reviewLane, setReviewLane] = useState<'attention' | 'structure' | 'ready' | 'all'>('attention');
+  const [reviewedItems, setReviewedItems] = useState<Set<string>>(new Set());
   const [watchSelection, setWatchSelection] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -1654,6 +1674,8 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setScanStartedAt(Date.now());
     setScanElapsed(0);
     setEvidenceLoading(new Set());
+    setReviewedItems(new Set());
+    setReviewLane('attention');
     setScanProgress({
       phase: 'preparing',
       label: 'Preparing scan',
@@ -1666,7 +1688,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
       const result = await window.kryeo.scanComponents(scope);
       setScan(result);
       setIncluded(hierarchySelection(result.components));
-      setExpanded(new Set(result.components.filter((component) => component.childHierarchyKeys.length > 0).map((component) => component.hierarchyKey)));
+      setExpanded(initialComponentExpansion(result.components));
     } catch (scanError) {
       setScan(null);
       setError(scanError instanceof Error ? scanError.message : String(scanError));
@@ -1680,9 +1702,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     if (!progress.partialResult) return;
     setScan(progress.partialResult);
     setIncluded(hierarchySelection(progress.partialResult.components));
-    setExpanded(new Set(progress.partialResult.components
-      .filter((component) => component.childHierarchyKeys.length > 0)
-      .map((component) => component.hierarchyKey)));
+    setExpanded(initialComponentExpansion(progress.partialResult.components));
   }), []);
 
   useEffect(() => {
@@ -1712,7 +1732,8 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     return () => window.clearTimeout(timer);
   }, [connected, document.open, document.selectionCount, document.selectionNames.join('|'), watchSelection]);
 
-  const updateFamily = (visualHash: string, patch: Partial<Pick<ComponentScanResult['components'][number], 'role' | 'assetType' | 'familyName'>>) => {
+  const updateFamily = (reviewedComponent: ComponentScanResult['components'][number], patch: Partial<Pick<ComponentScanResult['components'][number], 'role' | 'assetType' | 'familyName'>>) => {
+    const visualHash = reviewedComponent.visualHash;
     setScan((current) => current ? {
       ...current,
       components: (() => {
@@ -1728,17 +1749,36 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
         });
       })(),
     } : current);
+    setReviewedItems((current) => new Set(current).add(componentReviewKey(reviewedComponent)));
     setMessage('');
   };
 
   const updateDiveMode = (component: ComponentScanResult['components'][number], diveMode: ComponentDiveMode) => {
     setScan((current) => {
       if (!current) return current;
-      const components = current.components.map((candidate) => candidate.visualHash === component.visualHash ? { ...candidate, diveMode, diveRemembered: true } : candidate);
+      const reviewKey = componentReviewKey(component);
+      const components = current.components.map((candidate) => componentReviewKey(candidate) === reviewKey ? {
+        ...candidate,
+        diveMode,
+        diveRemembered: true,
+        diveConflict: false,
+        diveConflictMessage: undefined,
+      } : candidate);
       setIncluded(hierarchySelection(components));
       return { ...current, components };
     });
+    setReviewedItems((current) => new Set(current).add(componentReviewKey(component)));
     setMessage('');
+  };
+
+  const toggleReviewed = (component: ComponentScanResult['components'][number]) => {
+    setReviewedItems((current) => {
+      const next = new Set(current);
+      const key = componentReviewKey(component);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
 
   const loadFamilyEvidence = async (component: ComponentScanResult['components'][number]) => {
@@ -1914,6 +1954,28 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
           : 'Based on visual analysis';
     return `${source} / Export category: ${componentLocation(component)}`;
   };
+  const reviewRows = useMemo(() => {
+    if (!scan) return [];
+    const seenExact = new Set<string>();
+    return scan.components.filter((component) => {
+      if (component.duplicateKind !== 'exact') return true;
+      const key = componentReviewKey(component);
+      if (seenExact.has(key)) return false;
+      seenExact.add(key);
+      return true;
+    });
+  }, [scan]);
+  const reviewStats = useMemo(() => {
+    const unresolved = reviewRows.filter((component) => reviewPriority(component) !== 'ready' && !reviewedItems.has(componentReviewKey(component)));
+    return {
+      attention: unresolved.length,
+      critical: unresolved.filter((component) => reviewPriority(component) === 'critical').length,
+      structure: reviewRows.filter((component) => component.childHierarchyKeys.length > 0).length,
+      ready: reviewRows.filter((component) => reviewPriority(component) === 'ready').length,
+      reviewed: reviewRows.filter((component) => reviewedItems.has(componentReviewKey(component))).length,
+      all: reviewRows.length,
+    };
+  }, [reviewRows, reviewedItems]);
   const visibleComponents = useMemo(() => {
     if (!scan) return [];
     const byParent = new Map<string, ComponentScanResult['components']>();
@@ -1928,19 +1990,25 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     const visit = (parentKey: string) => {
       for (const component of byParent.get(parentKey) || []) {
         ordered.push(component);
-        if (expanded.has(component.hierarchyKey)) visit(component.hierarchyKey);
+        if (reviewLane !== 'all' || expanded.has(component.hierarchyKey)) visit(component.hierarchyKey);
       }
     };
     visit('');
     const seenExact = new Set<string>();
     return ordered.filter((component) => {
       if (reviewFilter !== 'all' && (component.reviewCategory || 'ui') !== reviewFilter) return false;
+      const priority = reviewPriority(component);
+      const reviewed = reviewedItems.has(componentReviewKey(component));
+      if (reviewLane === 'attention' && (priority === 'ready' || reviewed)) return false;
+      if (reviewLane === 'structure' && component.childHierarchyKeys.length === 0) return false;
+      if (reviewLane === 'ready' && priority !== 'ready') return false;
       if (component.duplicateKind !== 'exact') return true;
-      if (seenExact.has(component.visualHash)) return false;
-      seenExact.add(component.visualHash);
+      const key = componentReviewKey(component);
+      if (seenExact.has(key)) return false;
+      seenExact.add(key);
       return true;
     });
-  }, [expanded, reviewFilter, scan]);
+  }, [expanded, reviewFilter, reviewLane, reviewedItems, scan]);
 
   return (
     <div className="component-scan-page">
@@ -2082,6 +2150,33 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             </div>
           )}
 
+          <section className="scan-review-console" aria-label="Component review queue">
+            <div className="scan-review-console-copy">
+              <span>Exception-first review</span>
+              <h2>{reviewStats.attention
+                ? `${reviewStats.attention} ${reviewStats.attention === 1 ? 'decision needs' : 'decisions need'} a look`
+                : 'No unresolved exceptions'}</h2>
+              <p>{reviewStats.ready} low-risk visual {reviewStats.ready === 1 ? 'family is' : 'families are'} kept out of the way. Review semantic conflicts, weak names, incomplete analysis, and disputed group exports first.</p>
+            </div>
+            <div className="scan-review-console-stats">
+              <div className={reviewStats.critical ? 'has-critical' : ''}><strong>{reviewStats.critical}</strong><span>blocking</span></div>
+              <div><strong>{reviewStats.reviewed}</strong><span>reviewed</span></div>
+              <div><strong>{reviewStats.ready}</strong><span>low risk</span></div>
+            </div>
+            <nav className="scan-review-lanes" aria-label="Review queue">
+              {([
+                ['attention', 'Needs review', reviewStats.attention],
+                ['structure', 'Group exports', reviewStats.structure],
+                ['ready', 'Low risk', reviewStats.ready],
+                ['all', 'Everything', reviewStats.all],
+              ] as const).map(([lane, label, count]) => (
+                <button className={reviewLane === lane ? 'is-active' : ''} key={lane} onClick={() => setReviewLane(lane)}>
+                  <span>{label}</span><b>{count}</b>
+                </button>
+              ))}
+            </nav>
+          </section>
+
           <div className="scan-review-heading">
             <div><span>{scan.documentTitle}</span><h2>{scan.sourceName}</h2></div>
             <div className="scan-filter" aria-label="Filter reviewed layers">
@@ -2090,12 +2185,20 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
           </div>
 
           <section className="component-review-list">
+            {visibleComponents.length === 0 && (
+              <div className="component-review-empty">
+                <CircleCheck size={24} />
+                <div><b>{reviewLane === 'attention' ? 'Exception queue cleared' : 'Nothing matches this view'}</b><span>{reviewLane === 'attention' ? 'Low-risk families remain available under Low risk or Everything.' : 'Try another review lane or category.'}</span></div>
+              </div>
+            )}
             {visibleComponents.map((component, index) => {
               const evidenceAvailable = Object.values(component.aiEvidence || {}).some((score) => Number(score) > 0);
               const familyEvidenceKey = component.familyFingerprint || component.visualHash;
               const loadingEvidence = evidenceLoading.has(familyEvidenceKey);
+              const priority = reviewPriority(component);
+              const reviewed = reviewedItems.has(componentReviewKey(component));
               return (
-                <article className={`component-review-row ${included.has(component.id) ? '' : 'is-excluded'}`} style={{ marginLeft: `${Math.min(5, component.hierarchyDepth) * 18}px` }} key={component.id}>
+                <article className={`component-review-row is-${priority}${reviewed ? ' is-reviewed' : ''} ${included.has(component.id) ? '' : 'is-excluded'}`} style={{ marginLeft: `${Math.min(5, component.hierarchyDepth) * 18}px` }} key={component.id}>
                 <label className="component-review-include" title="Include in Affinity organization">
                   <input type="checkbox" checked={included.has(component.id)} onChange={(event) => setIncluded((current) => {
                     const next = new Set(current);
@@ -2117,6 +2220,15 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                     <h3>{component.name}</h3>
                   </div>
                   <span>{Math.round(component.bounds.width)} × {Math.round(component.bounds.height)} px · {component.affinityType}</span>
+                  <div className="component-review-state">
+                    <span className={`is-${priority}`}>{reviewed ? 'Reviewed' : priority === 'ready' ? 'Low risk' : priority === 'critical' ? 'Blocking review' : 'Quick check'}</span>
+                    {priority !== 'ready' && <button type="button" onClick={() => toggleReviewed(component)}>{reviewed ? 'Reopen' : 'Mark reviewed'}</button>}
+                  </div>
+                  {!reviewed && Boolean(component.reviewReasons?.length) && (
+                    <div className={`component-review-reasons is-${priority}`}>
+                      {component.reviewReasons?.slice(0, 2).map((reason) => <span key={reason}>{reason}</span>)}
+                    </div>
+                  )}
                   {component.duplicateKind === 'exact'
                     ? <b>Exact visual · {component.duplicateCount} instances</b>
                     : component.duplicateKind === 'similar' ? <b>Similar family · {component.similarCount} visuals</b> : <small>Unique visual</small>}
@@ -2161,16 +2273,17 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                   {component.keptInsideParent && <b>Kept inside parent by project rule</b>}
                   {component.duplicateKind === 'exact' && <details className="component-instances"><summary>View all instances</summary>{scan.components.filter((item) => item.visualHash === component.visualHash).map((item) => <span key={item.id}>{item.name} · {item.members[0]?.path.join('.') || 'unknown path'}</span>)}</details>}
                   {component.semanticConflict && <div className="semantic-conflict"><CircleAlert size={13} /><span>{component.semanticConflictMessage}</span></div>}
+                  {component.diveConflict && <div className="semantic-conflict"><CircleAlert size={13} /><span>{component.diveConflictMessage}</span></div>}
                 </div>
                 <label className="component-family-field">
                   Suggested layer name
-                  <input value={component.familyName} onChange={(event) => updateFamily(component.visualHash, { familyName: event.target.value })} />
+                  <input value={component.familyName} onChange={(event) => updateFamily(component, { familyName: event.target.value })} />
                   <span>{componentContextLabel(component)}</span>
                 </label>
                 <div className="component-classification-fields">
                   <label className="component-role-field">
                     Asset type
-                    <select value={component.assetType} onChange={(event) => updateFamily(component.visualHash, { assetType: event.target.value as ComponentAssetType })}>
+                    <select value={component.assetType} onChange={(event) => updateFamily(component, { assetType: event.target.value as ComponentAssetType })}>
                       {COMPONENT_ASSET_TYPES.map((type) => <option key={type}>{type}</option>)}
                     </select>
                     <span>{component.analysisSource === 'approved-family'
@@ -2181,7 +2294,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                   </label>
                   <label className="component-role-field">
                     Roblox role
-                    <select value={component.role} onChange={(event) => updateFamily(component.visualHash, { role: event.target.value as RobloxUiRole })}>
+                    <select value={component.role} onChange={(event) => updateFamily(component, { role: event.target.value as RobloxUiRole })}>
                       {ROBLOX_UI_ROLES.map((role) => <option key={role}>{role}</option>)}
                     </select>
                     <span>{component.remembered ? 'Remembered choice' : `Mapped from ${component.assetType}`}</span>
@@ -2195,9 +2308,10 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                     </select>
                     <span>{component.diveRemembered
                       ? 'Using your saved family choice'
-                      : component.diveMode === component.recommendedDiveMode
-                        ? 'Visual-family recommendation'
-                        : `Suggested: ${component.recommendedDiveMode.replace(/-/g, ' ')}`}</span>
+                      : component.diveReasons[0]
+                        || (component.diveMode === component.recommendedDiveMode
+                          ? 'Structural and visual-family recommendation'
+                          : `Suggested: ${component.recommendedDiveMode.replace(/-/g, ' ')}`)}</span>
                   </label>}
                 </div>
                 </article>
@@ -2206,11 +2320,15 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
           </section>
 
           <footer className="scan-actions">
-            <div>{message ? <><CircleCheck size={16} />{message}</> : `${included.size} of ${scan.components.length} proposed components included`}</div>
+            <div>{message
+              ? <><CircleCheck size={16} />{message}</>
+              : reviewStats.attention
+                ? <><CircleAlert size={16} />Review {reviewStats.attention} remaining {reviewStats.attention === 1 ? 'exception' : 'exceptions'} before applying</>
+                : <><CircleCheck size={16} />{included.size} of {scan.components.length} components included · review complete</>}</div>
             <button className="secondary-button" disabled={scanning} onClick={() => void runScan()}><RefreshCw size={16} />Rescan {scanScope}</button>
-            <button className="run-button" disabled={saving} onClick={() => void rememberChoices()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saving ? 'Saving choices' : 'Remember choices'}</button>
-            <button className="secondary-button" disabled={applying || scanScope !== 'document' || included.size === 0} onClick={() => void applyNames()}>{applying ? <LoaderCircle className="spin" size={16} /> : <FileCode2 size={16} />}{applying ? 'Applying names' : 'Apply names'}</button>
-            <button className="run-button" disabled={applying || scanScope !== 'document' || included.size === 0} onClick={() => void applyOrganization()}>{applying ? <LoaderCircle className="spin" size={16} /> : <Layers3 size={16} />}{applying ? 'Organizing Affinity' : 'Apply to Affinity'}</button>
+            <button className="run-button" disabled={saving || reviewStats.attention > 0} title={reviewStats.attention ? 'Clear the exception queue before saving these choices.' : ''} onClick={() => void rememberChoices()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saving ? 'Saving choices' : 'Remember choices'}</button>
+            <button className="secondary-button" disabled={applying || scanScope !== 'document' || included.size === 0 || reviewStats.attention > 0} title={reviewStats.attention ? 'Clear the exception queue before renaming Affinity layers.' : ''} onClick={() => void applyNames()}>{applying ? <LoaderCircle className="spin" size={16} /> : <FileCode2 size={16} />}{applying ? 'Applying names' : 'Apply names'}</button>
+            <button className="run-button" disabled={applying || scanScope !== 'document' || included.size === 0 || reviewStats.attention > 0} title={reviewStats.attention ? 'Clear the exception queue before changing Affinity organization.' : ''} onClick={() => void applyOrganization()}>{applying ? <LoaderCircle className="spin" size={16} /> : <Layers3 size={16} />}{applying ? 'Organizing Affinity' : 'Apply to Affinity'}</button>
           </footer>
         </>
       )}
