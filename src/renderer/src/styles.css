@@ -1017,7 +1017,7 @@ select {
 
 .metrics-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border: 1px solid var(--line);
   background: var(--panel);
 }
@@ -5807,7 +5807,7 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
 
 .scan-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   margin-top: 24px;
   border: 2px solid var(--ink);
   background: var(--paper);
@@ -5825,6 +5825,32 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
 .scan-summary > div:last-child { border-right: 0; }
 .scan-summary span { color: var(--quiet); font-size: 11px; }
 .scan-summary strong { font-size: 25px; line-height: 1; }
+
+.scan-diagnostics {
+  margin-top: 12px;
+  border: 1px solid var(--ink);
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  font-size: 12px;
+}
+
+.scan-diagnostics summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 700;
+}
+
+.scan-diagnostics > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 0 12px 12px;
+  color: var(--quiet);
+}
+
+.scan-diagnostics-warning {
+  flex-basis: 100%;
+  color: var(--danger);
+}
 
 .scan-review-heading {
   display: flex;

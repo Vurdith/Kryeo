@@ -140,6 +140,7 @@ const toolIcons = {
 
 const categoryOrder: ToolCategory[] = ['Assets', 'Pixel tools', 'Symmetry', 'Utilities'];
 const minimumBootMs = import.meta.env.DEV ? Number(import.meta.env.VITE_KRYEO_BOOT_MS || 2400) : 2400;
+const DEFAULT_HOSTED_AI_ENDPOINT = String(import.meta.env.VITE_KRYEO_AI_ENDPOINT || 'http://127.0.0.1:8787');
 
 const ASSET_TYPES = [
   'Frame', 'Button', 'Icon', 'Panel', 'Slot', 'Bar', 'Badge', 'Label', 'Text', 'TextBox',
@@ -156,6 +157,17 @@ function codePart(value: string): string {
 
 function categoryForType(type: string): string {
   return `${type}s`;
+}
+
+function hostedModelLabel(model?: string): string {
+  const normalized = String(model || '').trim();
+  if (!normalized) return 'Hosted reviewer';
+  const lower = normalized.toLowerCase();
+  if (lower.includes('gemini-3.1-flash-lite')) return 'Gemini 3.1 Flash Lite';
+  if (lower.includes('gemini-3-flash')) return 'Gemini 3 Flash';
+  if (lower.includes('gemini')) return 'Gemini hosted reviewer';
+  if (lower.includes('qwen')) return 'Qwen';
+  return normalized.split('/').pop()?.replace(/[-_]+/g, ' ') || 'Hosted reviewer';
 }
 
 function readActivity(): ActivityEntry[] {
@@ -177,6 +189,15 @@ function formatDate(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
+}
+
+function formatDuration(milliseconds: number): string {
+  const duration = Math.max(0, Math.round(milliseconds));
+  if (duration < 1_000) return `${duration}ms`;
+  if (duration < 60_000) return `${(duration / 1_000).toFixed(1)}s`;
+  const minutes = Math.floor(duration / 60_000);
+  const seconds = Math.round((duration % 60_000) / 1_000);
+  return `${minutes}m ${seconds}s`;
 }
 
 function relativeDate(value: string): string {
@@ -1617,10 +1638,14 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
   const [applying, setApplying] = useState(false);
   const [included, setIncluded] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [evidenceLoading, setEvidenceLoading] = useState<Set<string>>(new Set());
   const [reviewFilter, setReviewFilter] = useState<'all' | 'ui' | 'construction' | 'background'>('all');
   const [watchSelection, setWatchSelection] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const activeModelRequests = hostedAi?.modelActive ?? (hostedAi?.queueDepth ? 1 : 0);
+  const queuedModelRequests = hostedAi?.modelQueued ?? Math.max(0, (hostedAi?.queueDepth || 0) - activeModelRequests);
+  const hostedReviewer = hostedModelLabel(hostedAi?.model);
 
   const runScan = async (scope: ComponentScanScope = scanScope) => {
     if (!connected || scanning) return;
@@ -1628,6 +1653,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setScanning(true);
     setScanStartedAt(Date.now());
     setScanElapsed(0);
+    setEvidenceLoading(new Set());
     setScanProgress({
       phase: 'preparing',
       label: 'Preparing scan',
@@ -1715,6 +1741,71 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setMessage('');
   };
 
+  const loadFamilyEvidence = async (component: ComponentScanResult['components'][number]) => {
+    if (!scan || !hostedAi?.available) return;
+    const familyKey = component.familyFingerprint || component.visualHash;
+    if (evidenceLoading.has(familyKey) || Object.values(component.aiEvidence || {}).some((score) => Number(score) > 0)) return;
+    setEvidenceLoading((current) => new Set(current).add(familyKey));
+    try {
+      const parent = scan.components.find((candidate) => candidate.hierarchyKey === component.parentHierarchyKey);
+      const childNames = component.childHierarchyKeys
+        .map((key) => scan.components.find((candidate) => candidate.hierarchyKey === key)?.name || '')
+        .filter(Boolean);
+      const siblingNames = parent
+        ? parent.childHierarchyKeys
+          .filter((key) => key !== component.hierarchyKey)
+          .map((key) => scan.components.find((candidate) => candidate.hierarchyKey === key)?.name || '')
+          .filter(Boolean)
+        : [];
+      const evidence = await window.kryeo.explainComponentFamily({
+        familyFingerprint: component.familyFingerprint,
+        visualHash: component.visualHash,
+        familyName: component.familyName,
+        assetType: component.assetType,
+        role: component.role,
+        sourceName: component.name,
+        affinityType: component.affinityType,
+        bounds: component.bounds,
+        previewUrl: component.previewUrl,
+        visualMetrics: component.visualMetrics,
+        parentName: parent?.name,
+        childNames,
+        siblingNames,
+      });
+      setScan((current) => current ? {
+        ...current,
+        components: current.components.map((candidate) => {
+          const sameFamily = candidate.familyFingerprint
+            ? candidate.familyFingerprint === component.familyFingerprint
+            : candidate.visualHash === component.visualHash;
+          return sameFamily ? {
+            ...candidate,
+            aiConfidence: evidence.confidence,
+            aiEvidence: evidence.evidence,
+            aiReason: evidence.reason,
+            analysisReason: evidence.reason,
+            analysisAlternatives: evidence.alternatives,
+            aiEvidenceSupportsClassification: evidence.supportsClassification,
+            aiEvidenceSuggestedName: evidence.suggestedName,
+            aiEvidenceSuggestedType: evidence.suggestedType,
+            aiEvidenceSuggestedRole: evidence.suggestedRole,
+            semanticConflict: Boolean(candidate.semanticConflict || evidence.conflict),
+            semanticConflictMessage: evidence.conflictMessage || candidate.semanticConflictMessage,
+            analysisState: evidence.conflict || evidence.confidence < 0.72 ? 'needs-review' : candidate.analysisState,
+          } : candidate;
+        }),
+      } : current);
+    } catch (evidenceError) {
+      setError(evidenceError instanceof Error ? evidenceError.message : String(evidenceError));
+    } finally {
+      setEvidenceLoading((current) => {
+        const next = new Set(current);
+        next.delete(familyKey);
+        return next;
+      });
+    }
+  };
+
   const rememberChoices = async () => {
     if (!scan || saving) return;
     setSaving(true);
@@ -1796,7 +1887,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     if (!scanning) return;
     await window.kryeo.cancelComponentScan();
     setScanning(false);
-    setError('Component scan cancelled. Partial local and Qwen results remain available for review.');
+    setError('Component scan cancelled. Partial local and hosted results remain available for review.');
   };
   const componentLocation = (component: ComponentScanResult['components'][number]): string => {
     const irregular: Partial<Record<ComponentAssetType, string>> = {
@@ -1810,6 +1901,18 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     const parent = scan?.components.find((candidate) => candidate.hierarchyKey === component.parentHierarchyKey);
     const subcategory = parent && parent.diveMode !== 'keep-together' ? parent.familyName : '';
     return [category, subcategory].filter(Boolean).join(' / ');
+  };
+  const componentContextLabel = (component: ComponentScanResult['components'][number]): string => {
+    const parent = scan?.components.find((candidate) => candidate.hierarchyKey === component.parentHierarchyKey);
+    if (parent) return `Parent: ${parent.familyName} / ${componentLocation(component)}`;
+    const source = component.nameSource === 'both'
+      ? 'Visual and layer name agree'
+      : component.nameSource === 'layer-name'
+        ? 'Based on the current layer name'
+        : component.nameSource === 'memory'
+          ? 'Learned from a correction'
+          : 'Based on visual analysis';
+    return `${source} / Export category: ${componentLocation(component)}`;
   };
   const visibleComponents = useMemo(() => {
     if (!scan) return [];
@@ -1873,13 +1976,13 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             <b>{hostedAi?.available ? hostedAi.model : localAi?.available ? `${localAi.model} clustering` : 'Visual analysis unavailable'}</b>
             <span>{hostedAi?.available
               ? scanning
-                ? hostedAi.queueDepth > 1
-                  ? `Qwen is active. ${hostedAi.queueDepth - 1} ${hostedAi.queueDepth - 1 === 1 ? 'request is' : 'requests are'} ahead of this scan.`
-                  : hostedAi.queueDepth === 1
-                    ? 'Qwen is actively analysing this scan.'
-                    : 'Preparing visual families for Qwen.'
-                : hostedAi.queueDepth
-                  ? `Qwen is processing ${hostedAi.queueDepth} ${hostedAi.queueDepth === 1 ? 'request' : 'requests'}.`
+                ? queuedModelRequests
+                  ? `${hostedReviewer} is active. ${queuedModelRequests} ${queuedModelRequests === 1 ? 'request is' : 'requests are'} waiting in the shared queue.`
+                  : activeModelRequests
+                    ? `${hostedReviewer} is actively analysing this scan.`
+                    : `Preparing visual families for ${hostedReviewer}.`
+                : activeModelRequests || queuedModelRequests
+                  ? `${hostedReviewer} is processing ${activeModelRequests} active ${activeModelRequests === 1 ? 'request' : 'requests'}${queuedModelRequests ? ` with ${queuedModelRequests} waiting` : ''}.`
                   : 'Ready for new visual families.'
               : 'Kryeo can group duplicates locally; semantic classifications remain provisional until the hosted model reconnects.'}</span>
           </div>
@@ -1909,7 +2012,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             <span>{scanProgress?.completedFamilies !== undefined && scanProgress.totalFamilies
               ? `${scanProgress.completedFamilies} of ${scanProgress.totalFamilies} families · ${scanProgress.cachedFamilies || 0} cached${scanProgress.failedFamilies ? ` · ${scanProgress.failedFamilies} failed` : ''}`
               : `${scanProgress?.progress || 2}%`}</span>
-            <span>{scanProgress?.phase === 'hosted-analysis' ? 'Qwen response times vary for uncached artwork.' : 'Keep Kryeo and Affinity open.'}</span>
+            <span>{scanProgress?.phase === 'hosted-analysis' ? 'Hosted reviewer response times vary for uncached artwork.' : 'Keep Kryeo and Affinity open.'}</span>
           </div>
         </section>
       )}
@@ -1929,12 +2032,31 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             <div><span>Unique visuals</span><strong>{scan.uniqueVisuals}</strong></div>
             <div><span>Exact duplicate families</span><strong>{scan.duplicateFamilies}</strong></div>
             <div><span>Uploads avoided</span><strong>{scan.reusedInstances}</strong></div>
+            <div title={`Target $${(scan.hostedTargetUsd ?? 0.01).toFixed(2)} · ceiling $${(scan.hostedBudgetUsd ?? 0.03).toFixed(2)}`}>
+              <span>Cloud spend</span><strong>${(scan.hostedProviderCostUsd || 0).toFixed(4)}</strong>
+            </div>
+            {scan.diagnostics && <div><span>Scan time</span><strong>{formatDuration(scan.diagnostics.totalMs)}</strong></div>}
           </section>
-          {!scan.hostedAnalysisAvailable && scan.hostedAnalysisError && (
+          {scan.diagnostics && (
+            <details className="scan-diagnostics">
+              <summary>Scan diagnostics · {scan.diagnostics.hostedRequestCount} cloud request{scan.diagnostics.hostedRequestCount === 1 ? '' : 's'}</summary>
+              <div>
+                <span>Affinity export <b>{formatDuration(scan.diagnostics.stages.affinityExportMs)}</b></span>
+                <span>Image preparation <b>{formatDuration(scan.diagnostics.stages.imagePreparationMs)}</b></span>
+                <span>Local analysis <b>{formatDuration(scan.diagnostics.stages.localAnalysisMs)}</b></span>
+                <span>Document context <b>{formatDuration(scan.diagnostics.stages.contextCaptureMs)}</b></span>
+                <span>Hosted analysis <b>{formatDuration(scan.diagnostics.stages.hostedAnalysisMs)}</b></span>
+                <span>Finalization <b>{formatDuration(scan.diagnostics.stages.finalizationMs)}</b></span>
+                <span>{scan.diagnostics.visualFamilyCount} visual families · {scan.diagnostics.cachedFamilyCount} cached · {scan.diagnostics.failedFamilyCount} failed · {scan.diagnostics.budgetLimitedFamilyCount} budget-limited</span>
+                {scan.diagnostics.warnings.map((warning) => <span className="scan-diagnostics-warning" key={warning}>{warning}</span>)}
+              </div>
+            </details>
+          )}
+          {scan.hostedAnalysisError && (
             <div className="inline-notice inline-notice--error">
               <CircleAlert size={18} />
               <div>
-                <b>Qwen analysis could not finish</b>
+                <b>Hosted analysis could not finish</b>
                 <span>{scan.hostedAnalysisError}</span>
               </div>
             </div>
@@ -1959,6 +2081,8 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
           <section className="component-review-list">
             {visibleComponents.map((component, index) => {
               const evidenceAvailable = Object.values(component.aiEvidence || {}).some((score) => Number(score) > 0);
+              const familyEvidenceKey = component.familyFingerprint || component.visualHash;
+              const loadingEvidence = evidenceLoading.has(familyEvidenceKey);
               return (
                 <article className={`component-review-row ${included.has(component.id) ? '' : 'is-excluded'}`} style={{ marginLeft: `${Math.min(5, component.hierarchyDepth) * 18}px` }} key={component.id}>
                 <label className="component-review-include" title="Include in Affinity organization">
@@ -1988,18 +2112,39 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                   <small>{component.members.length > 1 ? `${component.members.length} source layers composed together` : component.grouping === 'existing-group' ? 'Existing Affinity group' : 'Single source layer'}</small>
                   {Boolean(component.learnedFrom) && <small>Learning memory · {component.learnedFrom} nearby example{component.learnedFrom === 1 ? '' : 's'}</small>}
                   {component.aiConfidence !== undefined && (
-                    <details className={`component-evidence ${component.semanticConflict ? 'has-conflict' : ''}`}>
-                      <summary>{evidenceAvailable
-                        ? `${Math.round(component.aiConfidence * 100)}% confidence${component.semanticConflict ? ' · evidence conflict' : ''}`
-                        : 'Evidence unavailable · needs review'}</summary>
+                    <details
+                      className={`component-evidence ${component.semanticConflict ? 'has-conflict' : ''}`}
+                      onToggle={(event) => {
+                        if (event.currentTarget.open && !evidenceAvailable) void loadFamilyEvidence(component);
+                      }}
+                    >
+                      <summary>{loadingEvidence
+                        ? `Loading ${hostedReviewer} evidence…`
+                        : evidenceAvailable
+                          ? `${Math.round(component.aiConfidence * 100)}% confidence${component.semanticConflict ? ' · evidence conflict' : ''}`
+                          : component.analysisState === 'needs-review'
+                            ? `${hostedReviewer} marked this for review · open for evidence`
+                            : `${hostedReviewer} classified this family · open for evidence`}</summary>
                       {evidenceAvailable
                         ? <>
                             <span>Visual {Math.round((component.aiEvidence?.visual || 0) * 100)}%</span>
                             <span>Layer name {Math.round((component.aiEvidence?.layerName || 0) * 100)}%</span>
                             <span>Hierarchy {Math.round((component.aiEvidence?.hierarchy || 0) * 100)}%</span>
                             <span>Learned context {Math.round((component.aiEvidence?.learned || 0) * 100)}%</span>
+                            {component.aiModelSuggestedType && (
+                              <span>Model proposal: {component.aiModelSuggestedName || component.familyName} / {component.aiModelSuggestedType}{component.aiModelSuggestedType !== component.assetType ? ` → Kryeo final: ${component.assetType}` : ''}</span>
+                            )}
+                            {component.aiNormalizationReason && <span>{component.aiNormalizationReason}</span>}
+                            {component.aiEvidenceSuggestedType && !component.aiEvidenceSupportsClassification && (
+                              <span>Independent check suggests {component.aiEvidenceSuggestedName || component.familyName} / {component.aiEvidenceSuggestedType} / {component.aiEvidenceSuggestedRole || 'ImageLabel'}.</span>
+                            )}
+                            {component.visualMetrics?.innerVisibleRatio !== undefined && (
+                              <span>Topology: {Math.round(component.visualMetrics.innerVisibleRatio * 100)}% inner fill · {Math.round((component.visualMetrics.contentPerimeterVisibleRatio || 0) * 100)}% perimeter fill · {Math.round((component.visualMetrics.contentPerimeterCoverage || 0) * 100)}% side coverage</span>
+                            )}
                           </>
-                        : <span>Qwen classified this family, but did not provide numeric evidence scores. Review the suggestion before export.</span>}
+                        : <span>{loadingEvidence
+                          ? `Requesting a detailed explanation from ${hostedReviewer}.`
+                          : 'Detailed evidence is generated only when you open this panel, keeping normal scans inexpensive.'}</span>}
                     </details>
                   )}
                   {component.keptInsideParent && <b>Kept inside parent by project rule</b>}
@@ -2009,9 +2154,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                 <label className="component-family-field">
                   Suggested layer name
                   <input value={component.familyName} onChange={(event) => updateFamily(component.visualHash, { familyName: event.target.value })} />
-                  <span>{component.parentHierarchyKey
-                    ? `Parent context · ${componentLocation(component)}`
-                    : `${component.nameSource === 'both' ? 'Visual and layer name agree' : component.nameSource === 'layer-name' ? 'Based on the current layer name' : component.nameSource === 'memory' ? 'Learned from a correction' : 'Based on visual analysis'} · ${componentLocation(component)}`}</span>
+                  <span>{componentContextLabel(component)}</span>
                 </label>
                 <div className="component-classification-fields">
                   <label className="component-role-field">
@@ -2544,7 +2687,7 @@ function SettingsPage({ version, status, library, connectors, workspace, onRecon
   const [assistantStatus, setAssistantStatus] = useState<AssistantStatus | null>(null);
   const [assistantInstalling, setAssistantInstalling] = useState<'portable' | 'balanced' | ''>('');
   const [hostedStatus, setHostedStatus] = useState<HostedAiStatus | null>(null);
-  const [hostedEndpoint, setHostedEndpoint] = useState('http://127.0.0.1:8787');
+  const [hostedEndpoint, setHostedEndpoint] = useState(DEFAULT_HOSTED_AI_ENDPOINT);
   const [hostedToken, setHostedToken] = useState('');
   const [hostedSaving, setHostedSaving] = useState(false);
   const projects = library.projects.length ? library.projects : ['Default Project'];
@@ -2665,7 +2808,7 @@ function SettingsPage({ version, status, library, connectors, workspace, onRecon
         </div>
       </section>
       <section className="settings-section">
-        <div><h2>Kryeo AI server</h2><p>Use the shared Qwen visual reviewer for family analysis, document reconciliation, and Assistant chat.</p></div>
+        <div><h2>Kryeo AI server</h2><p>Use the hosted visual reviewer for family analysis, document reconciliation, and Assistant chat.</p></div>
         <div className="settings-value recipe-controls">
           <label>Server address<input value={hostedEndpoint} onChange={(event) => setHostedEndpoint(event.target.value)} placeholder="https://ai.kryeo.app" /></label>
           <label>Access token<input type="password" value={hostedToken} onChange={(event) => setHostedToken(event.target.value)} placeholder={hostedStatus?.configured ? 'Leave blank to keep the current token' : 'Paste an access token'} /></label>

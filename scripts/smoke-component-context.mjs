@@ -158,14 +158,14 @@ assert.deepEqual(components.slice(1, 6).map((component) => component.familyName)
 assert.equal(components[6].familyName, 'Outer Border 6 Glow');
 assert.equal(components[0].familyName, 'Outer Borders');
 assert.equal(components[7].familyName, 'Golden Forest Hall Wallpaper');
-assert.equal(components[8].familyName, 'Number Holder Outer Borders');
+assert.equal(components[8].familyName, 'Outer Borders');
 assert.deepEqual(components.slice(9, 11).map((component) => component.familyName), [
-  'Number Holder Outer Border 1',
-  'Number Holder Outer Border 2',
+  'Outer Border 1',
+  'Outer Border 2',
 ]);
 assert.equal(components[11].familyName, 'Hotbar Slot');
-assert.equal(components[13].familyName, 'Diamond Badge Background');
-assert.equal(components[14].familyName, 'Diamond Badge Borders');
+assert.equal(components[13].familyName, 'Middle Background');
+assert.equal(components[14].familyName, 'Outer Borders');
 assert.equal(componentCategory(components[1].assetType), 'Borders');
 assert.equal(componentSubcategory(components[1], components), 'Outer Borders');
 
@@ -198,10 +198,10 @@ const nestedChildren = [0, 1].map((index) => candidate({
 }));
 const nested = applyComponentSceneContext([nestedRoot, nestedCollection, ...nestedChildren]);
 assert.equal(nested[0].familyName, 'Crystal Badge');
-assert.equal(nested[1].familyName, 'Crystal Badge Borders');
+assert.equal(nested[1].familyName, 'Outer Borders');
 assert.deepEqual(nested.slice(2).map((component) => component.familyName), [
-  'Crystal Badge Border 1',
-  'Crystal Badge Border 2',
+  'Outer Border 1',
+  'Outer Border 2',
 ]);
 
 console.log(JSON.stringify({

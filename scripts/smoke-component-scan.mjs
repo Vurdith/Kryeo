@@ -11,9 +11,16 @@ await fs.mkdir(root, { recursive: true });
 const redA = path.join(root, 'red-a.png');
 const redB = path.join(root, 'red-b.png');
 const blue = path.join(root, 'blue.png');
+const insetBorder = path.join(root, 'inset-border.png');
 await sharp({ create: { width: 24, height: 16, channels: 4, background: '#ff2040ff' } }).png({ compressionLevel: 1 }).toFile(redA);
 await sharp({ create: { width: 24, height: 16, channels: 4, background: '#ff2040ff' } }).png({ compressionLevel: 9 }).toFile(redB);
 await sharp({ create: { width: 24, height: 16, channels: 4, background: '#2050ffff' } }).png().toFile(blue);
+await sharp({ create: { width: 120, height: 120, channels: 4, background: '#00000000' } })
+  .composite([{
+    input: Buffer.from('<svg width="120" height="120"><rect x="18" y="18" width="84" height="84" rx="8" fill="none" stroke="#d8aa63" stroke-width="9"/></svg>'),
+  }])
+  .png()
+  .toFile(insetBorder);
 
 const bounds = { x: 0, y: 0, width: 24, height: 16 };
 const result = await buildComponentScan({
@@ -33,6 +40,25 @@ if (result.duplicateFamilies !== 1) throw new Error(`Expected one duplicate fami
 if (result.reusedInstances !== 1) throw new Error(`Expected one avoided upload, received ${result.reusedInstances}.`);
 if (result.components[0].visualHash !== result.components[1].visualHash) throw new Error('Identical RGBA pixels did not share a hash.');
 if (result.components[0].visualHash === result.components[2].visualHash) throw new Error('Different RGBA pixels shared a hash.');
+
+const groupResult = await buildComponentScan({
+  documentTitle: 'Smoke Test',
+  documentSessionUuid: 'group-role-smoke',
+  sourceName: 'Components',
+  components: [
+    { index: 0, name: 'OuterLayers', affinityType: 'GroupNode', bounds: { x: 0, y: 0, width: 120, height: 120 }, childCount: 4, descendantCount: 4, textCount: 0, semanticNames: [], path: insetBorder },
+  ],
+}, []);
+if (groupResult.components[0].suggestedRole !== 'Unknown') {
+  throw new Error(`Expected a generic Affinity group to remain role-neutral, received ${groupResult.components[0].suggestedRole}.`);
+}
+const insetMetrics = groupResult.components[0].visualMetrics;
+if (!insetMetrics || (insetMetrics.innerVisibleRatio ?? 1) >= 0.12) {
+  throw new Error(`Expected the inset border's content-relative centre to remain transparent, received ${insetMetrics?.innerVisibleRatio}.`);
+}
+if ((insetMetrics.contentPerimeterVisibleRatio ?? 0) <= 0.05 || (insetMetrics.contentPerimeterCoverage ?? 0) < 0.28) {
+  throw new Error(`Expected occupied-bounds perimeter evidence for the inset border, received ${JSON.stringify(insetMetrics)}.`);
+}
 
 const repeatedChildren = Array.from({ length: 10 }, (_, index) => ({
   ...result.components[0],
@@ -103,6 +129,8 @@ console.log(JSON.stringify({
   duplicateFamilies: result.duplicateFamilies,
   reusedInstances: result.reusedInstances,
   sharedHash: result.components[0].visualHash.slice(0, 12),
+  groupSuggestedRole: groupResult.components[0].suggestedRole,
+  insetBorderMetrics: insetMetrics,
   repeatedGroupMode: repeatedParent.recommendedDiveMode,
   closeButtonMode: closeParent.recommendedDiveMode,
 }, null, 2));

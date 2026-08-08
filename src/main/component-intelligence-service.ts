@@ -72,9 +72,13 @@ function applySimilarityFamilies(components: ComponentCandidate[]): void {
     families.set(key, family);
   });
   const familyByHash = new Map<string, { id: string; count: number }>();
+  const occurrencesByHash = new Map<string, number>();
+  for (const component of components) {
+    occurrencesByHash.set(component.visualHash, (occurrencesByHash.get(component.visualHash) || 0) + 1);
+  }
   for (const family of families.values()) {
     const id = family.map((component) => component.visualHash).sort()[0].slice(0, 12);
-    const count = components.filter((component) => family.some((member) => member.visualHash === component.visualHash)).length;
+    const count = family.reduce((total, member) => total + (occurrencesByHash.get(member.visualHash) || 0), 0);
     for (const member of family) familyByHash.set(member.visualHash, { id, count });
   }
   for (const component of components) {
@@ -134,8 +138,14 @@ function recommendation(component: ComponentCandidate, children: ComponentCandid
   };
 }
 
-export function applyComponentIntelligence(components: ComponentCandidate[]): ComponentCandidate[] {
-  applySimilarityFamilies(components);
+export function applyComponentIntelligence(
+  components: ComponentCandidate[],
+  recomputeSimilarity = true,
+): ComponentCandidate[] {
+  // Family geometry and embeddings are fixed by the Affinity export. Hosted
+  // responses change semantic labels, not the visual-family graph, so callers
+  // rendering progressive cloud updates can reuse that expensive graph.
+  if (recomputeSimilarity) applySimilarityFamilies(components);
   const byKey = new Map(components.map((component) => [component.hierarchyKey, component]));
   for (const component of components) {
     const children = component.childHierarchyKeys

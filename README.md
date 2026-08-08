@@ -2,6 +2,10 @@
 
 Kryeo is a free desktop companion for Affinity scripts and local UI asset workflows.
 
+## Current build
+
+Kryeo `0.15.35` is the current packaged Windows build. The repeatable update, rebuild, install, hosted-AI, and cache procedures are documented in [kryeovault/Build.md](kryeovault/Build.md).
+
 ## What it does
 
 - Connects to the local Affinity MCP server at `http://localhost:6767/sse`.
@@ -43,17 +47,21 @@ Open **Import** and choose **Scan document** to inspect every spread and walk ne
 
 Document scans include hidden component branches. Kryeo treats Affinity containers as organizational folders, ordinary groups as component boundaries, and repeated sibling sets such as numbered hotbar slots as individual components. It recursively reviews meaningful nested groups while keeping generic construction layers inside their parent preview. A group or container named exactly `Storage` is a hard boundary: neither it nor anything inside it is scanned. Hidden ancestors are revealed only while their selected component is exported, then every original visibility state is restored.
 
+Full-document export is split into bounded Affinity requests. Large structural groups are subdivided by descendant size, while smaller groups stay intact for hierarchy and composition; follow-up requests resolve only their active partition. This keeps large scans below Affinity's remote MCP execution window and reports partition progress instead of failing on one monolithic document request.
+
 The review is presented as a collapsible parent-child tree. Every group can stay together, export only its children, or export both the complete parent and reusable nested parts. Kryeo scores that group-dive choice from names, geometry, child roles, reuse, and previous confirmations; the user always has the final choice.
 
 **Remember choices** stores the asset type, Roblox role, family name, group-dive choice, correction count, semantic hint, and a compact visual embedding locally. Future visually similar components can learn from those confirmations even when their pixel hash is different. Exact duplicates collapse into one review row with an expandable list of every source instance, while close variants remain separate visual families.
 
-Kryeo checks meaningful layer names before relying on the visual model. A layer called `HealthBar`, for example, is treated as a bar even when a small visual crop looks frame-like. When names and pixels disagree, the review shows the conflict instead of silently choosing one. Filters separate UI components, construction layers, and background artwork.
+Kryeo supplies meaningful layer and hierarchy names as evidence to the hosted model, while the model remains the final semantic classifier for unresolved families. When names and pixels disagree, the review shows the conflict instead of silently hiding it. Filters separate UI components, construction layers, and background artwork.
 
 Overlapping sibling artwork is proposed as one composed component while page-sized backgrounds are protected from absorbing smaller controls. Every proposal lists its source-layer count and can be excluded before applying. **Apply names** changes only validated layer names and preserves the current hierarchy. **Apply to Affinity** is the separate, deliberate organization action that can create approved component groups. Both actions resolve every original layer path before changing anything; rescan if the document hierarchy changes.
 
-Kryeo includes an 11.8 MB quantized MobileCLIP-S0 image encoder and a UI-specific taxonomy aligned with the Save workflow. Every scan classifies each unique visual into the same 26 asset types used while saving: frames, buttons, icons, panels, slots, bars, badges, labels, text, text boxes, scroll bars, dividers, backgrounds, cursors, wallpapers, tooltips, modals, inputs, tabs, tiles, ornaments, borders, corners, edges, fills, and effects. Geometry and layer structure supply additional context, then Kryeo maps the visual type to a Roblox UI role. No Ollama service, account, or network connection is required.
+Kryeo includes an 11.8 MB quantized MobileCLIP-S0 image encoder and a UI-specific taxonomy aligned with the Save workflow. Every scan groups each unique visual into the same asset types used while saving: frames, buttons, icons, panels, slots, bars, badges, labels, text, text boxes, scroll bars, dividers, backgrounds, cursors, wallpapers, tooltips, modals, inputs, tabs, tiles, ornaments, borders, corners, edges, fills, and effects. Geometry and layer structure supply additional context, then Kryeo maps the visual type to a Roblox UI role. The embedded context pass requires no Ollama service; the current model-first final review uses the separately hosted Kryeo gateway for unresolved families.
 
 The embedded model runs on the CPU and never receives a complete editable document. It sees only temporary component previews. Large previews are analysed as an overview plus up to six overlapping high-resolution crops, so small labels and ornaments are not lost to one square resize. Learning stays in Kryeo's local workspace data; it does not train or download a new neural network. Confirmed embeddings act as a private visual memory layered over the bundled model.
+
+Hosted family analysis runs through the separate Kryeo gateway. Free desktop preprocessing supplies extraction, grouping, deduplication, hierarchy, and confidence context; Qwen3.7 Flash through OpenRouter remains the cloud classifier for every unresolved family, so a local model is not required. Simple work uses adaptive sixteen-family contact sheets while detailed or ambiguous work stays at eight, with two requests processed concurrently. The model returns a compact packet, deterministic roles are expanded locally, and detailed evidence is purchased only when a user opens its panel. The normal target is `$0.01` per scan with an enforced `$0.03` safety ceiling, conservative reservations, and provider-reported per-scan cost in the review UI. Price-aware routing, reasoning-off classification, exact-template reuse, and in-flight request coalescing further reduce spend. Valid partial answers are retained and all omitted entries are repaired together in one bounded cloud batch rather than one paid request per family. See the [hosted vision architecture](kryeovault/Kryeo%20Hosted%20Vision%20Architecture.md) and [Build note](kryeovault/Build.md).
 
 Every confirmed review writes a hierarchy manifest under Kryeo's local `ComponentManifests` directory. It records parent-child relationships, chosen export depth, visual families, source paths, roles, and inclusion state so Auto-Export and future production connectors can preserve component structure instead of receiving a flat folder of PNGs.
 
@@ -83,7 +91,7 @@ qmd query "component scan naming corrections" -c kryeo --no-rerank -n 3 --full-p
 
 ## Delivery scope
 
-Kryeo 0.12 prepares production handoff rather than pretending to be a finished Roblox importer. A Roblox delivery creates `KryeoManifest.json` with asset IDs, versions, raster paths, health, and suggested Roblox UI classes. A Studio-side connector can consume this manifest next.
+Kryeo 0.15.35 prepares production handoff rather than pretending to be a finished Roblox importer. A Roblox delivery creates `KryeoManifest.json` with asset IDs, versions, raster paths, health, and suggested Roblox UI classes. A Studio-side connector can consume this manifest next.
 
 Auto-Export is opt-in per project. Kryeo discovers the newest installed Asset Library Export workflow, asks Affinity to prepare the latest Raster PNGs, and then publishes them into a production folder using stable code-name paths such as `Devil Hunter/Slots/slot_hotbar.png`. The versioned Asset Library files remain untouched.
 
@@ -102,13 +110,11 @@ Validation and packaging:
 
 ```powershell
 npm run typecheck
-npm run build
-npm run test:project-notes
+npm run test:component-context
 npm run test:local-ai
 npm run test:component-scan
-npm run test:component-learning
-npm run test:assistant
-npm run test:assistant-sessions
-npm run test:auto-export
+npm run test:family-ai
+npm test --prefix services\ai-server
+npm run build
 npm run dist
 ```

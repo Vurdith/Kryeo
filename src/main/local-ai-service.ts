@@ -39,6 +39,7 @@ const MODEL_FILE = 'vision_model_quantized.onnx';
 const TAXONOMY_FILE = 'ui-taxonomy.json';
 const IMAGE_SIZE = 256;
 const BATCH_SIZE = 8;
+const STRUCTURE_INSPECTION_CONCURRENCY = 4;
 const MAX_EMBEDDING_CACHE_ENTRIES = 2_048;
 const GENERIC_NAME = /^(layer|group|object|shape|curve|pixel|image|raster|rectangle|ellipse|artboard|container)[\s_-]*\d*$/i;
 
@@ -207,6 +208,28 @@ function dataUrlBuffer(dataUrl: string): Buffer {
 }
 
 async function inspectVisualStructure(component: ComponentCandidate): Promise<VisualStructure> {
+  // Component Scan already measured these alpha ratios while hashing the source
+  // PNG. Reusing them avoids a second, unbounded Sharp decode for every unique
+  // visual before the first hosted request can start.
+  const metrics = component.visualMetrics;
+  if (metrics) {
+    const centerDensity = metrics.innerVisibleRatio ?? metrics.centerVisibleRatio;
+    const outerDensity = metrics.contentPerimeterVisibleRatio ?? metrics.edgeVisibleRatio;
+    const perimeterCoverage = metrics.contentPerimeterCoverage ?? 1;
+    return {
+      centerDensity,
+      outerDensity,
+      overallDensity: metrics.meanAlpha,
+      borderLike: centerDensity < 0.12
+        && outerDensity > 0.05
+        && outerDensity > centerDensity * 2
+        && perimeterCoverage >= 0.28,
+      largeLandscape: component.bounds.width >= 800
+        && component.bounds.height >= 450
+        && component.bounds.width / Math.max(1, component.bounds.height) >= 1.25,
+      imageNode: /ImageNode/i.test(component.affinityType),
+    };
+  }
   const size = 64;
   const { data } = await sharp(dataUrlBuffer(component.previewUrl), { failOn: 'error' })
     .ensureAlpha()
@@ -247,6 +270,25 @@ async function inspectVisualStructure(component: ComponentCandidate): Promise<Vi
     largeLandscape,
     imageNode: /ImageNode/i.test(component.affinityType),
   };
+}
+
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  limit: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= values.length) return;
+      results[index] = await mapper(values[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => worker()));
+  return results;
 }
 
 async function imageTensor(dataUrl: string): Promise<Float32Array> {
@@ -395,7 +437,11 @@ export class LocalAiService {
       .map((decision) => ({ decision, embedding: decodeEmbedding(decision.embedding || '') }))
       .filter((example) => example.embedding.length === taxonomy.dimension);
     const results: ComponentAiSuggestion[] = [];
-    const structures = await Promise.all(unique.map(inspectVisualStructure));
+    const structures = await mapWithConcurrency(
+      unique,
+      STRUCTURE_INSPECTION_CONCURRENCY,
+      inspectVisualStructure,
+    );
     const variants = unique.flatMap((component, componentIndex) =>
       [component.previewUrl, ...(component.analysisPreviewUrls || [])].map((url) => ({ componentIndex, url })));
     const sums = unique.map(() => new Float32Array(taxonomy.dimension));
@@ -441,6 +487,10 @@ export class LocalAiService {
       const semanticType = semanticAssetType(component);
       const modelConfidence = softmaxConfidence(scores);
       const margin = best.score - (ranked[1]?.score || best.score);
+      // Taxonomy scores are small raw logits, so expose the alternative gap as
+      // a stable 0..1 signal for the family review gate rather than leaking the
+      // model's implementation-specific scale into downstream thresholds.
+      const marginSignal = clamp(margin * 5, 0, 1);
       const confidence = clamp(
         0.34 + modelConfidence * 0.48 + margin * 1.5 + (nearest ? Math.max(0, nearest.similarity - 0.9) : 0),
         0.35,
@@ -499,6 +549,7 @@ export class LocalAiService {
         source: nearest && nearest.similarity >= 0.96
           ? 'memory'
           : semanticType && learnedType === semanticType ? 'name' : 'model',
+        margin: marginSignal,
         confidence: structureType && learnedType === structureType
           ? Math.max(0.78, confidence)
           : semanticType && learnedType === semanticType ? Math.max(0.9, confidence) : confidence,

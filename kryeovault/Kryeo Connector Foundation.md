@@ -1,5 +1,7 @@
 # Kryeo connector foundation
 
+> The connector model remains current in broad terms, while the numbered sections below preserve 0.6.1 and 0.7.0 historical decisions. For the current `0.15.23` release, build, installer, hosted-AI, and runtime procedures, see [Build](Build.md).
+
 ## Product premise
 
 Kryeo is a local design-to-development bridge. Creative applications are sources, production environments are targets, and Kryeo owns the transfer pipeline between them.

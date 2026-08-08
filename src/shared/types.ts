@@ -142,6 +142,12 @@ export interface ComponentVisualMetrics {
   meanAlpha: number;
   edgeVisibleRatio: number;
   centerVisibleRatio: number;
+  /** Visible density inside the middle of the artwork's own occupied bounds. */
+  innerVisibleRatio?: number;
+  /** Visible density in a perimeter band relative to occupied bounds, ignoring transparent canvas padding. */
+  contentPerimeterVisibleRatio?: number;
+  /** Average top/right/bottom/left coverage of that occupied-bounds perimeter. */
+  contentPerimeterCoverage?: number;
 }
 
 export interface ComponentMember {
@@ -160,6 +166,7 @@ export interface ComponentCandidate {
   descendantCount: number;
   textCount: number;
   previewUrl: string;
+  hostedPreviewUrl?: string;
   analysisPreviewUrls?: string[];
   visualMetrics?: ComponentVisualMetrics;
   visualHash: string;
@@ -192,7 +199,16 @@ export interface ComponentCandidate {
   aiSuggestedName?: string;
   aiSuggestedRole?: RobloxUiRole;
   aiSuggestedType?: ComponentAssetType;
+  aiModelSuggestedName?: string;
+  aiModelSuggestedType?: ComponentAssetType;
+  aiNormalizationReason?: string;
+  aiEvidenceSupportsClassification?: boolean;
+  aiEvidenceSuggestedName?: string;
+  aiEvidenceSuggestedType?: ComponentAssetType;
+  aiEvidenceSuggestedRole?: RobloxUiRole;
   aiConfidence?: number;
+  aiMargin?: number;
+  aiAlternatives?: Array<{ assetType: ComponentAssetType; score: number }>;
   aiEvidence?: {
     visual: number;
     layerName: number;
@@ -231,6 +247,7 @@ export interface ComponentAiSuggestion {
   assetType: ComponentAssetType;
   role: RobloxUiRole;
   confidence: number;
+  margin?: number;
   source: 'model' | 'memory' | 'name';
   reason: string;
   alternatives?: Array<{ assetType: ComponentAssetType; score: number }>;
@@ -263,6 +280,7 @@ export interface ComponentFamilyMember {
   parentHierarchyKey: string;
   childHierarchyKeys: string[];
   previewUrl: string;
+  hostedPreviewUrl?: string;
   analysisPreviewUrls: string[];
   visualMetrics?: ComponentVisualMetrics;
 }
@@ -283,7 +301,36 @@ export interface ComponentVisualFamily {
     childNames: string[];
     siblingNames: string[];
   }>;
+  reviewSignals?: ComponentFamilyReviewSignals;
   approvedDecision?: ComponentDecision;
+}
+
+export interface ComponentFamilyReviewSignals {
+  localConfidence: number;
+  localMargin: number;
+  visualStructureConfidence: number;
+  semanticConflict: boolean;
+  meaningfulLayerName: boolean;
+  hierarchyAmbiguity: number;
+  learnedSimilarity: number;
+  learnedFrom: number;
+  localTypeAgreement: number;
+  localAssetType?: ComponentAssetType;
+  localRole?: RobloxUiRole;
+}
+
+export type HostedReviewTier = 'lite' | 'escalation';
+
+export interface HostedFamilyContactSheet {
+  previewUrl: string;
+  /** Cell order is one-based and matches this array's order. */
+  familyIds: string[];
+}
+
+export interface HostedFamilyReviewPlan {
+  tier: 'local' | HostedReviewTier;
+  riskScore: number;
+  reasons: string[];
 }
 
 export interface HostedFamilyAnalysis {
@@ -292,6 +339,9 @@ export interface HostedFamilyAnalysis {
   familyName: string;
   assetType: ComponentAssetType;
   role: RobloxUiRole;
+  modelFamilyName?: string;
+  modelAssetType?: ComponentAssetType;
+  normalizationReason?: string;
   memberNames: Array<{ visualHash: string; name: string }>;
   diveMode: ComponentDiveMode;
   reason: string;
@@ -317,6 +367,65 @@ export interface HostedFamilyAnalysisRequest {
   documentPreviewUrl?: string;
   instructions?: string[];
   projectKnowledge?: ProjectKnowledge;
+  reviewTier?: HostedReviewTier;
+  includeDocumentContext?: boolean;
+  maxMemberImages?: number;
+  hostedScanId?: string;
+  familyContactSheet?: HostedFamilyContactSheet;
+  serviceTier?: 'default' | 'flex' | 'priority' | 'scale';
+}
+
+export interface HostedFamilyEvidenceRequest {
+  familyFingerprint?: string;
+  visualHash: string;
+  familyName: string;
+  assetType: ComponentAssetType;
+  role: RobloxUiRole;
+  sourceName: string;
+  affinityType: string;
+  bounds: ComponentBounds;
+  previewUrl: string;
+  visualMetrics?: ComponentVisualMetrics;
+  parentName?: string;
+  childNames?: string[];
+  siblingNames?: string[];
+}
+
+export interface HostedFamilyEvidenceResult {
+  reason: string;
+  visualDescription: string;
+  confidence: number;
+  evidence: {
+    visual: number;
+    layerName: number;
+    hierarchy: number;
+    learned: number;
+  };
+  conflict: boolean;
+  conflictMessage: string;
+  supportsClassification: boolean;
+  suggestedName?: string;
+  suggestedType?: ComponentAssetType;
+  suggestedRole?: RobloxUiRole;
+  alternatives: Array<{ assetType: ComponentAssetType; reason: string }>;
+  cached: boolean;
+}
+
+export interface HostedAiUsage {
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  estimatedCostUsd?: number;
+  providerCostUsd?: number;
+  coalescedRequests?: number;
+  contextCacheHits?: number;
+  sharedCacheHits?: number;
+  explanationCacheHits?: number;
+  serviceTiers?: Record<string, number>;
+  byModel?: Record<string, Omit<HostedAiUsage, 'byModel'>>;
 }
 
 export interface HostedFamilyAnalysisResponse {
@@ -324,6 +433,14 @@ export interface HostedFamilyAnalysisResponse {
   cached: number;
   analyses: HostedFamilyAnalysis[];
   failures: Array<{ familyIds: string[]; message: string }>;
+  model?: string;
+  reviewTier?: HostedReviewTier;
+  skippedFamilyIds?: string[];
+  budgetLimited?: boolean;
+  estimatedCostUsd?: number;
+  scanProviderCostUsd?: number;
+  scanCommittedCostUsd?: number;
+  usage?: HostedAiUsage;
 }
 
 export interface DocumentReconciliationIssue {
@@ -344,7 +461,41 @@ export interface HostedAiStatus {
   configured: boolean;
   endpoint: string;
   model: string;
+  provider?: string;
+  modelApiKeyConfigured?: boolean;
   queueDepth: number;
+  modelActive?: number;
+  modelQueued?: number;
+  modelConcurrency?: number;
+  maxMemberImagesPerFamily?: number;
+  modelLite?: string;
+  modelEscalation?: string;
+  providerSort?: string;
+  serviceTier?: string;
+  responseCacheEnabled?: boolean;
+  promptCacheEnabled?: boolean;
+  analysisVersion?: string;
+  cacheEntries?: number;
+  maxCacheEntries?: number;
+  cacheEvictions?: number;
+  familyBatchSize?: number;
+  scanTargetUsd?: number;
+  scanBudgetUsd?: number;
+  scanBudgetEnforced?: boolean;
+  maxHostedFamiliesPerScan?: number;
+  maxEscalationFamiliesPerScan?: number;
+  estimatedInputTokensPerImage?: number;
+  estimatedTextTokensPerFamily?: number;
+  estimatedOutputTokensPerFamily?: number;
+  liteInputPricePerMillion?: number;
+  liteOutputPricePerMillion?: number;
+  escalationInputPricePerMillion?: number;
+  escalationOutputPricePerMillion?: number;
+  costEstimateSafetyFactor?: number;
+  maxModelRetries?: number;
+  usage?: HostedAiUsage;
+  activeRequests?: number;
+  maxInflightPerToken?: number;
   message: string;
 }
 
@@ -367,6 +518,9 @@ export interface ComponentScanProgress {
   totalFamilies?: number;
   cachedFamilies?: number;
   failedFamilies?: number;
+  localFamilies?: number;
+  hostedFamilies?: number;
+  budgetLimitedFamilies?: number;
   partialResult?: ComponentScanResult;
 }
 
@@ -424,6 +578,25 @@ export interface ApplyLayerNamesRequest {
   }>;
 }
 
+export interface ComponentScanDiagnostics {
+  totalMs: number;
+  stages: {
+    contextCaptureMs: number;
+    affinityExportMs: number;
+    imagePreparationMs: number;
+    localAnalysisMs: number;
+    hostedAnalysisMs: number;
+    finalizationMs: number;
+  };
+  visualFamilyCount: number;
+  hostedFamilyCount: number;
+  hostedRequestCount: number;
+  cachedFamilyCount: number;
+  failedFamilyCount: number;
+  budgetLimitedFamilyCount: number;
+  warnings: string[];
+}
+
 export interface ComponentScanResult {
   documentTitle: string;
   documentSessionUuid: string;
@@ -436,6 +609,10 @@ export interface ComponentScanResult {
   reconciliation?: DocumentReconciliation;
   hostedAnalysisAvailable?: boolean;
   hostedAnalysisError?: string;
+  hostedProviderCostUsd?: number;
+  hostedTargetUsd?: number;
+  hostedBudgetUsd?: number;
+  diagnostics?: ComponentScanDiagnostics;
 }
 
 export interface WorkspaceSnapshot {
@@ -712,6 +889,7 @@ export interface KryeoApi {
   getLocalAiStatus(): Promise<LocalAiStatus>;
   getHostedAiStatus(): Promise<HostedAiStatus>;
   configureHostedAi(configuration: HostedAiConfiguration): Promise<HostedAiStatus>;
+  explainComponentFamily(request: HostedFamilyEvidenceRequest): Promise<HostedFamilyEvidenceResult>;
   analyzeComponents(components: ComponentCandidate[]): Promise<ComponentAiSuggestion[]>;
   applyComponentOrganization(request: ApplyComponentOrganizationRequest): Promise<ScriptRunResult>;
   applyLayerNames(request: ApplyLayerNamesRequest): Promise<ScriptRunResult>;

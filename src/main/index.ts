@@ -20,6 +20,7 @@ import {
   applyApprovedFamilies,
   applyHostedFamilyAnalyses,
   buildVisualFamilies,
+  planHostedFamilyReview,
   reviewCategory,
   visualStructureAnchor,
 } from './component-family-service';
@@ -37,8 +38,13 @@ import type {
   AssetPreference,
   ComponentCandidate,
   ComponentDecision,
+  ComponentVisualFamily,
   ConfiguredToolRequest,
   HostedAiConfiguration,
+  HostedAiStatus,
+  HostedFamilyAnalysisRequest,
+  HostedFamilyEvidenceRequest,
+  HostedReviewTier,
   PlaceAssetRequest,
   ProjectRecipe,
   SaveAssetRequest,
@@ -81,6 +87,103 @@ const hostedAi = new HostedAiService(() => app.getPath('userData'));
 const execFileAsync = promisify(execFile);
 let autoExportQueue: Promise<void> = Promise.resolve();
 const activeComponentScans = new Map<number, AbortController>();
+
+interface HostedScanCandidate {
+  family: ComponentVisualFamily;
+  tier: HostedReviewTier;
+  riskScore: number;
+  reasons: string[];
+}
+
+interface HostedScanSelection {
+  candidates: HostedScanCandidate[];
+  selected: HostedScanCandidate[];
+  localCount: number;
+  budgetLimitedCount: number;
+  estimatedCostUsd: number;
+}
+
+function estimateHostedFamilyCost(status: HostedAiStatus, tier: HostedReviewTier): number {
+  const inputPrice = tier === 'escalation'
+    ? Number(status.escalationInputPricePerMillion ?? 0.03)
+    : Number(status.liteInputPricePerMillion ?? 0.03);
+  const outputPrice = tier === 'escalation'
+    ? Number(status.escalationOutputPricePerMillion ?? 0.13)
+    : Number(status.liteOutputPricePerMillion ?? 0.13);
+  const imageCount = tier === 'escalation' ? 2 : 1;
+  const inputTokens = (
+    Number(status.estimatedTextTokensPerFamily || 260)
+    + imageCount * Number(status.estimatedInputTokensPerImage || 300)
+  );
+  const outputTokens = Number(status.estimatedOutputTokensPerFamily || 40);
+  const safetyFactor = Math.max(1, Number(status.costEstimateSafetyFactor || 1));
+  return ((inputTokens * inputPrice + outputTokens * outputPrice) / 1_000_000) * safetyFactor;
+}
+
+function selectHostedFamilies(
+  families: ComponentVisualFamily[],
+  status: HostedAiStatus,
+): HostedScanSelection {
+  const plans = families
+    .filter((family) => !family.approvedDecision)
+    .map((family) => {
+      const plan = planHostedFamilyReview(family);
+      return { family, ...plan };
+    });
+  // The hosted model is the final classifier for every unresolved family.
+  // Clear local plans still use Lite so the local pass remains a cheap source
+  // of grouping/context signals rather than silently becoming the final AI.
+  const candidates: HostedScanCandidate[] = plans.map((plan) => ({
+    family: plan.family,
+    tier: plan.tier === 'local' ? 'lite' : plan.tier,
+    riskScore: plan.riskScore,
+    reasons: plan.tier === 'local'
+      ? [...plan.reasons, 'Hosted review is enabled for every unresolved family; Lite is used for this locally clear candidate.']
+      : plan.reasons,
+  }));
+  const maxEscalations = Math.max(0, Number(status.maxEscalationFamiliesPerScan ?? 1));
+  const selected: HostedScanCandidate[] = [];
+  let escalationCount = 0;
+  let estimatedCostUsd = 0;
+  const ordered = [...candidates].sort((left, right) => (
+    right.riskScore - left.riskScore
+    || (left.tier === 'escalation' ? -1 : 1)
+  ));
+  for (const candidate of ordered) {
+    // Reserve the more capable model for the highest-risk family, but do not
+    // discard additional escalation candidates when the configured escalation
+    // cap is reached. The Lite reviewer is still safer than leaving a family
+    // with an Unknown provisional result. The gateway performs cache lookup
+    // first, then enforces the shared per-scan dollar ceiling.
+    const selectedTier: HostedReviewTier = candidate.tier === 'escalation' && escalationCount >= maxEscalations
+      ? 'lite'
+      : candidate.tier;
+    const selectedCandidate: HostedScanCandidate = selectedTier === candidate.tier
+      ? candidate
+      : {
+          ...candidate,
+          tier: selectedTier,
+          reasons: [
+            ...candidate.reasons,
+            'The escalation slot was reserved for a higher-risk family; Lite review is used for this additional candidate.',
+          ],
+    };
+    const estimate = estimateHostedFamilyCost(status, selectedTier);
+    // Send every unresolved family to the gateway. It performs cache lookup
+    // before reserving paid work, so filtering here would incorrectly exclude
+    // free cache hits on large documents.
+    selected.push(selectedCandidate);
+    estimatedCostUsd += estimate;
+    if (selectedTier === 'escalation') escalationCount += 1;
+  }
+  return {
+    candidates,
+    selected,
+    localCount: families.filter((family) => family.approvedDecision).length,
+    budgetLimitedCount: 0,
+    estimatedCostUsd,
+  };
+}
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -340,13 +443,13 @@ ipcMain.handle('kryeo:get-library-logs', () => library.logs());
 ipcMain.handle('kryeo:get-workspace', () => workspace.snapshot());
 ipcMain.handle('kryeo:list-tools', () => affinity.listTools());
 ipcMain.handle('kryeo:analyze-components', (_event, input: unknown) => {
-  if (!Array.isArray(input) || input.length > 320) throw new Error('Invalid local vision review.');
+  if (!Array.isArray(input)) throw new Error('Invalid local vision review.');
   return localAi.analyze(input as ComponentCandidate[]);
 });
 ipcMain.handle('kryeo:apply-component-organization', async (_event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid component organization request.');
   const request = input as ApplyComponentOrganizationRequest;
-  if (typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.components) || request.components.length > 160) {
+  if (typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.components)) {
     throw new Error('Invalid component organization request.');
   }
   const components = request.components.map((component) => {
@@ -366,7 +469,7 @@ ipcMain.handle('kryeo:apply-component-organization', async (_event, input: unkno
 ipcMain.handle('kryeo:apply-layer-names', async (_event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid layer naming request.');
   const request = input as ApplyLayerNamesRequest;
-  if (typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.layers) || request.layers.length > 320) {
+  if (typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.layers)) {
     throw new Error('Invalid layer naming request.');
   }
   const layers = request.layers.map((layer) => {
@@ -391,7 +494,7 @@ ipcMain.handle('kryeo:clear-component-decisions', () => workspace.clearComponent
 ipcMain.handle('kryeo:save-component-review', (_event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid component review.');
   const request = input as SaveComponentReviewRequest;
-  if (typeof request.documentTitle !== 'string' || request.documentTitle.length > 180 || typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.components) || request.components.length > 320 || !Array.isArray(request.includedIds) || request.includedIds.length > 320) {
+  if (typeof request.documentTitle !== 'string' || request.documentTitle.length > 180 || typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.components) || !Array.isArray(request.includedIds)) {
     throw new Error('Invalid component review.');
   }
   for (const component of request.components) {
@@ -402,7 +505,7 @@ ipcMain.handle('kryeo:save-component-review', (_event, input: unknown) => {
   return workspace.saveComponentReview(request);
 });
 ipcMain.handle('kryeo:save-component-decisions', (_event, input: unknown) => {
-  if (!Array.isArray(input) || input.length > 320) throw new Error('Invalid Component Scan review.');
+  if (!Array.isArray(input)) throw new Error('Invalid Component Scan review.');
   const allowedRoles = ['Unknown', 'ImageButton', 'ImageLabel', 'Frame', 'TextButton', 'TextLabel', 'TextBox'];
   const allowedTypes = ['Unknown', 'Frame', 'Button', 'Icon', 'Panel', 'Slot', 'Bar', 'Badge', 'Label', 'Text', 'TextBox', 'ScrollBar', 'Divider', 'Background', 'Wallpaper', 'Texture', 'Overlay', 'Cursor', 'Tooltip', 'Modal', 'Input', 'Tab', 'Tile', 'Ornament', 'Border', 'Corner', 'Edge', 'Fill', 'FX'];
   const allowedDiveModes = ['keep-together', 'children-only', 'parent-and-children'];
@@ -697,6 +800,21 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
   activeComponentScans.set(event.sender.id, scanController);
   const scope = input === 'selection' ? 'selection' : 'document';
   const directory = path.join(app.getPath('desktop'), 'Kryeo', 'ComponentScanStaging', randomUUID());
+  const scanStartedAt = Date.now();
+  const stageTimings = {
+    contextCaptureMs: 0,
+    affinityExportMs: 0,
+    imagePreparationMs: 0,
+    localAnalysisMs: 0,
+    hostedAnalysisMs: 0,
+    finalizationMs: 0,
+  };
+  const scanWarnings: string[] = [];
+  let diagnosticsHostedFamilies = 0;
+  let diagnosticsHostedRequests = 0;
+  let diagnosticsCachedFamilies = 0;
+  let diagnosticsFailedFamilies = 0;
+  let diagnosticsBudgetLimitedFamilies = 0;
   const progress = (phase: string, label: string, detail: string, value: number) => {
     if (!event.sender.isDestroyed()) {
       event.sender.send('kryeo:scan-progress', { phase, label, detail, progress: value });
@@ -706,36 +824,46 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
   await resetScanDirectory(directory);
   try {
     let documentPreviewUrl = '';
-    if (scope === 'document') {
-      progress('capturing-context', 'Capturing document context', 'Rendering a compact overview so visual families can be judged in context.', 10);
-      try {
-        const previewPath = path.join(directory, 'document-context.png');
-        await affinity.exportAssistantPreview(previewPath, 'document');
-        const preview = await sharp(previewPath)
-          .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
-          .png({ compressionLevel: 8 })
-          .toBuffer();
-        documentPreviewUrl = `data:image/png;base64,${preview.toString('base64')}`;
-      } catch {
-        // Family analysis remains available when Affinity cannot render context.
-      }
-    }
     progress('discovering-layers', 'Finding component layers', 'Walking spreads, nested groups, and independently editable visual layers.', 22);
-    const batch = await affinity.exportComponentCandidates(directory, scope);
+    const affinityExportStartedAt = Date.now();
+    const batch = await affinity.exportComponentCandidates(directory, scope, ({ completedPartitions, totalPartitions }) => {
+      const fraction = completedPartitions / Math.max(1, totalPartitions);
+      progress(
+        'discovering-layers',
+        'Finding component layers',
+        `Processing Affinity scan part ${completedPartitions} of ${totalPartitions}.`,
+        22 + Math.round(fraction * 14),
+      );
+    }, scanController.signal);
+    stageTimings.affinityExportMs = Date.now() - affinityExportStartedAt;
     if (batch.components.length === 0) throw new Error(`No component layers were found in the ${scope}.`);
     const snapshot = await workspace.snapshot();
-    progress('local-analysis', 'Grouping visual families', `Comparing ${batch.components.length} candidates locally and collapsing exact duplicates.`, 43);
-    const scan = await buildComponentScan(batch, snapshot.componentDecisions);
-    const embeddingByHash = await localAi.embed(scan.components).catch(() => new Map<string, string>());
-    const embedded = scan.components.map((component) => ({
-      ...component,
-      visualEmbedding: embeddingByHash.get(component.visualHash) || component.visualEmbedding,
-    }));
-    const localSuggestions = await localAi.analyze(embedded).catch(() => []);
+    progress('local-analysis', 'Preparing visual families', `Preparing ${batch.components.length} candidates once for grouping and hosted review.`, 43);
+    const imagePreparationStartedAt = Date.now();
+    const scan = await buildComponentScan(batch, snapshot.componentDecisions, scanController.signal);
+    stageTimings.imagePreparationMs = Date.now() - imagePreparationStartedAt;
+    // Local visual analysis already returns a reusable embedding. Running a
+    // separate embed pass first made every new visual pay for MobileCLIP twice
+    // before the first hosted request could begin.
+    const localAnalysisStartedAt = Date.now();
+    let localSuggestions: Awaited<ReturnType<typeof localAi.analyze>> = [];
+    try {
+      localSuggestions = await localAi.analyze(scan.components);
+    } catch (error) {
+      scanWarnings.push(`Embedded visual preparation failed, so hosted review continued without local classifier context: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    stageTimings.localAnalysisMs = Date.now() - localAnalysisStartedAt;
+    if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
     const suggestionByHash = new Map(localSuggestions.map((suggestion) => [suggestion.visualHash, suggestion]));
-    const locallyClassified = embedded.map((component) => {
+    const locallyClassified = scan.components.map((component) => {
       const suggestion = suggestionByHash.get(component.visualHash);
-      if (!suggestion || component.remembered) return component;
+      if (!suggestion) return component;
+      if (component.remembered) {
+        return {
+          ...component,
+          visualEmbedding: suggestion.embedding || component.visualEmbedding,
+        };
+      }
       return {
         ...component,
         familyName: suggestion.name || component.familyName,
@@ -745,6 +873,8 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         aiSuggestedType: suggestion.assetType,
         aiSuggestedRole: suggestion.role,
         aiSource: suggestion.source,
+        aiMargin: suggestion.margin,
+        aiAlternatives: suggestion.alternatives,
         aiReason: suggestion.reason,
         semanticHint: suggestion.semanticHint,
         semanticType: suggestion.semanticType,
@@ -770,21 +900,72 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     let reconciliation = undefined;
     let hostedAnalysisAvailable = false;
     let hostedAnalysisError = '';
+    let hostedProviderCostUsd = 0;
+    let hostedTargetUsd = 0.01;
+    let hostedBudgetUsd = 0.03;
+    let hostedAnalysisStartedAt = 0;
     try {
       const unresolvedFamilies = families.filter((family) => !family.approvedDecision).length;
+      const hostedStatus = await hostedAi.status();
+      hostedTargetUsd = hostedStatus.scanTargetUsd ?? hostedTargetUsd;
+      hostedBudgetUsd = hostedStatus.scanBudgetUsd ?? hostedBudgetUsd;
+      const selection = hostedStatus.available
+        ? selectHostedFamilies(families, hostedStatus)
+        : {
+            candidates: [],
+            selected: [],
+            localCount: unresolvedFamilies,
+            budgetLimitedCount: 0,
+            estimatedCostUsd: 0,
+          } satisfies HostedScanSelection;
+      const hostedScanId = randomUUID();
+      const hostedFamilies = selection.selected;
+      const hostedTotal = hostedFamilies.length;
+      diagnosticsHostedFamilies = hostedTotal;
+      const provisionalBudgetFamilies = selection.budgetLimitedCount;
+      const needsDocumentContext = scope === 'document'
+        && hostedStatus.available
+        && hostedFamilies.some((candidate) => candidate.tier === 'escalation');
+      if (needsDocumentContext) {
+        progress('capturing-context', 'Capturing escalation context', 'Rendering one compact document overview for the highest-risk visual family.', 58);
+        const contextCaptureStartedAt = Date.now();
+        try {
+          const previewPath = path.join(directory, 'document-context.png');
+          await affinity.exportAssistantPreview(previewPath, 'document');
+          if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
+          const preview = await sharp(previewPath)
+            .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
+            .png({ compressionLevel: 8 })
+            .toBuffer();
+          documentPreviewUrl = `data:image/png;base64,${preview.toString('base64')}`;
+        } catch (error) {
+          if (scanController.signal.aborted) throw error;
+          scanWarnings.push(`Escalation document context was unavailable; family previews were still reviewed: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          stageTimings.contextCaptureMs = Date.now() - contextCaptureStartedAt;
+        }
+      }
+      const scanTargetUsd = hostedStatus.scanTargetUsd ?? 0.01;
+      const scanBudgetUsd = hostedStatus.scanBudgetUsd ?? 0.03;
+      const budgetDescription = hostedStatus.scanBudgetEnforced
+        ? `toward the $${scanTargetUsd.toFixed(3)} target with a $${scanBudgetUsd.toFixed(3)} hard ceiling`
+        : `against an estimated $${scanTargetUsd.toFixed(3)} per-scan target`;
       progress(
         'hosted-analysis',
         'Analysing new visual families',
-        unresolvedFamilies
-          ? `Qwen is reviewing ${unresolvedFamilies} uncached ${unresolvedFamilies === 1 ? 'family' : 'families'}. First-time scans can take a minute.`
-          : 'All visual families are already known; applying learned decisions.',
+        !hostedStatus.available && unresolvedFamilies
+          ? `The hosted reviewer is unavailable. The local pass kept ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family' : 'families'} provisional.`
+          : hostedTotal
+            ? `The local pass prepared context for ${unresolvedFamilies} unresolved ${unresolvedFamilies === 1 ? 'family' : 'families'}. The hosted reviewer is classifying ${hostedTotal} ${hostedTotal === 1 ? 'family' : 'families'} ${budgetDescription}${provisionalBudgetFamilies ? `; ${provisionalBudgetFamilies} remain provisional` : ''}.`
+            : unresolvedFamilies
+              ? `The local pass handled the clear families; ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family remains' : 'families remain'} provisional within the hosted budget.`
+              : 'All visual families are already known; applying learned decisions.',
         62,
       );
-      const request = {
+      const requestBase: Omit<HostedFamilyAnalysisRequest, 'families' | 'reviewTier' | 'includeDocumentContext' | 'maxMemberImages' | 'hostedScanId'> = {
         project,
         documentTitle: scan.documentTitle,
         documentSessionUuid: scan.documentSessionUuid,
-        families,
         documentPreviewUrl,
         instructions: snapshot.assistantMemories
           .filter((memory) => memory.scope === 'global' || memory.project === project)
@@ -794,44 +975,115 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       const hostedAnalyses: Awaited<ReturnType<typeof hostedAi.analyzeFamilies>>['analyses'] = [];
       let cachedFamilies = 0;
       let failedFamilies = 0;
-      const response = await hostedAi.analyzeFamiliesProgressively(request, (completed, total, partial) => {
-        hostedAnalyses.push(...partial.analyses);
-        cachedFamilies += partial.cached;
-        failedFamilies += partial.failures.length;
-        const partialComponents = applyComponentSceneContext(
-          applyComponentIntelligence(calibrateComponentConfidence(
-            applyHostedFamilyAnalyses(reviewed, families, hostedAnalyses),
-            snapshot.componentDecisions,
-          )),
-        );
-        progress(
-          'hosted-analysis',
-          'Analysing new visual families',
-          `Qwen completed ${completed} of ${total} ${total === 1 ? 'family' : 'families'}.`,
-          62 + Math.round((completed / Math.max(1, total)) * 18),
-        );
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('kryeo:scan-progress', {
-            phase: 'hosted-analysis',
-            label: 'Analysing new visual families',
-            detail: `Qwen completed ${completed} of ${total} ${total === 1 ? 'family' : 'families'}.`,
-            progress: 62 + Math.round((completed / Math.max(1, total)) * 18),
-            completedFamilies: completed,
-            totalFamilies: total,
-            cachedFamilies,
-            failedFamilies,
-            partialResult: { ...scan, components: partialComponents },
-          });
-        }
-      }, scanController.signal);
+      let completedHostedFamilies = 0;
+      let budgetLimitedFamilies = provisionalBudgetFamilies;
+      let lastPartialResultAt = 0;
+      let lastPartialResultCompleted = 0;
+      let partialResultSent = false;
+      const tierResponses: Awaited<ReturnType<typeof hostedAi.analyzeFamilies>>[] = [];
+      hostedAnalysisStartedAt = Date.now();
+      for (const tier of ['escalation', 'lite'] as HostedReviewTier[]) {
+        const tierFamilies = hostedFamilies.filter((candidate) => candidate.tier === tier).map((candidate) => candidate.family);
+        if (!tierFamilies.length) continue;
+        const response = await hostedAi.analyzeFamiliesProgressively({
+          ...requestBase,
+          families: tierFamilies,
+          reviewTier: tier,
+          // Both tiers use one representative family preview. Escalation also
+          // receives the document composite, giving it context without sending
+          // every family image again.
+          maxMemberImages: 1,
+          includeDocumentContext: tier === 'escalation' && Boolean(documentPreviewUrl),
+          hostedScanId,
+          documentPreviewUrl: tier === 'escalation' ? documentPreviewUrl : undefined,
+        }, (completed, total, partial) => {
+          diagnosticsHostedRequests += 1;
+          hostedAnalyses.push(...partial.analyses);
+          cachedFamilies += partial.cached;
+          failedFamilies += partial.failures.reduce((total, failure) => total + failure.familyIds.length, 0);
+          budgetLimitedFamilies += partial.skippedFamilyIds?.length || 0;
+          diagnosticsCachedFamilies = cachedFamilies;
+          diagnosticsFailedFamilies = failedFamilies;
+          diagnosticsBudgetLimitedFamilies = budgetLimitedFamilies;
+          const globalCompleted = Math.min(completedHostedFamilies + completed, hostedTotal);
+          const detail = `The hosted reviewer completed ${globalCompleted} of ${hostedTotal} selected ${hostedTotal === 1 ? 'family' : 'families'}${budgetLimitedFamilies ? `; ${budgetLimitedFamilies} remain local within budget` : ''}.`;
+          if (!event.sender.isDestroyed()) {
+            const now = Date.now();
+            const isFinalHostedUpdate = globalCompleted >= hostedTotal;
+            // A partial result contains every thumbnail as a base64 data URL.
+            // Re-sending that full document after every small cloud batch makes
+            // large scans spend more time in IPC/React updates than inference.
+            // Progress counts still update for every response; the heavyweight
+            // result update is intentionally bounded.
+            const shouldSendPartialResult = !partialResultSent
+              || isFinalHostedUpdate
+              || (
+                globalCompleted - lastPartialResultCompleted >= 48
+                && now - lastPartialResultAt >= 2_500
+              );
+            const partialResult = shouldSendPartialResult
+              ? {
+                ...scan,
+                components: applyComponentSceneContext(
+                  applyComponentIntelligence(calibrateComponentConfidence(
+                    applyHostedFamilyAnalyses(reviewed, families, hostedAnalyses),
+                    snapshot.componentDecisions,
+                  ), false),
+                ),
+              }
+              : undefined;
+            if (partialResult) {
+              partialResultSent = true;
+              lastPartialResultAt = now;
+              lastPartialResultCompleted = globalCompleted;
+            }
+            event.sender.send('kryeo:scan-progress', {
+              phase: 'hosted-analysis',
+              label: 'Analysing new visual families',
+              detail,
+              progress: 62 + Math.round((globalCompleted / Math.max(1, hostedTotal)) * 18),
+              completedFamilies: globalCompleted,
+              totalFamilies: hostedTotal,
+              cachedFamilies,
+              failedFamilies,
+              localFamilies: selection.localCount,
+              hostedFamilies: hostedTotal,
+              budgetLimitedFamilies,
+              ...(partialResult ? { partialResult } : {}),
+            });
+          }
+        }, scanController.signal);
+        tierResponses.push(response);
+        completedHostedFamilies += tierFamilies.length;
+      }
+      stageTimings.hostedAnalysisMs = Date.now() - hostedAnalysisStartedAt;
+      const responseAnalyses = tierResponses.flatMap((response) => response.analyses);
+      hostedProviderCostUsd = Math.max(0, ...tierResponses.map((response) => response.scanProviderCostUsd || 0));
       reviewed = calibrateComponentConfidence(
-        applyHostedFamilyAnalyses(reviewed, families, response.analyses),
+        applyHostedFamilyAnalyses(reviewed, families, responseAnalyses),
         snapshot.componentDecisions,
       );
-      hostedAnalysisAvailable = response.analyses.length > 0;
-      if (!hostedAnalysisAvailable && response.failures.length) {
-        hostedAnalysisError = response.failures[0].message;
+      hostedAnalysisAvailable = responseAnalyses.length > 0;
+      const failures = tierResponses.flatMap((response) => response.failures);
+      const skippedHostedFamilies = [...new Set(tierResponses.flatMap((response) => response.skippedFamilyIds || []))];
+      diagnosticsCachedFamilies = cachedFamilies;
+      diagnosticsFailedFamilies = failures.reduce((total, failure) => total + failure.familyIds.length, 0);
+      diagnosticsBudgetLimitedFamilies = skippedHostedFamilies.length;
+      if (!hostedAnalysisAvailable && failures.length) {
+        hostedAnalysisError = failures[0].message;
+      } else if (skippedHostedFamilies.length) {
+        hostedAnalysisError = `The $${scanBudgetUsd.toFixed(3)} cloud safety ceiling was reached before ${skippedHostedFamilies.length} ${skippedHostedFamilies.length === 1 ? 'family' : 'families'} could be classified.`;
+      } else if (!hostedStatus.available && unresolvedFamilies) {
+        hostedAnalysisError = hostedStatus.message;
       }
+      if (!hostedTotal) progress(
+        'hosted-analysis',
+        'Analysing new visual families',
+        hostedStatus.available
+           ? `No hosted families were queued under the active policy, so ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family remains' : 'families remain'} provisional.`
+          : hostedStatus.message,
+        80,
+      );
       progress(
         'reconciliation',
         'Applying local consistency checks',
@@ -846,11 +1098,14 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         issues: [],
       };
     } catch (error) {
+      if (hostedAnalysisStartedAt) stageTimings.hostedAnalysisMs = Date.now() - hostedAnalysisStartedAt;
       hostedAnalysisError = error instanceof Error ? error.message : String(error);
       reviewed = applyHostedFamilyAnalyses(reviewed, families, []);
     }
     progress('finalizing', 'Preparing review', 'Applying hierarchy context and arranging the final component list.', 94);
-    reviewed = applyComponentSceneContext(applyComponentIntelligence(reviewed));
+    const finalizationStartedAt = Date.now();
+    reviewed = applyComponentSceneContext(applyComponentIntelligence(reviewed, false));
+    stageTimings.finalizationMs = Date.now() - finalizationStartedAt;
     progress('complete', 'Scan complete', `${reviewed.length} proposed components are ready to review.`, 100);
     return {
       ...scan,
@@ -858,6 +1113,20 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       reconciliation,
       hostedAnalysisAvailable,
       hostedAnalysisError,
+      hostedProviderCostUsd,
+      hostedTargetUsd,
+      hostedBudgetUsd,
+      diagnostics: {
+        totalMs: Date.now() - scanStartedAt,
+        stages: stageTimings,
+        visualFamilyCount: families.length,
+        hostedFamilyCount: diagnosticsHostedFamilies,
+        hostedRequestCount: diagnosticsHostedRequests,
+        cachedFamilyCount: diagnosticsCachedFamilies,
+        failedFamilyCount: diagnosticsFailedFamilies,
+        budgetLimitedFamilyCount: diagnosticsBudgetLimitedFamilies,
+        warnings: scanWarnings,
+      },
     };
   } catch (error) {
     if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
@@ -878,6 +1147,13 @@ ipcMain.handle('kryeo:cancel-component-scan', (event) => {
 
 ipcMain.handle('kryeo:get-local-ai-status', () => localAi.status());
 ipcMain.handle('kryeo:get-hosted-ai-status', () => hostedAi.status());
+ipcMain.handle('kryeo:explain-component-family', (_event, input: unknown) => {
+  const request = input as HostedFamilyEvidenceRequest;
+  if (!request || typeof request !== 'object' || !String(request.visualHash || '') || !String(request.previewUrl || '')) {
+    throw new Error('A visual family is required before Kryeo can request evidence.');
+  }
+  return hostedAi.explainFamily(request);
+});
 ipcMain.handle('kryeo:configure-hosted-ai', (_event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid Kryeo AI configuration.');
   const configuration = input as Partial<HostedAiConfiguration>;

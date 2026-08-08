@@ -15,6 +15,7 @@ const api: KryeoApi = {
   getLocalAiStatus: () => ipcRenderer.invoke('kryeo:get-local-ai-status'),
   getHostedAiStatus: () => ipcRenderer.invoke('kryeo:get-hosted-ai-status'),
   configureHostedAi: (configuration) => ipcRenderer.invoke('kryeo:configure-hosted-ai', configuration),
+  explainComponentFamily: (request) => ipcRenderer.invoke('kryeo:explain-component-family', request),
   getAssistantStatus: () => ipcRenderer.invoke('kryeo:get-assistant-status'),
   installAssistant: (modelPack) => ipcRenderer.invoke('kryeo:install-assistant', modelPack),
   chatWithAssistant: (request) => ipcRenderer.invoke('kryeo:chat-with-assistant', request),

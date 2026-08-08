@@ -33,11 +33,29 @@ export interface AffinityComponentExport {
   grouping: 'single' | 'existing-group' | 'overlap';
 }
 
+export interface AffinityScanPartitionPlan {
+  path: number[];
+  parentPath: number[];
+  parentName: string;
+  parentType: string;
+  parentHierarchyKey: string;
+  hierarchyDepth: number;
+  mode: 'candidate' | 'subtree';
+  ancestorPaths: number[][];
+  // A cheap Affinity-side approximation used only to avoid combining several
+  // dense or very large sections in the same remote script.
+  estimatedWork?: number;
+}
+
 export interface AffinityComponentExportBatch {
   documentTitle: string;
   documentSessionUuid: string;
   sourceName: string;
   components: AffinityComponentExport[];
+  totalCandidates?: number;
+  totalPartitions?: number;
+  partitionIndex?: number;
+  partitionPlan?: AffinityScanPartitionPlan[];
 }
 
 export interface AffinityAssistantPreview {
@@ -49,6 +67,19 @@ export interface AffinityAssistantPreview {
 const SERVER_URL = 'http://localhost:6767/sse';
 const CONNECT_TIMEOUT_MS = 3500;
 const REQUEST_TIMEOUT_MS = 6500;
+// Component export is constrained by Affinity's remote script window, rather
+// than by the MCP round-trip alone. Start conservatively, grow after quick
+// batches, and shrink before a slow document turns into a timeout.
+const INITIAL_COMPONENT_EXPORT_PARTITIONS = 4;
+const MAX_COMPONENT_EXPORT_PARTITIONS = 12;
+// Start inside the known-safe window, then let fast real batches earn a larger
+// work allowance. The previous fixed limit made a large document pay a remote
+// Affinity round-trip for many tiny, already-safe batches.
+const INITIAL_COMPONENT_EXPORT_BATCH_WORK = 24;
+const MIN_COMPONENT_EXPORT_BATCH_WORK = 12;
+const MAX_COMPONENT_EXPORT_BATCH_WORK = 56;
+const FAST_COMPONENT_EXPORT_BATCH_MS = 18_000;
+const SLOW_COMPONENT_EXPORT_BATCH_MS = 42_000;
 
 type TextContent = { type: 'text'; text: string };
 
@@ -71,6 +102,30 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
       setTimeout(() => reject(new Error('Affinity did not respond in time.')), milliseconds);
     }),
   ]);
+}
+
+function isRecoverableComponentExportError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /(?:MCP error -32001|MCP error -32000|request timed out|timed out|connection closed|connection was interrupted|Affinity did not respond in time)/i.test(message);
+}
+
+function componentExportBatchCount(
+  partitions: AffinityScanPartitionPlan[],
+  start: number,
+  maxCount: number,
+  maxWork = MAX_COMPONENT_EXPORT_BATCH_WORK,
+): number {
+  let count = 0;
+  let totalWork = 0;
+  while (start + count < partitions.length && count < maxCount) {
+    const partition = partitions[start + count];
+    const work = Math.max(1, Math.round(Number(partition?.estimatedWork || 1)));
+    if (count > 0 && totalWork + work > maxWork) break;
+    totalWork += work;
+    count += 1;
+    if (totalWork >= maxWork) break;
+  }
+  return Math.max(1, count);
 }
 
 function versionParts(value: string): number[] {
@@ -836,9 +891,46 @@ console.log('KRYEO_ASSISTANT_PREVIEW:' + JSON.stringify({
     return JSON.parse(line) as AffinityAssistantPreview;
   }
 
-  async exportComponentCandidates(stagingDirectory: string, scope: 'document' | 'selection' = 'document'): Promise<AffinityComponentExportBatch> {
+  async exportComponentCandidates(
+    stagingDirectory: string,
+    scope: 'document' | 'selection' = 'document',
+    onProgress?: (progress: { completedPartitions: number; totalPartitions: number }) => void,
+    signal?: AbortSignal,
+  ): Promise<AffinityComponentExportBatch> {
+    const assertActive = () => {
+      if (!signal?.aborted) return;
+      const error = new Error('Component scan cancelled.');
+      error.name = 'AbortError';
+      throw error;
+    };
+    assertActive();
     await this.connect();
-    const probe = `
+    // Affinity's MCP endpoint has a finite execution window. Partition the
+    // document at its top-level component sections so traversal and rendering
+    // never depend on one monolithic whole-document script.
+    let chunkSize = INITIAL_COMPONENT_EXPORT_PARTITIONS;
+    let workBudget = INITIAL_COMPONENT_EXPORT_BATCH_WORK;
+    let start = 0;
+    let totalPartitions = Number.POSITIVE_INFINITY;
+    let firstBatch: AffinityComponentExportBatch | null = null;
+    let partitionPlan: AffinityScanPartitionPlan[] = [];
+    let partitionPlanReady = scope !== 'document';
+    const components: AffinityComponentExport[] = [];
+    let totalCandidates = 0;
+    const singlePartitionRetries = new Set<string>();
+    while (start < totalPartitions) {
+      assertActive();
+      const planning = !partitionPlanReady;
+      const requestedPartitionCount = planning
+        ? 0
+        : componentExportBatchCount(
+          partitionPlan,
+          start,
+          Math.max(1, Math.min(chunkSize, totalPartitions - start)),
+          workBudget,
+        );
+      const end = planning ? 0 : start + requestedPartitionCount;
+      const probe = `
 'use strict';
 const { Document, FileExportArea, FileExportOptions } = require('/document');
 const { Selection } = require('/selections');
@@ -846,6 +938,10 @@ const { DocumentCommand } = require('/commands');
 const doc = Document.current;
 if (!doc) throw new Error('Open an Affinity document before scanning components.');
 const scanScope = ${JSON.stringify(scope)};
+const exportPartitionStart = ${JSON.stringify(start)};
+const exportPartitionEnd = ${JSON.stringify(end)};
+  const providedPartitions = scanScope === 'document' ? ${JSON.stringify(partitionPlan.slice(start, end))} : [];
+  const providedPartitionCount = ${JSON.stringify(partitionPlan.length)};
 
 function nodeName(node) {
   return String(node.userDescription || node.description || node.defaultDescriptionForDisplay || node.defaultDescription || 'Unnamed layer');
@@ -906,6 +1002,9 @@ function childNodes(node) {
     for (const child of node.children) children.push(child);
   } catch (_) {}
   return children;
+}
+function nodeDescendantCount(node) {
+  try { return Number(node.children.all.length || 0); } catch (_) { return 0; }
 }
 function isRenderableCandidate(node) {
   return !/Adjustment|Filter|Mask/i.test(nodeType(node));
@@ -997,7 +1096,92 @@ function collectDocumentCandidate(node, path, parentPath, parentName, ancestors,
   }
 }
 
-if (scanScope === 'selection') {
+const partitions = [];
+function partitionWork(node, mode) {
+  const descendants = Math.max(0, nodeDescendantCount(node));
+  const bounds = nodeBounds(node);
+  const megapixels = bounds
+    ? Math.max(0, (Number(bounds.width) * Number(bounds.height)) / (1024 * 1024))
+    : 0;
+  // Descendants approximate the number of export selections. Large flat artwork
+  // can also take a long time to rasterise, so give every megapixel a small
+  // weight even when it has no children.
+  const descendantWork = mode === 'candidate' ? 1 : Math.min(48, descendants + 1);
+  const rasterWork = Math.min(48, Math.ceil(megapixels) * 3);
+  return Math.max(1, Math.min(96, descendantWork + rasterWork));
+}
+function pushPartition(node, path, parentPath, parentName, ancestors, parentType, parentHierarchyKey, hierarchyDepth, mode) {
+  partitions.push({
+    node,
+    path,
+    parentPath,
+    parentName,
+    ancestors,
+    parentType,
+    parentHierarchyKey,
+    hierarchyDepth,
+    mode,
+    ancestorPaths: path
+      .slice(0, -1)
+      .map((_, index, parts) => parts.slice(0, index + 1))
+      .filter((ancestorPath) => ancestorPath.length >= 2),
+    estimatedWork: partitionWork(node, mode),
+  });
+}
+function nodeAtPath(path) {
+  if (!Array.isArray(path) || path.length < 2) return null;
+  let current = null;
+  let spreadIndex = 0;
+  for (const spread of doc.spreads) {
+    if (spreadIndex === Number(path[0])) { current = spread; break; }
+    spreadIndex += 1;
+  }
+  if (!current) return null;
+  for (let pathIndex = 1; pathIndex < path.length; pathIndex += 1) {
+    current = childNodes(current)[Number(path[pathIndex])];
+    if (!current) return null;
+  }
+  return current;
+}
+function pushSectionPartitions(node, path, parentPath, parentName, ancestors, parentType, parentHierarchyKey, hierarchyDepth, depth) {
+  const children = childNodes(node);
+  const currentType = nodeType(node);
+  const subtreeDescendants = nodeDescendantCount(node);
+  // A single export has to finish inside Affinity's fixed remote MCP window.
+  // Split any dense subtree, regardless of its concrete Affinity node type:
+  // imported/live groups do not consistently identify as a "Group" even when
+  // their descendants are expensive to render.
+  const shouldSplit = depth < 8 && children.length > 0 && (
+    children.length > 2 || subtreeDescendants > 24
+  );
+  if (shouldSplit) {
+    let childIndex = 0;
+    for (const child of children) {
+      pushSectionPartitions(
+        child,
+        path.concat(childIndex),
+        path,
+        nodeName(node),
+        ancestors.concat(node),
+        currentType,
+        parentHierarchyKey,
+        hierarchyDepth,
+        depth + 1,
+      );
+      childIndex += 1;
+    }
+    return;
+  }
+  pushPartition(node, path, parentPath, parentName, ancestors, parentType, parentHierarchyKey, hierarchyDepth, 'subtree');
+}
+if (providedPartitions.length > 0) {
+  for (const descriptor of providedPartitions) {
+    const node = nodeAtPath(descriptor.path);
+    if (!node) throw new Error('The Affinity document hierarchy changed during Component Scan.');
+    const ancestors = (descriptor.ancestorPaths || []).map(nodeAtPath).filter(Boolean);
+    partitions.push({ ...descriptor, node, ancestors });
+  }
+} else if (scanScope === 'selection') {
   if (original.length === 0) throw new Error('Select a parent group or one or more component layers before scanning the selection.');
   const selectedRoot = original.length === 1 ? original[0] : null;
   sourceName = selectedRoot ? nodeName(selectedRoot) : original.length + ' selected layers';
@@ -1017,14 +1201,60 @@ if (scanScope === 'selection') {
   for (const spread of doc.spreads) {
     let nodeIndex = 0;
     for (const node of spread.children) {
-      collectDocumentCandidate(node, [spreadIndex, nodeIndex], [spreadIndex], 'Spread ' + (spreadIndex + 1), [], 'Spread', '', 0);
+      const path = [spreadIndex, nodeIndex];
+      if (isStorageBoundary(node)) {
+        nodeIndex += 1;
+        continue;
+      }
+      const children = childNodes(node);
+      const type = nodeType(node);
+      const parentName = 'Spread ' + (spreadIndex + 1);
+      const topTypeIsComponent = !/Container|Artboard|Spread/i.test(type);
+      const retainedParent = topTypeIsComponent
+        && children.length <= 2
+        && nodeDescendantCount(node) <= 24;
+      if (children.length === 0) {
+        pushPartition(node, path, [spreadIndex], parentName, [], 'Spread', '', 0, 'subtree');
+      } else {
+        if (retainedParent) {
+          // Large top-level groups are usually organizational wrappers. Keep
+          // their child sections, but avoid rendering the whole wrapper as one
+          // oversized component request.
+          pushPartition(node, path, [spreadIndex], parentName, [], 'Spread', '', 0, 'candidate');
+        }
+        let childIndex = 0;
+        for (const child of children) {
+          pushSectionPartitions(
+            child,
+            path.concat(childIndex),
+            path,
+            nodeName(node),
+            [node],
+            type,
+            retainedParent ? path.join('.') : '',
+            retainedParent ? 1 : 0,
+            0,
+          );
+          childIndex += 1;
+        }
+      }
       nodeIndex += 1;
     }
     spreadIndex += 1;
   }
 }
-if (candidates.length > 320) throw new Error('Component Scan found more than 320 component roots. Scan a selection to narrow the document.');
-
+if (scanScope === 'document') {
+  const activePartitionStart = providedPartitions.length > 0 ? 0 : exportPartitionStart;
+  const activePartitionEnd = providedPartitions.length > 0 ? partitions.length : Math.min(exportPartitionEnd, partitions.length);
+  for (let partitionIndex = activePartitionStart; partitionIndex < activePartitionEnd; partitionIndex += 1) {
+    const partition = partitions[partitionIndex];
+    if (partition.mode === 'candidate') {
+      addCandidate(partition.node, partition.path, partition.parentPath, partition.parentName, partition.ancestors, partition.parentType, partition.parentHierarchyKey, partition.hierarchyDepth);
+    } else {
+      collectDocumentCandidate(partition.node, partition.path, partition.parentPath, partition.parentName, partition.ancestors, partition.parentType, partition.parentHierarchyKey, partition.hierarchyDepth);
+    }
+  }
+}
 function area(box) { return Math.max(0, box.width) * Math.max(0, box.height); }
 function intersectionArea(a, b) {
   const left = Math.max(a.x, b.x);
@@ -1060,9 +1290,20 @@ function join(a, b) {
   if (rootA !== rootB) parents[rootB] = rootA;
 }
 if (scanScope === 'document') {
-  for (let a = 0; a < candidates.length; a += 1) {
-    for (let b = a + 1; b < candidates.length; b += 1) {
-      if (shouldCompose(candidates[a], candidates[b])) join(a, b);
+  // Composition is only possible between candidates with the same direct
+  // parent. Bucket first so large documents do not pay an all-document
+  // quadratic comparison cost.
+  const siblings = {};
+  for (let index = 0; index < candidates.length; index += 1) {
+    const key = candidates[index].parentPath.join('.');
+    if (!siblings[key]) siblings[key] = [];
+    siblings[key].push(index);
+  }
+  for (const indexes of Object.values(siblings)) {
+    for (let a = 0; a < indexes.length; a += 1) {
+      for (let b = a + 1; b < indexes.length; b += 1) {
+        if (shouldCompose(candidates[indexes[a]], candidates[indexes[b]])) join(indexes[a], indexes[b]);
+      }
     }
   }
 }
@@ -1072,13 +1313,18 @@ for (let index = 0; index < candidates.length; index += 1) {
   if (!clusterMap[key]) clusterMap[key] = [];
   clusterMap[key].push(candidates[index]);
 }
-const clusters = Object.keys(clusterMap).map((key) => clusterMap[key]);
-const scanVisibilityNodes = [];
-for (const candidate of candidates) {
-  for (const ancestor of candidate.ancestors || []) if (scanVisibilityNodes.indexOf(ancestor) < 0) scanVisibilityNodes.push(ancestor);
-  if (scanVisibilityNodes.indexOf(candidate.node) < 0) scanVisibilityNodes.push(candidate.node);
+const clusters = Object.keys(clusterMap)
+  .map((key) => ({ rootIndex: Number(key), members: clusterMap[key] }));
+const changedVisibilityNodes = [];
+const changedVisibilityStates = [];
+const renderRefreshCache = new Map();
+function rememberVisibility(nodes) {
+  for (const node of nodes) {
+    if (changedVisibilityNodes.indexOf(node) >= 0) continue;
+    changedVisibilityNodes.push(node);
+    changedVisibilityStates.push(nodeOwnVisibility(node));
+  }
 }
-const scanVisibilityStates = scanVisibilityNodes.map((item) => nodeOwnVisibility(item));
 function restoreVisibility(nodes, states) {
   for (let visibilityIndex = nodes.length - 1; visibilityIndex >= 0; visibilityIndex -= 1) {
     doc.executeCommand(DocumentCommand.createSetVisibility(
@@ -1087,17 +1333,36 @@ function restoreVisibility(nodes, states) {
     ));
   }
 }
+function needsRenderRefresh(node, depth) {
+  if (renderRefreshCache.has(node)) return renderRefreshCache.get(node);
+  if (/Adjustment|Live|Filter/i.test(nodeType(node))) {
+    renderRefreshCache.set(node, true);
+    return true;
+  }
+  if (depth >= 4) {
+    renderRefreshCache.set(node, false);
+    return false;
+  }
+  for (const child of childNodes(node)) {
+    if (needsRenderRefresh(child, depth + 1)) {
+      renderRefreshCache.set(node, true);
+      return true;
+    }
+  }
+  renderRefreshCache.set(node, false);
+  return false;
+}
 
 const options = FileExportOptions.createWithPresetName('PNG');
 const exported = [];
 const structuralFallbacks = [];
 try {
   for (let index = 0; index < clusters.length; index += 1) {
-    const cluster = clusters[index];
+    const cluster = clusters[index].members;
+    const rootIndex = clusters[index].rootIndex;
+    const exportIndex = exportPartitionStart * 100000 + index;
     const nodes = cluster.map((item) => item.node);
     const node = nodes[0];
-    const selection = Selection.create(doc, nodes, true);
-    doc.selection = selection;
     let bounds = null;
     for (const memberNode of nodes) {
       const memberBox = renderedBounds(memberNode, 0);
@@ -1128,19 +1393,36 @@ try {
       }
     } catch (_) {}
 
-    const outputPath = ${JSON.stringify(stagingDirectory)} + '\\\\component-' + String(index + 1).padStart(3, '0') + '.png';
+    const outputPath = ${JSON.stringify(stagingDirectory)} + '\\\\component-' + String(exportIndex + 1).padStart(6, '0') + '.png';
     const revealNodes = [];
     for (const item of cluster) {
       for (const ancestor of item.ancestors || []) if (revealNodes.indexOf(ancestor) < 0) revealNodes.push(ancestor);
       if (revealNodes.indexOf(item.node) < 0) revealNodes.push(item.node);
     }
     const visibilityStates = revealNodes.map((item) => nodeOwnVisibility(item));
-    if (nodes.length > 0) {
-      // Force Affinity to rebuild rendered adjustments before exporting the preview.
-      doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, nodes, true), false));
+    const hiddenRevealNodes = revealNodes.filter((_, revealIndex) => !visibilityStates[revealIndex]);
+    const refreshNodes = nodes.filter((item) => nodeOwnVisibility(item));
+    const localChangedNodes = [];
+    const localChangedStates = [];
+    function rememberLocalVisibility(items) {
+      for (const item of items) {
+        if (localChangedNodes.indexOf(item) >= 0) continue;
+        localChangedNodes.push(item);
+        localChangedStates.push(nodeOwnVisibility(item));
+      }
+      rememberVisibility(items);
     }
-    if (revealNodes.length > 0) {
-      doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, revealNodes, true), true));
+    if (refreshNodes.length > 0 && nodes.some((item) => needsRenderRefresh(item, 0))) {
+      // Adjustment-bearing groups need a visibility refresh before Affinity
+      // renders them. Ordinary visible artwork does not, avoiding several
+      // document mutations for every exported component.
+      rememberLocalVisibility(refreshNodes);
+      doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, refreshNodes, true), false));
+      doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, refreshNodes, true), true));
+    }
+    if (hiddenRevealNodes.length > 0) {
+      rememberLocalVisibility(hiddenRevealNodes);
+      doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, hiddenRevealNodes, true), true));
     }
     let success = false;
     try {
@@ -1155,10 +1437,10 @@ try {
       // exported directly. Keep scanning and attach a child preview below.
       success = false;
     } finally {
-      restoreVisibility(revealNodes, visibilityStates);
+      restoreVisibility(localChangedNodes, localChangedStates);
     }
     const componentRecord = {
-      index,
+      index: exportIndex,
       name: cluster.length > 1 && cluster[0].parentName ? cluster[0].parentName : nodeName(node),
       affinityType: nodeType(node),
       bounds: { x: Number(bounds.x), y: Number(bounds.y), width: Number(bounds.width), height: Number(bounds.height) },
@@ -1192,9 +1474,10 @@ try {
   }
   exported.sort((left, right) => left.index - right.index);
 } finally {
-  // Reconcile the complete scan scope once more so a failed export or nested
-  // parent/child visibility command cannot leak a hidden layer into Affinity.
-  restoreVisibility(scanVisibilityNodes, scanVisibilityStates);
+  // Reconcile only nodes whose visibility was actually changed. Restoring the
+  // complete candidate set after every partition was a dominant cost on large
+  // documents, while this retains the same failure safety boundary.
+  restoreVisibility(changedVisibilityNodes, changedVisibilityStates);
   doc.selection = Selection.create(doc, original, true);
 }
 
@@ -1203,16 +1486,197 @@ console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
   documentSessionUuid: String(doc.sessionUuid || ''),
   sourceName,
   components: exported,
+  totalCandidates: candidates.length,
+  totalPartitions: scanScope === 'document' ? (providedPartitionCount || partitions.length) : 1,
+  partitionIndex: exportPartitionStart,
+  partitionPlan: partitions.map((partition) => ({
+    path: partition.path,
+    parentPath: partition.parentPath,
+    parentName: partition.parentName,
+    parentType: partition.parentType,
+    parentHierarchyKey: partition.parentHierarchyKey,
+    hierarchyDepth: partition.hierarchyDepth,
+    mode: partition.mode,
+    ancestorPaths: partition.ancestorPaths,
+    estimatedWork: partition.estimatedWork,
+  })),
 }));`;
-    const result = await this.callTool('execute_script', { script: probe }, 120_000);
-    const output = textFromResult(result);
-    const marker = 'KRYEO_COMPONENT_SCAN:';
-    const index = output.lastIndexOf(marker);
-    if (result.isError || index < 0) throw new Error(output || 'Affinity could not scan the document components.');
-    const line = output.slice(index + marker.length).split(/\r?\n/, 1)[0];
-    return JSON.parse(line) as AffinityComponentExportBatch;
+      let batch: AffinityComponentExportBatch;
+      const requestStartedAt = Date.now();
+      try {
+        const result = await this.callTool('execute_script', { script: probe }, 120_000);
+        assertActive();
+        const output = textFromResult(result);
+        const marker = 'KRYEO_COMPONENT_SCAN:';
+        const markerIndex = output.lastIndexOf(marker);
+        if (result.isError || markerIndex < 0) throw new Error(output || 'Affinity could not scan the document components.');
+        const line = output.slice(markerIndex + marker.length).split(/\r?\n/, 1)[0];
+        batch = JSON.parse(line) as AffinityComponentExportBatch;
+      } catch (error) {
+        const failedPartition = scope === 'document' ? partitionPlan[start] : undefined;
+        if (signal?.aborted || !isRecoverableComponentExportError(error) || !failedPartition) throw error;
+        await this.connect();
+        // A timeout means the current work estimate was optimistic. Tighten
+        // both dimensions before retrying, while retaining the existing
+        // split/reconnect recovery behaviour.
+        workBudget = Math.max(MIN_COMPONENT_EXPORT_BATCH_WORK, Math.floor(workBudget / 2));
+        if (requestedPartitionCount > 1) {
+          // The aggregate remote script exceeded Affinity's window. Retry the
+          // same range in smaller units before splitting its document structure.
+          chunkSize = Math.max(1, Math.floor(requestedPartitionCount / 2));
+          onProgress?.({ completedPartitions: start, totalPartitions });
+          continue;
+        }
+        const retryKey = failedPartition.path.join('.');
+        const closedConnection = /(?:MCP error -32000|connection closed|connection was interrupted)/i.test(
+          error instanceof Error ? error.message : String(error),
+        );
+        if (closedConnection && !singlePartitionRetries.has(retryKey)) {
+          // A closed SSE transport can happen after Affinity completed the
+          // script but before its result reached Electron. Reconnecting once is
+          // cheaper and safer than immediately fragmenting a valid component.
+          singlePartitionRetries.add(retryKey);
+          onProgress?.({ completedPartitions: start, totalPartitions });
+          continue;
+        }
+        if (failedPartition.path.length >= 14) throw error;
+        const narrowerPartitions = await this.splitComponentScanPartition(failedPartition);
+        if (narrowerPartitions.length < 2) throw new Error('Affinity timed out while rendering one component section. Select that group in Affinity and scan the selection instead.');
+        partitionPlan.splice(start, 1, ...narrowerPartitions);
+        totalPartitions = partitionPlan.length;
+        onProgress?.({ completedPartitions: start, totalPartitions });
+        continue;
+      }
+      if (!firstBatch) firstBatch = batch;
+      if (planning) {
+        partitionPlan = Array.isArray(batch.partitionPlan) ? batch.partitionPlan : [];
+        partitionPlanReady = true;
+        totalPartitions = partitionPlan.length;
+        onProgress?.({ completedPartitions: 0, totalPartitions });
+        if (totalPartitions === 0) break;
+        continue;
+      }
+      components.push(...batch.components);
+      totalCandidates += Number(batch.totalCandidates ?? batch.components.length);
+      totalPartitions = Number(batch.totalPartitions ?? (partitionPlan.length || 1));
+      const requestDurationMs = Date.now() - requestStartedAt;
+      if (requestDurationMs < FAST_COMPONENT_EXPORT_BATCH_MS) {
+        chunkSize = Math.min(
+          MAX_COMPONENT_EXPORT_PARTITIONS,
+          Math.max(chunkSize, requestedPartitionCount) + 2,
+        );
+        workBudget = Math.min(
+          MAX_COMPONENT_EXPORT_BATCH_WORK,
+          workBudget + Math.max(4, Math.ceil(workBudget / 3)),
+        );
+      } else if (requestDurationMs > SLOW_COMPONENT_EXPORT_BATCH_MS) {
+        chunkSize = Math.max(1, Math.min(chunkSize, Math.floor(requestedPartitionCount / 2)));
+        workBudget = Math.max(MIN_COMPONENT_EXPORT_BATCH_WORK, Math.floor(workBudget * 0.6));
+      }
+      if (requestedPartitionCount === 1) singlePartitionRetries.delete(partitionPlan[start]?.path.join('.') || '');
+      onProgress?.({
+        completedPartitions: Math.min(totalPartitions, end),
+        totalPartitions,
+      });
+      if (totalPartitions <= end || batch.totalPartitions === undefined) break;
+      start = end;
+    }
+    if (!firstBatch) throw new Error('Affinity could not scan the document components.');
+    return {
+      ...firstBatch,
+      components: components.sort((left, right) => left.index - right.index),
+      totalCandidates,
+    };
   }
 
+  private async splitComponentScanPartition(partition: AffinityScanPartitionPlan): Promise<AffinityScanPartitionPlan[]> {
+    const script = `
+'use strict';
+const { Document } = require('/document');
+const doc = Document.current;
+if (!doc) throw new Error('Open an Affinity document before scanning components.');
+const descriptor = ${JSON.stringify(partition)};
+function childNodes(node) {
+  const children = [];
+  try { for (const child of node.children) children.push(child); } catch (_) {}
+  return children;
+}
+function nodeName(node) {
+  return String(node.userDescription || node.description || node.defaultDescriptionForDisplay || node.defaultDescription || 'Unnamed layer');
+}
+function nodeType(node) {
+  try { return String(node.constructor && node.constructor.name || Object.prototype.toString.call(node)); }
+  catch (_) { return 'Node'; }
+}
+function nodeDescendantCount(node) {
+  try { return Math.max(0, Number(node.children.all.length || 0)); } catch (_) { return 0; }
+}
+function nodeBounds(node) {
+  const boxes = [];
+  try { boxes.push(node.exactSpreadVisibleBox); } catch (_) {}
+  try { boxes.push(node.spreadVisibleBox); } catch (_) {}
+  try { boxes.push(node.spreadBaseBox); } catch (_) {}
+  for (const box of boxes) {
+    if (!box) continue;
+    const result = { width: Number(box.width), height: Number(box.height) };
+    if (result.width > 0 && result.height > 0) return result;
+  }
+  return null;
+}
+function estimatedWork(node) {
+  const descendants = nodeDescendantCount(node);
+  const bounds = nodeBounds(node);
+  const megapixels = bounds ? Math.max(0, (bounds.width * bounds.height) / (1024 * 1024)) : 0;
+  return Math.max(1, Math.min(96, Math.min(48, descendants + 1) + Math.min(48, Math.ceil(megapixels) * 3)));
+}
+function nodeAtPath(path) {
+  if (!Array.isArray(path) || path.length < 2) return null;
+  let current = null;
+  let spreadIndex = 0;
+  for (const spread of doc.spreads) {
+    if (spreadIndex === Number(path[0])) { current = spread; break; }
+    spreadIndex += 1;
+  }
+  if (!current) return null;
+  for (let index = 1; index < path.length; index += 1) {
+    current = childNodes(current)[Number(path[index])];
+    if (!current) return null;
+  }
+  return current;
+}
+const node = nodeAtPath(descriptor.path);
+if (!node) throw new Error('The Affinity document hierarchy changed during Component Scan.');
+console.log('KRYEO_COMPONENT_PARTITION_CHILDREN:' + JSON.stringify({
+  parentName: nodeName(node),
+  parentType: nodeType(node),
+  count: childNodes(node).length,
+  children: childNodes(node).map((child) => ({ estimatedWork: estimatedWork(child) })),
+}));`;
+    const result = await this.callTool('execute_script', { script }, 30_000);
+    const output = textFromResult(result);
+    const marker = 'KRYEO_COMPONENT_PARTITION_CHILDREN:';
+    const markerIndex = output.lastIndexOf(marker);
+    if (result.isError || markerIndex < 0) throw new Error(output || 'Affinity could not narrow the timed-out component section.');
+    const line = output.slice(markerIndex + marker.length).split(/\r?\n/, 1)[0];
+    const response = JSON.parse(line) as {
+      parentName: string;
+      parentType: string;
+      count: number;
+      children?: Array<{ estimatedWork?: number }>;
+    };
+    const ancestorPaths = [...(partition.ancestorPaths || []), partition.path];
+    return Array.from({ length: Math.max(0, response.count) }, (_, index) => ({
+      path: [...partition.path, index],
+      parentPath: partition.path,
+      parentName: response.parentName,
+      parentType: response.parentType,
+      parentHierarchyKey: partition.path.join('.'),
+      hierarchyDepth: partition.hierarchyDepth + 1,
+      mode: 'subtree' as const,
+      ancestorPaths,
+      estimatedWork: response.children?.[index]?.estimatedWork,
+    }));
+  }
   async applyComponentOrganization(request: ApplyComponentOrganizationRequest): Promise<ScriptRunResult> {
     const startedAt = new Date().toISOString();
     const title = 'Organize Affinity components';

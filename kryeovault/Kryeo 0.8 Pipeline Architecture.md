@@ -1,5 +1,7 @@
 # Kryeo 0.8 Pipeline Architecture
 
+> Historical 0.8 architecture snapshot. Current release and operational procedures are maintained in [Build](Build.md); do not use this note as the current version or hosted-runtime reference.
+
 ## Purpose
 
 Kryeo is the local bridge between creative source applications and production targets. Version 0.8 establishes persistent operations, asset intelligence, project recipes, and delivery manifests without replacing the Affinity workflows that already handle native document operations.

@@ -58,12 +58,14 @@ function dedupeIdentity(ancestor: string, own: string): string {
   return `${ancestor} ${own}`.trim();
 }
 
-function parentIdentity(parent: ComponentCandidate, childType: ComponentAssetType, ancestorDescriptor = ''): {
+function parentIdentity(parent: ComponentCandidate, childType: ComponentAssetType): {
   collection: string;
   item: string;
 } {
   const family = titleCase(parent.familyName);
-  const source = !family || GENERIC_NAME.test(family) || family.toLowerCase() === childType.toLowerCase()
+  const source = namedConstructionType(parent.name) === childType
+    ? titleCase(parent.name)
+    : !family || GENERIC_NAME.test(family) || family.toLowerCase() === childType.toLowerCase()
     ? titleCase(parent.name)
     : family;
   const descriptor = stripTrailingType(source, childType)
@@ -71,13 +73,11 @@ function parentIdentity(parent: ComponentCandidate, childType: ComponentAssetTyp
     .trim();
   const ownDescriptor = descriptor
     && !GENERIC_NAME.test(descriptor)
-    && (!isStructuralLabel(descriptor) || !ancestorDescriptor)
     ? descriptor
     : '';
-  const meaningfulDescriptor = dedupeIdentity(ancestorDescriptor, ownDescriptor);
   return {
-    collection: `${meaningfulDescriptor ? `${meaningfulDescriptor} ` : ''}${pluralType(childType)}`.slice(0, 80),
-    item: `${meaningfulDescriptor ? `${meaningfulDescriptor} ` : ''}${singularType(childType)}`.slice(0, 72),
+    collection: `${ownDescriptor ? `${ownDescriptor} ` : ''}${pluralType(childType)}`.slice(0, 80),
+    item: `${ownDescriptor ? `${ownDescriptor} ` : ''}${singularType(childType)}`.slice(0, 72),
   };
 }
 
@@ -87,6 +87,14 @@ function isConstructionType(type: ComponentAssetType): boolean {
 
 function isGenericLayerName(value: string): boolean {
   return GENERIC_NAME.test(titleCase(value));
+}
+
+function isStructuralEffectLabel(value: string): boolean {
+  const effectWords = new Set(['glow', 'shine', 'highlight', 'light', 'shadow']);
+  const tokens = titleCase(value).toLowerCase().split(/\s+/).filter(Boolean);
+  const hasEffect = tokens.some((token) => effectWords.has(token));
+  const remaining = tokens.filter((token) => !effectWords.has(token) && !/^\d+$/.test(token));
+  return hasEffect && remaining.every((token) => STRUCTURAL_WORDS.has(token));
 }
 
 function namedConstructionType(value: string): ComponentAssetType | undefined {
@@ -208,32 +216,6 @@ export function applyComponentSceneContext(
     if (visualName && mayRefineName(component)) component.familyName = visualNameWithType(visualName, component.assetType);
   }
 
-  // Apply a direct parent's identity before naming its children. The later
-  // group pass is depth-ordered so grandchildren inherit the fully resolved
-  // root identity instead of the nearest structural layer label.
-  for (const child of components) {
-    if (child.remembered || !child.parentHierarchyKey || child.assetType === 'Unknown') continue;
-    const parent = byKey.get(child.parentHierarchyKey);
-    if (!parent || parent.remembered) continue;
-    const source = titleCase(child.name);
-    const typeName = singularType(child.assetType);
-    const pluralName = pluralType(child.assetType);
-    const typePattern = `(?:${typeName.replace(/\s+/g, '\\s*')}|${pluralName.replace(/\s+/g, '\\s*')})`;
-    if (!new RegExp(`\\b${typePattern}\\b`, 'i').test(source)) continue;
-    const remainder = source
-      .replace(new RegExp(`\\b${typePattern}\\b`, 'ig'), ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (remainder && !isStructuralLabel(remainder)) continue;
-    const parentName = titleCase(parent.familyName);
-    if (!parentName || GENERIC_NAME.test(parentName) || isStructuralLabel(parentName)) continue;
-    const collectionType = new RegExp(`\\b${pluralName.replace(/\s+/g, '\\s*')}\\b`, 'i').test(source)
-      ? pluralName
-      : typeName;
-    child.familyName = `${parentName} ${collectionType}`.replace(/\s+/g, ' ').trim().slice(0, 80);
-    child.nameSource = 'visual';
-  }
-
   const parentsInHierarchyOrder = [...components].sort((left, right) => left.hierarchyDepth - right.hierarchyDepth);
   for (const parent of parentsInHierarchyOrder) {
     const children = parent.childHierarchyKeys
@@ -255,6 +237,17 @@ export function applyComponentSceneContext(
       }
     }
 
+    // A structural source label ending in Glow/Shadow/etc. identifies an
+    // effect layer even when a hosted response calls the decorative pixels an
+    // Ornament. This is category-level semantic evidence, not an asset-name
+    // special case, and lets the sibling pass produce names such as "... 6 Glow".
+    for (const child of children) {
+      if (child.remembered || !isStructuralEffectLabel(child.name)) continue;
+      child.assetType = 'FX';
+      child.aiSuggestedType = 'FX';
+      child.reviewCategory = 'construction';
+    }
+
     const byType = new Map<ComponentAssetType, ComponentCandidate[]>();
     for (const child of children) {
       if (child.assetType === 'Unknown' || child.assetType === 'FX') continue;
@@ -272,11 +265,16 @@ export function applyComponentSceneContext(
       const uniqueHashes = [...new Set(typedChildren.map((child) => child.visualHash))];
       if (typedChildren.length < 2 && !(parentSemanticType && isConstructionType(parentSemanticType))) continue;
 
-      const effects = children.filter((child) =>
-        child.assetType === 'FX'
-        && /(glow|shine|highlight|light|shadow)/i.test(`${child.name} ${child.familyName}`));
+      const includeEffects = parentSemanticType
+        ? childType === parentSemanticType
+        : byType.size === 1;
+      const effects = includeEffects
+        ? children.filter((child) =>
+            child.assetType === 'FX'
+            && /(glow|shine|highlight|light|shadow)/i.test(`${child.name} ${child.familyName}`))
+        : [];
       const ordered = children.filter((child) => typedChildren.includes(child) || effects.includes(child));
-      const identity = parentIdentity(parent, childType, ancestorDescriptor(parent, byKey));
+      const identity = parentIdentity(parent, childType);
       if (!parent.remembered) {
         parent.familyName = identity.collection;
         parent.nameSource = 'visual';
