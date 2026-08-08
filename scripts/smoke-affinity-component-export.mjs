@@ -92,12 +92,16 @@ const batched = await simulatedExport(10);
 assert.deepEqual(batched.ranges, [[0, 4], [4, 10]], 'quick batches should grow instead of reverting to one partition per call');
 assert.equal(batched.result.components.length, 10);
 assert.equal(batched.result.totalCandidates, 10);
+assert.equal(batched.result.exportDiagnostics.requestCount, 3);
+assert.equal(batched.result.exportDiagnostics.retryCount, 0);
 assert.deepEqual(batched.result.components.map((item) => item.index), Array.from({ length: 10 }, (_, index) => index));
 
 const recovered = await simulatedExport(6, true);
 assert.deepEqual(recovered.ranges, [[0, 4], [0, 2], [2, 6]], 'a timed-out aggregate batch should retry the same range in smaller units');
 assert.equal(recovered.result.components.length, 6);
 assert.equal(recovered.result.totalCandidates, 6);
+assert.equal(recovered.result.exportDiagnostics.requestCount, 4);
+assert.equal(recovered.result.exportDiagnostics.retryCount, 1);
 assert.deepEqual(recovered.result.components.map((item) => item.index), Array.from({ length: 6 }, (_, index) => index));
 
 const weighted = await simulatedExport(6, false, [24, 1, 1, 1, 1, 1]);
@@ -151,6 +155,9 @@ const split = await splitService.exportComponentCandidates('C:\\scan', 'document
 assert.deepEqual(splitRanges, [[0, 1], [0, 2]], 'a dense timed-out partition should split into weighted children and retry');
 assert.equal(split.components.length, 2);
 assert.equal(split.totalCandidates, 2);
+assert.equal(split.exportDiagnostics.requestCount, 3);
+assert.equal(split.exportDiagnostics.retryCount, 1);
+assert.equal(split.exportDiagnostics.splitCount, 1);
 
 const cancelledService = new AffinityService();
 let cancelledConnected = false;

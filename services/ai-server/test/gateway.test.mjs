@@ -34,7 +34,7 @@ async function waitForGateway() {
   throw new Error('Gateway did not start.');
 }
 
-function modelResponse(prompt) {
+function modelResponse(prompt, state = {}) {
   const familyIds = [...new Set(
     [...prompt.matchAll(/\\"familyId\\":\\"([^"\\]+)\\"/g)].map((match) => match[1]),
   )];
@@ -156,6 +156,15 @@ function modelResponse(prompt) {
       ]),
     };
   };
+  if (prompt.includes('Final Single Recovery Family')) {
+    state.finalSingleRecoveryCalls = Number(state.finalSingleRecoveryCalls || 0) + 1;
+    if (requestedIds.length > 1) {
+      const returnedIds = requestedIds.slice(0, -1);
+      return compactPacket(returnedIds, returnedIds.map(() => ({ name: 'Recovered Visual', type: 'Button' })));
+    }
+    if (state.finalSingleRecoveryCalls === 2) return { unexpected: true };
+    return compactPacket(requestedIds, [{ name: 'Final Recovered Visual', type: 'Button' }]);
+  }
   if (prompt.includes('Partial Recovery Family')) {
     const returnedIds = requestedIds.length > 1 ? requestedIds.slice(0, -1) : requestedIds;
     return compactPacket(returnedIds, returnedIds.map(() => ({ name: 'Recovered Visual', type: 'Button' })));
@@ -201,6 +210,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
   const modelPrompts = [];
   let activeModelCalls = 0;
   let maxActiveModelCalls = 0;
+  const modelState = {};
   const model = http.createServer(async (request, response) => {
     modelCalls += 1;
     activeModelCalls += 1;
@@ -226,7 +236,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         if (response.destroyed) return;
       }
       if (prompt.includes('Concurrency')) await new Promise((resolve) => setTimeout(resolve, 250));
-      const content = `${JSON.stringify(modelResponse(prompt))}\n{"trailing":true}`;
+      const content = `${JSON.stringify(modelResponse(prompt, modelState))}\n{"trailing":true}`;
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         choices: [{ message: { content } }],
@@ -710,6 +720,37 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(partialBatch.recovery.recoveryFamilies, 1);
     assert.equal(partialBatch.recovery.singleFamilyRecoveries, 0);
     assert.deepEqual(partialBatch.failures, []);
+
+    const callsBeforeFinalSingleRecovery = modelCalls;
+    const finalRecoveryIds = ['final-recovery-one', 'final-recovery-two', 'final-recovery-three'];
+    const finalSingleRecovery = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        reviewTier: 'lite',
+        familyContactSheet: {
+          previewUrl: VISION_PREVIEW,
+          familyIds: finalRecoveryIds,
+        },
+        families: finalRecoveryIds.map((id, index) => ({
+          ...family,
+          id,
+          fingerprint: `${id}-${runId}`,
+          members: [{ ...family.members[0], name: `Final Single Recovery Family ${index + 1}` }],
+        })),
+      }),
+    }).then((response) => response.json());
+    assert.equal(finalSingleRecovery.analyses.length, 3);
+    assert.deepEqual(new Set(finalSingleRecovery.analyses.map((item) => item.familyId)), new Set(finalRecoveryIds));
+    assert.equal(modelCalls - callsBeforeFinalSingleRecovery, 3, 'a persistently omitted alias should receive exactly one final single-family repair');
+    assert.equal(finalSingleRecovery.recovery.singleFamilyRecoveryAttempts, 1);
+    assert.equal(finalSingleRecovery.recovery.singleFamilyRecoveries, 1);
+    assert.equal(finalSingleRecovery.recovery.singleFamilyFailures, 0);
+    assert.equal(finalSingleRecovery.scanProviderRequests, 3);
+    assert.deepEqual(finalSingleRecovery.failures, []);
 
     const semanticFamilies = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',

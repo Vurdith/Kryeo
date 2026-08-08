@@ -21,8 +21,8 @@ Simple families use numbered 512x512 contact sheets containing up to sixteen pre
 - Unlimited by family count: `KRYEO_AI_MAX_HOSTED_FAMILIES_PER_SCAN=0`.
 - Pricing reservation: `$0.03/M` input and `$0.13/M` output for both lanes, multiplied by `KRYEO_AI_COST_ESTIMATE_SAFETY_FACTOR=2`.
 - Reasoning: disabled with `KRYEO_AI_REASONING_EFFORT=none` because routine visual classification does not need paid hidden reasoning.
-- Recovery: one bounded provider retry for transient failures and one grouped repair for omitted batch entries. The desktop never retries a complete paid gateway request.
-- Settlement: the gateway records provider-reported cost per scan and the desktop shows it in the Component Scan summary.
+- Recovery: one bounded provider retry for transient failures, one grouped repair for omitted batch entries, then cost-checked single-family repairs only for aliases still missing. Successful entries are never resent, and the desktop never retries a complete paid gateway request.
+- Settlement: the gateway records provider-reported cost and real provider-call count per scan. The desktop shows both and distinguishes them from its gateway batch count.
 
 The gateway checks its structured cache before reserving paid work. Client-side budget filtering is intentionally absent because it would discard free cache hits near the end of large documents. The hard dollar ceiling remains authoritative even though the family-count cap is unlimited.
 
@@ -91,7 +91,9 @@ The model returns a compact packet with each family alias, type, concise complet
 
 The `family-v35` naming pass anchors names to the target family and rejects words borrowed only from parent, ancestor, child, sibling, or batch peers. A `GroupNode` or child count is not evidence that decorative artwork is a Roblox `Frame`. Alpha topology is measured relative to the occupied visual bounds, so an inset hollow ornament with transparent canvas padding is recognised from low inner fill, dense perimeter art, and four-side coverage. That geometry locks the final type to `Border` / `ImageLabel` when the model or a target word proposes `Frame`, `Panel`, `Slot`, or another container-like type. The response retains the raw model proposal and a truthful normalization reason.
 
-Detailed evidence is an independent audit rather than a rationale constrained to the selected result. It reports whether the current classification is supported and may return a suggested name, asset type, or Roblox role. Every requested alias must be returned. Valid entries from a partial response are stored immediately, and all missing aliases are repaired together in one bounded cloud request.
+Detailed evidence is an independent audit rather than a rationale constrained to the selected result. It reports whether the current classification is supported and may return a suggested name, asset type, or Roblox role. Every requested alias must be returned. Valid entries from a partial response are stored immediately. Missing aliases are repaired together first; any aliases still absent receive bounded single-family recovery without resending successful work.
+
+The optional MobileCLIP context pass is skipped by default when a scan has more than 160 unique visuals because cloud classification remains authoritative and large local passes add latency without coverage. The threshold is configurable with `KRYEO_LOCAL_CONTEXT_MAX_VISUALS`. Packaged builds include the ONNX model and taxonomy for smaller scans, and the package verifier rejects releases that omit them.
 
 ## Learning, cache, and service boundaries
 

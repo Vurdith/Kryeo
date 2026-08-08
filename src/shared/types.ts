@@ -440,6 +440,7 @@ export interface HostedFamilyAnalysisResponse {
   estimatedCostUsd?: number;
   scanProviderCostUsd?: number;
   scanCommittedCostUsd?: number;
+  scanProviderRequests?: number;
   usage?: HostedAiUsage;
 }
 
@@ -591,9 +592,16 @@ export interface ComponentScanDiagnostics {
   visualFamilyCount: number;
   hostedFamilyCount: number;
   hostedRequestCount: number;
+  providerRequestCount: number;
+  affinityRequestCount: number;
+  affinityRetryCount: number;
+  affinitySplitCount: number;
+  affinitySlowestRequestMs: number;
   cachedFamilyCount: number;
   failedFamilyCount: number;
   budgetLimitedFamilyCount: number;
+  failureMessages: string[];
+  notes: string[];
   warnings: string[];
 }
 

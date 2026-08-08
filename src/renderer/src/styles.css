@@ -5852,6 +5852,17 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
   color: var(--danger);
 }
 
+.scan-diagnostics-failure {
+  flex-basis: 100%;
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.scan-diagnostics-note {
+  flex-basis: 100%;
+  color: var(--muted);
+}
+
 .scan-review-heading {
   display: flex;
   align-items: end;

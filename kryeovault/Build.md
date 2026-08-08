@@ -4,18 +4,28 @@
 
 ## Current packaged build
 
-- **Release:** `0.15.35`
+- **Release:** `0.15.36`
 - **Built and verified:** 2026-08-08
-- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.35.exe`
-- **Installer size:** `264,509,368` bytes
-- **Installer SHA-256:** `43DB976B3696E887BED82FE32F2A46F27874F6CF4E61DE3CB53224BF70F9892B`
-- **Packaged app.asar SHA-256:** `B592B2D9D878768D2BFDA47244CA007CB7A3FD15557061515C74275D8D60A5AF`
+- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.36.exe`
+- **Installer size:** `272,210,159` bytes
+- **Installer SHA-256:** `C28E3257AC50C77E2C94670326495EAB544A8759A819E87D369AE43E72A44AC2`
+- **Packaged app.asar SHA-256:** `4BF35C5D337DC6E45C865E464C5877C5E710A312612FE637C91CCAD50405389D`
 - **Authenticode:** not signed
 - **Installed app:** `C:\Users\reece\AppData\Local\Programs\Kryeo\Kryeo.exe`
-- **Installed version at last check:** `0.15.34.0`
-- **Installed app.asar SHA-256:** `E6C0885E87D0C53FED27C6E544C0754CB3FF5A76E5EB2EC29313D62BBD7EF67F`
+- **Installed version at last check:** `0.15.35.0`
+- **Installed app.asar SHA-256:** `B592B2D9D878768D2BFDA47244CA007CB7A3FD15557061515C74275D8D60A5AF`
 
-The `0.15.35` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The local gateway was still running the previous `family-v34` process at the last check; restart or redeploy it normally before expecting `family-v35` normalization and cache behavior.
+The `0.15.36` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The local gateway is running the current `family-v35` source with the existing structured cache preserved.
+
+## Large-scan recovery and packaging in `0.15.36`
+
+- A fresh-cache scan of the current document covered 579 unique visual families. The desktop dispatched 74 gateway batches; retries and repairs brought the real provider total to 80 calls, 122,862 prompt tokens, 17,431 completion tokens, and `$0.00595189`. Eleven families remained omitted after grouped repair, while zero were budget-limited.
+- The measured bottleneck was Affinity export at 6m 10s, followed by hosted analysis at 4m 33s. Image preparation took 13.6s, document context 1.4s, local analysis 5ms, and finalization 16ms. Cost was healthy; source extraction and provider latency were the performance constraints.
+- If a partial model response still omits aliases after grouped recovery, the gateway now performs a final parallel, single-family repair for only those unresolved aliases. Every attempt remains subject to the `$0.03` hard scan ceiling; successful families are never resent.
+- Component Scan diagnostics now distinguish desktop gateway batches from real provider calls, expose Affinity request/retry/split counts and the slowest request, and preserve concrete failure messages instead of collapsing them into a count.
+- Large scans with more than 160 unique visuals skip the optional embedded MobileCLIP context pass. Full cloud coverage is unchanged. Small scans can still use the bundled model, and `KRYEO_LOCAL_CONTEXT_MAX_VISUALS` can tune or disable the threshold.
+- The previous package omitted the MobileCLIP ONNX and taxonomy files because the electron-builder manifest did not copy them. The installer now includes both resources, and `npm run verify:package` fails packaging if the installer version or either resource is missing or implausibly small.
+- Missing optional local context is now a neutral diagnostic note rather than a red hosted-review failure. The hosted model remains the final classifier for every uncached unresolved family.
 
 ## Classification and system hardening in `0.15.35`
 
@@ -78,7 +88,7 @@ Every unresolved unique family remains eligible for cloud analysis. No local lan
 | Cache cap | `KRYEO_AI_MAX_CACHE_ENTRIES=20000` |
 | Analysis contract | `family-v35` |
 
-The gateway reserves against current Qwen pricing with a 2x allowance for a single repair and token-accounting variance. It records the provider-reported cost per scan, which the desktop summary displays. Valid partial results are stored immediately; missing aliases are repaired in one grouped call rather than one paid retry per family.
+The gateway reserves against current Qwen pricing with a 2x allowance for repair and token-accounting variance. It records provider-reported cost and the real provider-call count per scan, which the desktop summary displays separately from gateway batches. Valid partial results are stored immediately; missing aliases receive one grouped repair, followed by bounded single-family repairs only for aliases that are still absent.
 
 Live verification on 2026-08-07:
 
@@ -150,7 +160,7 @@ The health response should report `analysisVersion: family-v35`, Qwen3.7 Flash o
 
 4. Close only running installed `Kryeo.exe` processes. Run `release\Kryeo-Setup-<version>.exe`, relaunch Kryeo, then verify the installed Windows product version and `resources\app.asar` hash.
 
-Recorded passes for `0.15.35`: `npm install`, typecheck, adaptive Affinity-export recovery (including timeout subdivision and cancellation before MCP connection), component-context, inset component-scan topology, local-AI, family-AI, gateway cache/budget/evidence suite, syntax check, production build, and NSIS package build. The installer and unpacked package report `0.15.35`.
+Recorded passes for `0.15.36`: `npm install`, typecheck, adaptive Affinity-export recovery and telemetry, component-context, inset component-scan topology, local-AI, family-AI, gateway cache/budget/evidence/recovery suite, syntax check, production build, NSIS package build, and packaged-resource verification. The installer and unpacked package report `0.15.36`; the packaged model is `11,846,843` bytes and taxonomy is `440,707` bytes.
 
 ## Clear generated family results
 

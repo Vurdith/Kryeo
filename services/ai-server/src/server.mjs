@@ -465,6 +465,7 @@ function scanBudget(scanId, requestId) {
     updatedAt: now,
     estimatedUsd: 0,
     providerUsd: 0,
+    providerRequests: 0,
     familyCount: 0,
     escalationCount: 0,
     familyIds: new Set(),
@@ -480,6 +481,7 @@ function settleScanBudget(scanId, usage) {
   const budget = scanBudget(key, key);
   const actual = nonnegativeNumber(usage.providerCostUsd) || nonnegativeNumber(usage.estimatedCostUsd);
   budget.providerUsd += actual;
+  budget.providerRequests += 1;
   budget.updatedAt = Date.now();
 }
 
@@ -1845,7 +1847,9 @@ async function analyzeFamilies(payload, signal) {
     fullBatchFailures: 0,
     batchRecoveries: 0,
     recoveryFamilies: 0,
+    singleFamilyRecoveryAttempts: 0,
     singleFamilyRecoveries: 0,
+    singleFamilyFailures: 0,
   };
   let cached = 0;
   const requestedMaxMemberImages = Math.min(
@@ -1950,6 +1954,58 @@ async function analyzeFamilies(payload, signal) {
     }
     await persistCache();
   };
+  const recoverFamiliesIndividually = async (sourceFamilies, sourceError) => {
+    if (!sourceFamilies.length) return;
+    const budget = scanBudget(payload.hostedScanId, requestId);
+    const estimatedSingleRepairUsd = estimatedFamilyCost(
+      reviewTier,
+      budgetSelection.maxMemberImages,
+      budgetSelection.includeDocumentContext,
+    ).rawUsd * 1.5;
+    let locallyReservedUsd = 0;
+    const attempted = [];
+    for (const family of sourceFamilies) {
+      const withinCeiling = !ENFORCE_SCAN_BUDGET
+        || budget.providerUsd + locallyReservedUsd + estimatedSingleRepairUsd <= SCAN_BUDGET_USD;
+      if (!withinCeiling) {
+        recovery.singleFamilyFailures += 1;
+        failures.push({
+          familyIds: [family.id],
+          message: `The $${SCAN_BUDGET_USD.toFixed(3)} cloud safety ceiling left no room for a final single-family repair.`,
+        });
+        continue;
+      }
+      attempted.push(family);
+      locallyReservedUsd += estimatedSingleRepairUsd;
+    }
+    recovery.singleFamilyRecoveryAttempts += attempted.length;
+    const outcomes = await Promise.all(attempted.map(async (family) => {
+      try {
+        const results = await analyzeFamilyBatchWithRetry([family], analysisContext, signal, model);
+        await storeResults(results, [family]);
+        recovery.singleFamilyRecoveries += 1;
+        return null;
+      } catch (error) {
+        if (error instanceof IncompleteFamilyBatchError && error.partialResults.length) {
+          await storeResults(error.partialResults, [family]);
+          if (error.partialResults.some((result) => result.familyId === family.id)) {
+            recovery.singleFamilyRecoveries += 1;
+            return null;
+          }
+        }
+        recovery.singleFamilyFailures += 1;
+        return {
+          familyIds: [family.id],
+          message: error instanceof Error
+            ? error.message
+            : sourceError instanceof Error
+              ? sourceError.message
+              : String(error || sourceError),
+        };
+      }
+    }));
+    failures.push(...outcomes.filter(Boolean));
+  };
   for (let index = 0; index < unresolved.length; index += FAMILY_BATCH_SIZE) {
     const batch = unresolved.slice(index, index + FAMILY_BATCH_SIZE);
     recovery.batchAttempts += 1;
@@ -1964,32 +2020,34 @@ async function analyzeFamilies(payload, signal) {
       } else {
         recovery.fullBatchFailures += 1;
       }
-      if (batch.length === 1 || signal?.aborted) {
+      if (signal?.aborted) {
         failures.push({
           familyIds: recoveryFamilies.map((family) => family.id),
           message: error instanceof Error ? error.message : String(error),
         });
         continue;
       }
-      recovery.batchRecoveries += 1;
-      recovery.recoveryFamilies += recoveryFamilies.length;
-      try {
-        await storeResults(
-          await analyzeFamilyBatchWithRetry(recoveryFamilies, analysisContext, signal, model),
-          recoveryFamilies,
-        );
-      } catch (recoveryError) {
-        let failedRecoveryFamilies = recoveryFamilies;
-        if (recoveryError instanceof IncompleteFamilyBatchError) {
-          recovery.partialBatchResponses += 1;
-          await storeResults(recoveryError.partialResults, recoveryFamilies);
-          failedRecoveryFamilies = recoveryError.missingFamilies;
+      let finalRecoveryFamilies = recoveryFamilies;
+      let finalRecoveryError = error;
+      if (batch.length > 1) {
+        recovery.batchRecoveries += 1;
+        recovery.recoveryFamilies += recoveryFamilies.length;
+        try {
+          await storeResults(
+            await analyzeFamilyBatchWithRetry(recoveryFamilies, analysisContext, signal, model),
+            recoveryFamilies,
+          );
+          continue;
+        } catch (recoveryError) {
+          finalRecoveryError = recoveryError;
+          if (recoveryError instanceof IncompleteFamilyBatchError) {
+            recovery.partialBatchResponses += 1;
+            await storeResults(recoveryError.partialResults, recoveryFamilies);
+            finalRecoveryFamilies = recoveryError.missingFamilies;
+          }
         }
-        failures.push({
-          familyIds: failedRecoveryFamilies.map((family) => family.id),
-          message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
-        });
       }
+      await recoverFamiliesIndividually(finalRecoveryFamilies, finalRecoveryError);
     }
   }
   for (const analysis of analyses) {
@@ -2026,6 +2084,7 @@ async function analyzeFamilies(payload, signal) {
     estimatedCostUsd: budgetSelection.estimatedCostUsd,
     scanProviderCostUsd: finalBudget.providerUsd,
     scanCommittedCostUsd: Math.max(finalBudget.providerUsd, finalBudget.estimatedUsd),
+    scanProviderRequests: finalBudget.providerRequests,
     recovery,
     usage: usageReport(),
   };

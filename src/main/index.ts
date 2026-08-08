@@ -85,6 +85,7 @@ const localAi = new LocalAiService();
 const assistant = new AssistantService(() => app.getPath('userData'));
 const hostedAi = new HostedAiService(() => app.getPath('userData'));
 const execFileAsync = promisify(execFile);
+const LOCAL_CONTEXT_MAX_VISUALS = Math.max(0, Number(process.env.KRYEO_LOCAL_CONTEXT_MAX_VISUALS || 160));
 let autoExportQueue: Promise<void> = Promise.resolve();
 const activeComponentScans = new Map<number, AbortController>();
 
@@ -810,11 +811,18 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     finalizationMs: 0,
   };
   const scanWarnings: string[] = [];
+  const scanNotes: string[] = [];
   let diagnosticsHostedFamilies = 0;
   let diagnosticsHostedRequests = 0;
+  let diagnosticsProviderRequests = 0;
+  let diagnosticsAffinityRequests = 0;
+  let diagnosticsAffinityRetries = 0;
+  let diagnosticsAffinitySplits = 0;
+  let diagnosticsAffinitySlowestRequestMs = 0;
   let diagnosticsCachedFamilies = 0;
   let diagnosticsFailedFamilies = 0;
   let diagnosticsBudgetLimitedFamilies = 0;
+  let diagnosticsFailureMessages: string[] = [];
   const progress = (phase: string, label: string, detail: string, value: number) => {
     if (!event.sender.isDestroyed()) {
       event.sender.send('kryeo:scan-progress', { phase, label, detail, progress: value });
@@ -836,6 +844,10 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       );
     }, scanController.signal);
     stageTimings.affinityExportMs = Date.now() - affinityExportStartedAt;
+    diagnosticsAffinityRequests = batch.exportDiagnostics?.requestCount || 0;
+    diagnosticsAffinityRetries = batch.exportDiagnostics?.retryCount || 0;
+    diagnosticsAffinitySplits = batch.exportDiagnostics?.splitCount || 0;
+    diagnosticsAffinitySlowestRequestMs = batch.exportDiagnostics?.slowestRequestMs || 0;
     if (batch.components.length === 0) throw new Error(`No component layers were found in the ${scope}.`);
     const snapshot = await workspace.snapshot();
     progress('local-analysis', 'Preparing visual families', `Preparing ${batch.components.length} candidates once for grouping and hosted review.`, 43);
@@ -847,10 +859,14 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     // before the first hosted request could begin.
     const localAnalysisStartedAt = Date.now();
     let localSuggestions: Awaited<ReturnType<typeof localAi.analyze>> = [];
-    try {
-      localSuggestions = await localAi.analyze(scan.components);
-    } catch (error) {
-      scanWarnings.push(`Embedded visual preparation failed, so hosted review continued without local classifier context: ${error instanceof Error ? error.message : String(error)}`);
+    if (LOCAL_CONTEXT_MAX_VISUALS > 0 && scan.uniqueVisuals <= LOCAL_CONTEXT_MAX_VISUALS) {
+      try {
+        localSuggestions = await localAi.analyze(scan.components);
+      } catch (error) {
+        scanNotes.push(`Hosted review continued without optional embedded classifier context: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } else {
+      scanNotes.push(`Skipped optional embedded classifier context for ${scan.uniqueVisuals} unique visuals to keep this large scan responsive; every unresolved family still received hosted review.`);
     }
     stageTimings.localAnalysisMs = Date.now() - localAnalysisStartedAt;
     if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
@@ -998,6 +1014,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
           documentPreviewUrl: tier === 'escalation' ? documentPreviewUrl : undefined,
         }, (completed, total, partial) => {
           diagnosticsHostedRequests += 1;
+          diagnosticsProviderRequests = Math.max(diagnosticsProviderRequests, partial.scanProviderRequests || 0);
           hostedAnalyses.push(...partial.analyses);
           cachedFamilies += partial.cached;
           failedFamilies += partial.failures.reduce((total, failure) => total + failure.familyIds.length, 0);
@@ -1059,6 +1076,10 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       stageTimings.hostedAnalysisMs = Date.now() - hostedAnalysisStartedAt;
       const responseAnalyses = tierResponses.flatMap((response) => response.analyses);
       hostedProviderCostUsd = Math.max(0, ...tierResponses.map((response) => response.scanProviderCostUsd || 0));
+      diagnosticsProviderRequests = Math.max(
+        diagnosticsProviderRequests,
+        ...tierResponses.map((response) => response.scanProviderRequests || 0),
+      );
       reviewed = calibrateComponentConfidence(
         applyHostedFamilyAnalyses(reviewed, families, responseAnalyses),
         snapshot.componentDecisions,
@@ -1069,6 +1090,9 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       diagnosticsCachedFamilies = cachedFamilies;
       diagnosticsFailedFamilies = failures.reduce((total, failure) => total + failure.familyIds.length, 0);
       diagnosticsBudgetLimitedFamilies = skippedHostedFamilies.length;
+      diagnosticsFailureMessages = [...new Set(failures.map((failure) => (
+        `${failure.familyIds.length} ${failure.familyIds.length === 1 ? 'family' : 'families'}: ${failure.message}`
+      )))].slice(0, 6);
       if (!hostedAnalysisAvailable && failures.length) {
         hostedAnalysisError = failures[0].message;
       } else if (skippedHostedFamilies.length) {
@@ -1100,6 +1124,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     } catch (error) {
       if (hostedAnalysisStartedAt) stageTimings.hostedAnalysisMs = Date.now() - hostedAnalysisStartedAt;
       hostedAnalysisError = error instanceof Error ? error.message : String(error);
+      diagnosticsFailureMessages = [hostedAnalysisError];
       reviewed = applyHostedFamilyAnalyses(reviewed, families, []);
     }
     progress('finalizing', 'Preparing review', 'Applying hierarchy context and arranging the final component list.', 94);
@@ -1122,9 +1147,16 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         visualFamilyCount: families.length,
         hostedFamilyCount: diagnosticsHostedFamilies,
         hostedRequestCount: diagnosticsHostedRequests,
+        providerRequestCount: diagnosticsProviderRequests,
+        affinityRequestCount: diagnosticsAffinityRequests,
+        affinityRetryCount: diagnosticsAffinityRetries,
+        affinitySplitCount: diagnosticsAffinitySplits,
+        affinitySlowestRequestMs: diagnosticsAffinitySlowestRequestMs,
         cachedFamilyCount: diagnosticsCachedFamilies,
         failedFamilyCount: diagnosticsFailedFamilies,
         budgetLimitedFamilyCount: diagnosticsBudgetLimitedFamilies,
+        failureMessages: diagnosticsFailureMessages,
+        notes: scanNotes,
         warnings: scanWarnings,
       },
     };

@@ -2039,7 +2039,10 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
           </section>
           {scan.diagnostics && (
             <details className="scan-diagnostics">
-              <summary>Scan diagnostics · {scan.diagnostics.hostedRequestCount} cloud request{scan.diagnostics.hostedRequestCount === 1 ? '' : 's'}</summary>
+              <summary>
+                Scan diagnostics · {scan.diagnostics.hostedRequestCount} gateway {scan.diagnostics.hostedRequestCount === 1 ? 'batch' : 'batches'}
+                {' · '}{scan.diagnostics.providerRequestCount ?? scan.diagnostics.hostedRequestCount} provider {((scan.diagnostics.providerRequestCount ?? scan.diagnostics.hostedRequestCount) === 1) ? 'call' : 'calls'}
+              </summary>
               <div>
                 <span>Affinity export <b>{formatDuration(scan.diagnostics.stages.affinityExportMs)}</b></span>
                 <span>Image preparation <b>{formatDuration(scan.diagnostics.stages.imagePreparationMs)}</b></span>
@@ -2047,7 +2050,15 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                 <span>Document context <b>{formatDuration(scan.diagnostics.stages.contextCaptureMs)}</b></span>
                 <span>Hosted analysis <b>{formatDuration(scan.diagnostics.stages.hostedAnalysisMs)}</b></span>
                 <span>Finalization <b>{formatDuration(scan.diagnostics.stages.finalizationMs)}</b></span>
+                <span>
+                  Affinity batches <b>{scan.diagnostics.affinityRequestCount ?? 0}</b>
+                  {' · '}retries <b>{scan.diagnostics.affinityRetryCount ?? 0}</b>
+                  {' · '}splits <b>{scan.diagnostics.affinitySplitCount ?? 0}</b>
+                  {' · '}slowest <b>{formatDuration(scan.diagnostics.affinitySlowestRequestMs ?? 0)}</b>
+                </span>
                 <span>{scan.diagnostics.visualFamilyCount} visual families · {scan.diagnostics.cachedFamilyCount} cached · {scan.diagnostics.failedFamilyCount} failed · {scan.diagnostics.budgetLimitedFamilyCount} budget-limited</span>
+                {(scan.diagnostics.failureMessages || []).map((message) => <span className="scan-diagnostics-failure" key={message}>{message}</span>)}
+                {(scan.diagnostics.notes || []).map((note) => <span className="scan-diagnostics-note" key={note}>{note}</span>)}
                 {scan.diagnostics.warnings.map((warning) => <span className="scan-diagnostics-warning" key={warning}>{warning}</span>)}
               </div>
             </details>

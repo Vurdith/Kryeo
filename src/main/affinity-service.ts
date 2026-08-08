@@ -56,6 +56,13 @@ export interface AffinityComponentExportBatch {
   totalPartitions?: number;
   partitionIndex?: number;
   partitionPlan?: AffinityScanPartitionPlan[];
+  exportDiagnostics?: {
+    requestCount: number;
+    retryCount: number;
+    splitCount: number;
+    slowestRequestMs: number;
+    averageRequestMs: number;
+  };
 }
 
 export interface AffinityAssistantPreview {
@@ -918,6 +925,11 @@ console.log('KRYEO_ASSISTANT_PREVIEW:' + JSON.stringify({
     const components: AffinityComponentExport[] = [];
     let totalCandidates = 0;
     const singlePartitionRetries = new Set<string>();
+    let requestCount = 0;
+    let retryCount = 0;
+    let splitCount = 0;
+    let totalRequestMs = 0;
+    let slowestRequestMs = 0;
     while (start < totalPartitions) {
       assertActive();
       const planning = !partitionPlanReady;
@@ -1503,6 +1515,13 @@ console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
 }));`;
       let batch: AffinityComponentExportBatch;
       const requestStartedAt = Date.now();
+      requestCount += 1;
+      const recordRequestDuration = () => {
+        const duration = Date.now() - requestStartedAt;
+        totalRequestMs += duration;
+        slowestRequestMs = Math.max(slowestRequestMs, duration);
+        return duration;
+      };
       try {
         const result = await this.callTool('execute_script', { script: probe }, 120_000);
         assertActive();
@@ -1513,8 +1532,10 @@ console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
         const line = output.slice(markerIndex + marker.length).split(/\r?\n/, 1)[0];
         batch = JSON.parse(line) as AffinityComponentExportBatch;
       } catch (error) {
+        recordRequestDuration();
         const failedPartition = scope === 'document' ? partitionPlan[start] : undefined;
         if (signal?.aborted || !isRecoverableComponentExportError(error) || !failedPartition) throw error;
+        retryCount += 1;
         await this.connect();
         // A timeout means the current work estimate was optimistic. Tighten
         // both dimensions before retrying, while retaining the existing
@@ -1542,11 +1563,13 @@ console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
         if (failedPartition.path.length >= 14) throw error;
         const narrowerPartitions = await this.splitComponentScanPartition(failedPartition);
         if (narrowerPartitions.length < 2) throw new Error('Affinity timed out while rendering one component section. Select that group in Affinity and scan the selection instead.');
+        splitCount += 1;
         partitionPlan.splice(start, 1, ...narrowerPartitions);
         totalPartitions = partitionPlan.length;
         onProgress?.({ completedPartitions: start, totalPartitions });
         continue;
       }
+      const requestDurationMs = recordRequestDuration();
       if (!firstBatch) firstBatch = batch;
       if (planning) {
         partitionPlan = Array.isArray(batch.partitionPlan) ? batch.partitionPlan : [];
@@ -1559,7 +1582,6 @@ console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
       components.push(...batch.components);
       totalCandidates += Number(batch.totalCandidates ?? batch.components.length);
       totalPartitions = Number(batch.totalPartitions ?? (partitionPlan.length || 1));
-      const requestDurationMs = Date.now() - requestStartedAt;
       if (requestDurationMs < FAST_COMPONENT_EXPORT_BATCH_MS) {
         chunkSize = Math.min(
           MAX_COMPONENT_EXPORT_PARTITIONS,
@@ -1586,6 +1608,13 @@ console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
       ...firstBatch,
       components: components.sort((left, right) => left.index - right.index),
       totalCandidates,
+      exportDiagnostics: {
+        requestCount,
+        retryCount,
+        splitCount,
+        slowestRequestMs,
+        averageRequestMs: Math.round(totalRequestMs / Math.max(1, requestCount)),
+      },
     };
   }
 

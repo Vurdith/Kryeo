@@ -1,6 +1,6 @@
 {
   "name": "kryeo",
-  "version": "0.15.35",
+  "version": "0.15.36",
   "description": "A free desktop companion for Affinity scripts and creative workflows.",
   "main": "./out/main/index.js",
   "author": "Kryeo",
@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "dist": "npm run build && electron-builder --win nsis",
+    "dist": "npm run build && electron-builder --win nsis && npm run verify:package",
+    "verify:package": "node scripts/verify-packaged-build.mjs",
     "typecheck": "tsc --noEmit",
     "test:affinity-export": "node --experimental-strip-types scripts/smoke-affinity-component-export.mjs",
     "test:component-context": "node --experimental-strip-types scripts/smoke-component-context.mjs",
@@ -29,6 +30,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electron/asar": "^3.4.1",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -49,6 +51,16 @@
       "out/**/*",
       "package.json",
       "build-icon.png"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/models/mobileclip-s0",
+        "to": "models/mobileclip-s0",
+        "filter": [
+          "vision_model_quantized.onnx",
+          "ui-taxonomy.json"
+        ]
+      }
     ],
     "win": {
       "target": [

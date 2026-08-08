@@ -74,6 +74,7 @@ const familyAnalysisSchema = z.object({
   estimatedCostUsd: z.number().nonnegative().optional(),
   scanProviderCostUsd: z.number().nonnegative().optional(),
   scanCommittedCostUsd: z.number().nonnegative().optional(),
+  scanProviderRequests: z.number().int().nonnegative().optional(),
   usage: hostedUsageSchema.optional(),
 });
 
@@ -389,6 +390,9 @@ export class HostedAiService {
         }
         if (typeof response.scanCommittedCostUsd === 'number') {
           combined.scanCommittedCostUsd = Math.max(combined.scanCommittedCostUsd || 0, response.scanCommittedCostUsd);
+        }
+        if (typeof response.scanProviderRequests === 'number') {
+          combined.scanProviderRequests = Math.max(combined.scanProviderRequests || 0, response.scanProviderRequests);
         }
         waveCompleted += batch.length;
         onProgress(Math.min(completedFamilies + waveCompleted, unresolved.length), unresolved.length, response);
