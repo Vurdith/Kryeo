@@ -4,18 +4,30 @@
 
 ## Current packaged build
 
-- **Release:** `0.15.37`
+- **Release:** `0.15.38`
 - **Built and verified:** 2026-08-08
-- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.37.exe`
-- **Installer size:** `272,213,200` bytes
-- **Installer SHA-256:** `D6AEBEA1AB292C1375558EA78677D6A4C2EF1DD3095DD7F793E5AEA82A195DC3`
-- **Packaged app.asar SHA-256:** `055F3656666BD9A68298E79945D6B5A2784B9C8557C90A8D208A3ABAD5B0AA20`
+- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.38.exe`
+- **Installer size:** `272,213,335` bytes
+- **Installer SHA-256:** `125E513A40271A1B86A4700D711B845CEA40415A456EED3630D948278E1F28F1`
+- **Packaged app.asar SHA-256:** `C92C3A8668FC65D7658AEC4F83F6732FD2632ACF70EFAC802037E7F1EB186647`
 - **Authenticode:** not signed
 - **Installed app:** `C:\Users\reece\AppData\Local\Programs\Kryeo\Kryeo.exe`
-- **Installed version at last check:** `0.15.36.0`
-- **Installed app.asar SHA-256:** `4BF35C5D337DC6E45C865E464C5877C5E710A312612FE637C91CCAD50405389D`
+- **Installed version at last check:** `0.15.37.0`
+- **Installed app.asar SHA-256:** `055F3656666BD9A68298E79945D6B5A2784B9C8557C90A8D208A3ABAD5B0AA20`
 
-The `0.15.37` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The local gateway is running the current `family-v36` source and was idle at the last check.
+The `0.15.38` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The installed desktop is `0.15.37.0`. The local gateway is running the current `family-v36` source with zero active or queued requests at the last check.
+
+## Layer review workspace in `0.15.38`
+
+- Component Scan now uses a design-app-style workspace instead of rendering one complete form per scanned layer. A compact Affinity hierarchy scrolls on the left while the selected layer's preview, name, classification, group export, evidence, and approval action stay in one inspector on the right.
+- `Needs input`, `Groups`, `Looks good`, and `All layers` provide distinct review views. Search covers layer names, suggested names, asset types, and Roblox roles; category filtering remains available without a separate wall of filter buttons.
+- Up/down arrow keys and previous/next buttons move through visible decisions. Hierarchy disclosure works in `All layers`; exception views preserve indentation while surfacing matching nested items even when their parents are collapsed.
+- Large documents no longer grow the page by hundreds of cards. The navigator and inspector scroll independently inside a bounded workbench; thumbnails lazy-load and off-screen rows use native rendering containment.
+- Routine non-critical checks can be accepted together. Critical semantic or group-structure conflicts still require an explicit decision. Editing a field no longer removes the selected row mid-typing; only `Approve and continue` clears it from `Needs input`.
+- Group-export choices are labelled `One combined asset`, `Child assets only`, and `Group and child assets`. The structural voting, conflict safeguards, and structure-scoped learning from `0.15.37` remain unchanged.
+- The bottom actions are now `Save decisions`, `Rename layers`, and `Organize layers`. They remain locked while unresolved decisions exist. The workspace redesign adds no cloud requests and does not change full-document coverage, the `$0.01` target, or the `$0.03` ceiling.
+
+Rendered QA used the production stylesheet at 1440x1000 and 800x1000. Both viewports had zero horizontal overflow; the desktop workbench measured 1,392px wide with a 720px review area, and the narrow layout stacked a 360px layer navigator over a 737px-wide inspector.
 
 ## Exception-first review and group safety in `0.15.37`
 
@@ -174,7 +186,7 @@ The health response should report `analysisVersion: family-v36`, Qwen3.7 Flash o
 
 4. Close only running installed `Kryeo.exe` processes. Run `release\Kryeo-Setup-<version>.exe`, relaunch Kryeo, then verify the installed Windows product version and `resources\app.asar` hash.
 
-Recorded passes for `0.15.37`: typecheck, adaptive Affinity-export recovery and telemetry, component-context, component-learning persistence, exception-first component-scan and group-structure conflict coverage, local-AI, family-AI, gateway cache/budget/evidence/recovery suite, syntax check, production build, NSIS package build, and packaged-resource verification. The installer and unpacked package report `0.15.37`; the packaged model is `11,846,843` bytes and taxonomy is `440,707` bytes.
+Recorded passes for `0.15.38`: typecheck, adaptive Affinity-export recovery and telemetry, component-context, component-learning persistence, component-scan and group-structure conflict coverage, local-AI, family-AI, gateway cache/budget/evidence/recovery suite, gateway syntax check, production build, desktop/narrow rendered UI inspection, NSIS package build, and packaged-resource verification. The installer and unpacked package report `0.15.38`; the packaged model is `11,846,843` bytes and taxonomy is `440,707` bytes.
 
 ## Clear generated family results
 

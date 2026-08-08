@@ -1659,6 +1659,8 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
   const [evidenceLoading, setEvidenceLoading] = useState<Set<string>>(new Set());
   const [reviewFilter, setReviewFilter] = useState<'all' | 'ui' | 'construction' | 'background'>('all');
   const [reviewLane, setReviewLane] = useState<'attention' | 'structure' | 'ready' | 'all'>('attention');
+  const [reviewQuery, setReviewQuery] = useState('');
+  const [selectedReviewId, setSelectedReviewId] = useState('');
   const [reviewedItems, setReviewedItems] = useState<Set<string>>(new Set());
   const [watchSelection, setWatchSelection] = useState(false);
   const [message, setMessage] = useState('');
@@ -1675,6 +1677,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setScanElapsed(0);
     setEvidenceLoading(new Set());
     setReviewedItems(new Set());
+    setSelectedReviewId('');
     setReviewLane('attention');
     setScanProgress({
       phase: 'preparing',
@@ -1749,7 +1752,6 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
         });
       })(),
     } : current);
-    setReviewedItems((current) => new Set(current).add(componentReviewKey(reviewedComponent)));
     setMessage('');
   };
 
@@ -1767,7 +1769,6 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
       setIncluded(hierarchySelection(components));
       return { ...current, components };
     });
-    setReviewedItems((current) => new Set(current).add(componentReviewKey(component)));
     setMessage('');
   };
 
@@ -1970,6 +1971,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     return {
       attention: unresolved.length,
       critical: unresolved.filter((component) => reviewPriority(component) === 'critical').length,
+      check: unresolved.filter((component) => reviewPriority(component) === 'check').length,
       structure: reviewRows.filter((component) => component.childHierarchyKeys.length > 0).length,
       ready: reviewRows.filter((component) => reviewPriority(component) === 'ready').length,
       reviewed: reviewRows.filter((component) => reviewedItems.has(componentReviewKey(component))).length,
@@ -1978,6 +1980,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
   }, [reviewRows, reviewedItems]);
   const visibleComponents = useMemo(() => {
     if (!scan) return [];
+    const normalizedQuery = reviewQuery.trim().toLocaleLowerCase();
     const byParent = new Map<string, ComponentScanResult['components']>();
     const byKey = new Map(scan.components.map((component) => [component.hierarchyKey, component]));
     for (const component of scan.components) {
@@ -1990,13 +1993,19 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     const visit = (parentKey: string) => {
       for (const component of byParent.get(parentKey) || []) {
         ordered.push(component);
-        if (reviewLane !== 'all' || expanded.has(component.hierarchyKey)) visit(component.hierarchyKey);
+        if (reviewLane !== 'all' || reviewFilter !== 'all' || normalizedQuery || expanded.has(component.hierarchyKey)) visit(component.hierarchyKey);
       }
     };
     visit('');
     const seenExact = new Set<string>();
     return ordered.filter((component) => {
       if (reviewFilter !== 'all' && (component.reviewCategory || 'ui') !== reviewFilter) return false;
+      if (normalizedQuery && ![
+        component.name,
+        component.familyName,
+        component.assetType,
+        component.role,
+      ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery))) return false;
       const priority = reviewPriority(component);
       const reviewed = reviewedItems.has(componentReviewKey(component));
       if (reviewLane === 'attention' && (priority === 'ready' || reviewed)) return false;
@@ -2008,7 +2017,56 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
       seenExact.add(key);
       return true;
     });
-  }, [expanded, reviewFilter, reviewLane, reviewedItems, scan]);
+  }, [expanded, reviewFilter, reviewLane, reviewQuery, reviewedItems, scan]);
+
+  const selectedComponent = visibleComponents.find((component) => component.id === selectedReviewId) || visibleComponents[0];
+  const selectedIndex = selectedComponent ? visibleComponents.findIndex((component) => component.id === selectedComponent.id) : -1;
+  const selectedPriority = selectedComponent ? reviewPriority(selectedComponent) : 'ready';
+  const selectedReviewed = selectedComponent ? reviewedItems.has(componentReviewKey(selectedComponent)) : false;
+  const selectedFamilyEvidenceKey = selectedComponent ? selectedComponent.familyFingerprint || selectedComponent.visualHash : '';
+  const selectedEvidenceAvailable = selectedComponent
+    ? Object.values(selectedComponent.aiEvidence || {}).some((score) => Number(score) > 0)
+    : false;
+  const selectedEvidenceLoading = evidenceLoading.has(selectedFamilyEvidenceKey);
+  const selectedInstances = selectedComponent && scan
+    ? scan.components.filter((item) => item.visualHash === selectedComponent.visualHash)
+    : [];
+
+  useEffect(() => {
+    if (!visibleComponents.length) {
+      if (selectedReviewId) setSelectedReviewId('');
+      return;
+    }
+    if (!visibleComponents.some((component) => component.id === selectedReviewId)) {
+      setSelectedReviewId(visibleComponents[0].id);
+    }
+  }, [selectedReviewId, visibleComponents]);
+
+  const moveReviewSelection = (offset: number) => {
+    if (!visibleComponents.length) return;
+    const currentIndex = selectedIndex < 0 ? 0 : selectedIndex;
+    const nextIndex = Math.max(0, Math.min(visibleComponents.length - 1, currentIndex + offset));
+    setSelectedReviewId(visibleComponents[nextIndex].id);
+  };
+
+  const toggleSelectedReviewed = () => {
+    if (!selectedComponent) return;
+    if (!selectedReviewed) {
+      const nextComponent = visibleComponents[selectedIndex + 1] || visibleComponents[selectedIndex - 1];
+      if (nextComponent) setSelectedReviewId(nextComponent.id);
+    }
+    toggleReviewed(selectedComponent);
+  };
+
+  const acceptRoutineChecks = () => {
+    setReviewedItems((current) => {
+      const next = new Set(current);
+      for (const component of reviewRows) {
+        if (reviewPriority(component) === 'check') next.add(componentReviewKey(component));
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="component-scan-page">
@@ -2150,173 +2208,275 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             </div>
           )}
 
-          <section className="scan-review-console" aria-label="Component review queue">
-            <div className="scan-review-console-copy">
-              <span>Exception-first review</span>
-              <h2>{reviewStats.attention
-                ? `${reviewStats.attention} ${reviewStats.attention === 1 ? 'decision needs' : 'decisions need'} a look`
-                : 'No unresolved exceptions'}</h2>
-              <p>{reviewStats.ready} low-risk visual {reviewStats.ready === 1 ? 'family is' : 'families are'} kept out of the way. Review semantic conflicts, weak names, incomplete analysis, and disputed group exports first.</p>
-            </div>
-            <div className="scan-review-console-stats">
-              <div className={reviewStats.critical ? 'has-critical' : ''}><strong>{reviewStats.critical}</strong><span>blocking</span></div>
-              <div><strong>{reviewStats.reviewed}</strong><span>reviewed</span></div>
-              <div><strong>{reviewStats.ready}</strong><span>low risk</span></div>
-            </div>
-            <nav className="scan-review-lanes" aria-label="Review queue">
+          <section className="component-workbench" aria-label="Layer review workspace">
+            <header className="component-workbench-header">
+              <div className="component-workbench-title">
+                <div>
+                  <span>{scan.documentTitle}</span>
+                  <h2>Review layers</h2>
+                </div>
+                <p>{reviewStats.attention
+                  ? `${reviewStats.attention} ${reviewStats.attention === 1 ? 'decision needs' : 'decisions need'} you. Everything else stays out of the way.`
+                  : 'Kryeo has no unresolved decisions. You can still inspect any layer.'}</p>
+              </div>
+              {reviewStats.check > 0 && (
+                <button className="component-routine-action" type="button" onClick={acceptRoutineChecks}>
+                  <CircleCheck size={15} />Accept {reviewStats.check} routine {reviewStats.check === 1 ? 'check' : 'checks'}
+                </button>
+              )}
+            </header>
+
+            <nav className="component-workbench-lanes" aria-label="Layer views">
               {([
-                ['attention', 'Needs review', reviewStats.attention],
-                ['structure', 'Group exports', reviewStats.structure],
-                ['ready', 'Low risk', reviewStats.ready],
-                ['all', 'Everything', reviewStats.all],
+                ['attention', 'Needs input', reviewStats.attention],
+                ['structure', 'Groups', reviewStats.structure],
+                ['ready', 'Looks good', reviewStats.ready],
+                ['all', 'All layers', reviewStats.all],
               ] as const).map(([lane, label, count]) => (
-                <button className={reviewLane === lane ? 'is-active' : ''} key={lane} onClick={() => setReviewLane(lane)}>
+                <button className={reviewLane === lane ? 'is-active' : ''} key={lane} type="button" onClick={() => setReviewLane(lane)}>
                   <span>{label}</span><b>{count}</b>
                 </button>
               ))}
             </nav>
-          </section>
 
-          <div className="scan-review-heading">
-            <div><span>{scan.documentTitle}</span><h2>{scan.sourceName}</h2></div>
-            <div className="scan-filter" aria-label="Filter reviewed layers">
-              {(['all', 'ui', 'construction', 'background'] as const).map((filter) => <button className={reviewFilter === filter ? 'is-active' : ''} key={filter} onClick={() => setReviewFilter(filter)}>{filter === 'all' ? 'Everything' : filter[0].toUpperCase() + filter.slice(1)}</button>)}
+            <div className="component-workbench-tools">
+              <label className="component-layer-search">
+                <Search size={15} />
+                <input value={reviewQuery} onChange={(event) => setReviewQuery(event.target.value)} placeholder="Find a layer, type, or role" aria-label="Search layers" />
+                {reviewQuery && <button type="button" title="Clear search" onClick={() => setReviewQuery('')}><X size={14} /></button>}
+              </label>
+              <label className="component-layer-filter">
+                <span>Category</span>
+                <select value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value as typeof reviewFilter)}>
+                  <option value="all">All categories</option>
+                  <option value="ui">UI</option>
+                  <option value="construction">Construction</option>
+                  <option value="background">Background</option>
+                </select>
+              </label>
+              <span className="component-workbench-count">{visibleComponents.length} shown</span>
             </div>
-          </div>
 
-          <section className="component-review-list">
-            {visibleComponents.length === 0 && (
-              <div className="component-review-empty">
-                <CircleCheck size={24} />
-                <div><b>{reviewLane === 'attention' ? 'Exception queue cleared' : 'Nothing matches this view'}</b><span>{reviewLane === 'attention' ? 'Low-risk families remain available under Low risk or Everything.' : 'Try another review lane or category.'}</span></div>
-              </div>
-            )}
-            {visibleComponents.map((component, index) => {
-              const evidenceAvailable = Object.values(component.aiEvidence || {}).some((score) => Number(score) > 0);
-              const familyEvidenceKey = component.familyFingerprint || component.visualHash;
-              const loadingEvidence = evidenceLoading.has(familyEvidenceKey);
-              const priority = reviewPriority(component);
-              const reviewed = reviewedItems.has(componentReviewKey(component));
-              return (
-                <article className={`component-review-row is-${priority}${reviewed ? ' is-reviewed' : ''} ${included.has(component.id) ? '' : 'is-excluded'}`} style={{ marginLeft: `${Math.min(5, component.hierarchyDepth) * 18}px` }} key={component.id}>
-                <label className="component-review-include" title="Include in Affinity organization">
-                  <input type="checkbox" checked={included.has(component.id)} onChange={(event) => setIncluded((current) => {
-                    const next = new Set(current);
-                    if (event.target.checked) next.add(component.id); else next.delete(component.id);
-                    return next;
-                  })} />
-                  <span>{String(index + 1).padStart(2, '0')}</span>
-                </label>
-                <div className="component-review-preview">
-                  <AssetPreviewCanvas source={component.previewUrl} label={`${component.name} preview`} />
+            <div className="component-workbench-body">
+              <aside className="component-layer-panel" aria-label="Document layers">
+                <div className="component-layer-panel-heading">
+                  <span>Layers</span>
+                  <small>↑ ↓ to move</small>
                 </div>
-                <div className="component-review-identity">
-                  <div className="component-tree-title">
-                    {component.childHierarchyKeys.length > 0 ? <button className={`component-tree-toggle ${expanded.has(component.hierarchyKey) ? 'is-expanded' : ''}`} type="button" title={expanded.has(component.hierarchyKey) ? 'Collapse children' : 'Expand children'} onClick={() => setExpanded((current) => {
-                      const next = new Set(current);
-                      if (next.has(component.hierarchyKey)) next.delete(component.hierarchyKey); else next.add(component.hierarchyKey);
-                      return next;
-                    })}><ChevronRight size={15} /></button> : <span className="component-tree-spacer" />}
-                    <h3>{component.name}</h3>
-                  </div>
-                  <span>{Math.round(component.bounds.width)} × {Math.round(component.bounds.height)} px · {component.affinityType}</span>
-                  <div className="component-review-state">
-                    <span className={`is-${priority}`}>{reviewed ? 'Reviewed' : priority === 'ready' ? 'Low risk' : priority === 'critical' ? 'Blocking review' : 'Quick check'}</span>
-                    {priority !== 'ready' && <button type="button" onClick={() => toggleReviewed(component)}>{reviewed ? 'Reopen' : 'Mark reviewed'}</button>}
-                  </div>
-                  {!reviewed && Boolean(component.reviewReasons?.length) && (
-                    <div className={`component-review-reasons is-${priority}`}>
-                      {component.reviewReasons?.slice(0, 2).map((reason) => <span key={reason}>{reason}</span>)}
+                <div
+                  className="component-layer-tree"
+                  role="tree"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === 'ArrowDown') {
+                      event.preventDefault();
+                      moveReviewSelection(1);
+                    } else if (event.key === 'ArrowUp') {
+                      event.preventDefault();
+                      moveReviewSelection(-1);
+                    }
+                  }}
+                >
+                  {visibleComponents.length === 0 && (
+                    <div className="component-layer-empty">
+                      <CircleCheck size={24} />
+                      <b>{reviewLane === 'attention' ? 'Nothing needs input' : 'No layers match'}</b>
+                      <span>{reviewLane === 'attention' ? 'The scan is ready to apply.' : 'Clear the search or choose another view.'}</span>
+                      {reviewLane === 'attention' && <button type="button" onClick={() => setReviewLane('all')}>Browse all layers</button>}
                     </div>
                   )}
-                  {component.duplicateKind === 'exact'
-                    ? <b>Exact visual · {component.duplicateCount} instances</b>
-                    : component.duplicateKind === 'similar' ? <b>Similar family · {component.similarCount} visuals</b> : <small>Unique visual</small>}
-                  <small>{component.members.length > 1 ? `${component.members.length} source layers composed together` : component.grouping === 'existing-group' ? 'Existing Affinity group' : 'Single source layer'}</small>
-                  {Boolean(component.learnedFrom) && <small>Learning memory · {component.learnedFrom} nearby example{component.learnedFrom === 1 ? '' : 's'}</small>}
-                  {component.aiConfidence !== undefined && (
-                    <details
-                      className={`component-evidence ${component.semanticConflict ? 'has-conflict' : ''}`}
-                      onToggle={(event) => {
-                        if (event.currentTarget.open && !evidenceAvailable) void loadFamilyEvidence(component);
-                      }}
-                    >
-                      <summary>{loadingEvidence
-                        ? `Loading ${hostedReviewer} evidence…`
-                        : evidenceAvailable
-                          ? `${Math.round(component.aiConfidence * 100)}% confidence${component.semanticConflict ? ' · evidence conflict' : ''}`
-                          : component.analysisState === 'needs-review'
-                            ? `${hostedReviewer} marked this for review · open for evidence`
-                            : `${hostedReviewer} classified this family · open for evidence`}</summary>
-                      {evidenceAvailable
-                        ? <>
-                            <span>Visual {Math.round((component.aiEvidence?.visual || 0) * 100)}%</span>
-                            <span>Layer name {Math.round((component.aiEvidence?.layerName || 0) * 100)}%</span>
-                            <span>Hierarchy {Math.round((component.aiEvidence?.hierarchy || 0) * 100)}%</span>
-                            <span>Learned context {Math.round((component.aiEvidence?.learned || 0) * 100)}%</span>
-                            {component.aiModelSuggestedType && (
-                              <span>Model proposal: {component.aiModelSuggestedName || component.familyName} / {component.aiModelSuggestedType}{component.aiModelSuggestedType !== component.assetType ? ` → Kryeo final: ${component.assetType}` : ''}</span>
-                            )}
-                            {component.aiNormalizationReason && <span>{component.aiNormalizationReason}</span>}
-                            {component.aiEvidenceSuggestedType && !component.aiEvidenceSupportsClassification && (
-                              <span>Independent check suggests {component.aiEvidenceSuggestedName || component.familyName} / {component.aiEvidenceSuggestedType} / {component.aiEvidenceSuggestedRole || 'ImageLabel'}.</span>
-                            )}
-                            {component.visualMetrics?.innerVisibleRatio !== undefined && (
-                              <span>Topology: {Math.round(component.visualMetrics.innerVisibleRatio * 100)}% inner fill · {Math.round((component.visualMetrics.contentPerimeterVisibleRatio || 0) * 100)}% perimeter fill · {Math.round((component.visualMetrics.contentPerimeterCoverage || 0) * 100)}% side coverage</span>
-                            )}
-                          </>
-                        : <span>{loadingEvidence
-                          ? `Requesting a detailed explanation from ${hostedReviewer}.`
-                          : 'Detailed evidence is generated only when you open this panel, keeping normal scans inexpensive.'}</span>}
-                    </details>
-                  )}
-                  {component.keptInsideParent && <b>Kept inside parent by project rule</b>}
-                  {component.duplicateKind === 'exact' && <details className="component-instances"><summary>View all instances</summary>{scan.components.filter((item) => item.visualHash === component.visualHash).map((item) => <span key={item.id}>{item.name} · {item.members[0]?.path.join('.') || 'unknown path'}</span>)}</details>}
-                  {component.semanticConflict && <div className="semantic-conflict"><CircleAlert size={13} /><span>{component.semanticConflictMessage}</span></div>}
-                  {component.diveConflict && <div className="semantic-conflict"><CircleAlert size={13} /><span>{component.diveConflictMessage}</span></div>}
+                  {visibleComponents.map((component, index) => {
+                    const priority = reviewPriority(component);
+                    const reviewed = reviewedItems.has(componentReviewKey(component));
+                    const hasChildren = component.childHierarchyKeys.length > 0;
+                    return (
+                      <div
+                        className={`component-layer-row component-layer-depth-${Math.min(6, component.hierarchyDepth)} is-${priority}${reviewed ? ' is-reviewed' : ''}${included.has(component.id) ? '' : ' is-excluded'}${selectedComponent?.id === component.id ? ' is-selected' : ''}`}
+                        key={component.id}
+                        role="treeitem"
+                        aria-level={component.hierarchyDepth + 1}
+                        aria-selected={selectedComponent?.id === component.id}
+                      >
+                        <label className="component-layer-include" title="Include this layer when applying changes">
+                          <input type="checkbox" checked={included.has(component.id)} onChange={(event) => setIncluded((current) => {
+                            const next = new Set(current);
+                            if (event.target.checked) next.add(component.id); else next.delete(component.id);
+                            return next;
+                          })} />
+                        </label>
+                        {hasChildren && reviewLane === 'all'
+                          ? <button
+                              className={`component-layer-toggle ${expanded.has(component.hierarchyKey) ? 'is-expanded' : ''}`}
+                              type="button"
+                              title={expanded.has(component.hierarchyKey) ? 'Collapse children' : 'Expand children'}
+                              onClick={() => setExpanded((current) => {
+                                const next = new Set(current);
+                                if (next.has(component.hierarchyKey)) next.delete(component.hierarchyKey); else next.add(component.hierarchyKey);
+                                return next;
+                              })}
+                            ><ChevronRight size={14} /></button>
+                          : hasChildren
+                            ? <span className="component-layer-branch"><ChevronRight size={14} /></span>
+                            : <span className="component-layer-spacer" />}
+                        <button className="component-layer-main" type="button" onClick={() => setSelectedReviewId(component.id)}>
+                          <span className="component-layer-thumbnail">
+                            {component.previewUrl && <img src={component.previewUrl} alt={`Preview of ${component.name}`} loading="lazy" />}
+                          </span>
+                          <span className="component-layer-copy">
+                            <b>{component.familyName}</b>
+                            <small>{component.familyName === component.name ? component.affinityType : `${component.name} · ${component.affinityType}`}</small>
+                          </span>
+                          {component.duplicateCount > 1 && <span className="component-layer-instances">×{component.duplicateCount}</span>}
+                        </button>
+                        <span className="component-layer-status" title={reviewed ? 'Reviewed' : priority === 'critical' ? 'Needs input' : priority === 'check' ? 'Routine check' : 'Looks good'} />
+                        <span className="component-layer-number">{index + 1}</span>
+                      </div>
+                    );
+                  })}
                 </div>
-                <label className="component-family-field">
-                  Suggested layer name
-                  <input value={component.familyName} onChange={(event) => updateFamily(component, { familyName: event.target.value })} />
-                  <span>{componentContextLabel(component)}</span>
-                </label>
-                <div className="component-classification-fields">
-                  <label className="component-role-field">
-                    Asset type
-                    <select value={component.assetType} onChange={(event) => updateFamily(component, { assetType: event.target.value as ComponentAssetType })}>
-                      {COMPONENT_ASSET_TYPES.map((type) => <option key={type}>{type}</option>)}
-                    </select>
-                    <span>{component.analysisSource === 'approved-family'
-                      ? 'Reused from an approved visual family'
-                      : component.analysisSource === 'hosted-family'
-                        ? component.analysisReason || `Analysed with ${component.familyMemberHashes?.length || 1} related visual${component.familyMemberHashes?.length === 1 ? '' : 's'}`
-                        : component.analysisReason || 'Provisional until visual-family analysis is available'}</span>
-                  </label>
-                  <label className="component-role-field">
-                    Roblox role
-                    <select value={component.role} onChange={(event) => updateFamily(component, { role: event.target.value as RobloxUiRole })}>
-                      {ROBLOX_UI_ROLES.map((role) => <option key={role}>{role}</option>)}
-                    </select>
-                    <span>{component.remembered ? 'Remembered choice' : `Mapped from ${component.assetType}`}</span>
-                  </label>
-                  {component.childHierarchyKeys.length > 0 && <label className="component-dive-field">
-                    Group export
-                    <select value={component.diveMode} onChange={(event) => updateDiveMode(component, event.target.value as ComponentDiveMode)}>
-                      <option value="keep-together">Keep together</option>
-                      <option value="children-only">Children only</option>
-                      <option value="parent-and-children">Parent and children</option>
-                    </select>
-                    <span>{component.diveRemembered
-                      ? 'Using your saved family choice'
-                      : component.diveReasons[0]
-                        || (component.diveMode === component.recommendedDiveMode
-                          ? 'Structural and visual-family recommendation'
-                          : `Suggested: ${component.recommendedDiveMode.replace(/-/g, ' ')}`)}</span>
-                  </label>}
-                </div>
-                </article>
-              );
-            })}
+              </aside>
+
+              <section className="component-inspector" aria-label="Selected layer decision">
+                {!selectedComponent ? (
+                  <div className="component-inspector-empty"><MousePointer2 size={28} /><b>Select a layer</b><span>Its name, type, and export decision will appear here.</span></div>
+                ) : (
+                  <>
+                    <header className="component-inspector-header">
+                      <div>
+                        <span>{selectedReviewed ? 'Reviewed' : selectedPriority === 'critical' ? 'Needs input' : selectedPriority === 'check' ? 'Quick check' : 'Looks good'}</span>
+                        <h3>{selectedComponent.familyName}</h3>
+                      </div>
+                      <nav aria-label="Move between visible layers">
+                        <button type="button" title="Previous layer" disabled={selectedIndex <= 0} onClick={() => moveReviewSelection(-1)}><ArrowLeft size={15} /></button>
+                        <span>{selectedIndex + 1} / {visibleComponents.length}</span>
+                        <button type="button" title="Next layer" disabled={selectedIndex >= visibleComponents.length - 1} onClick={() => moveReviewSelection(1)}><ArrowRight size={15} /></button>
+                      </nav>
+                    </header>
+
+                    <div className="component-inspector-scroll">
+                      <div className="component-inspector-overview">
+                        <div className="component-inspector-preview">
+                          <AssetPreviewCanvas source={selectedComponent.previewUrl} label={`${selectedComponent.name} preview`} />
+                        </div>
+                        <div>
+                          <span>Affinity layer</span>
+                          <b>{selectedComponent.name}</b>
+                          <small>{Math.round(selectedComponent.bounds.width)} × {Math.round(selectedComponent.bounds.height)} px · {selectedComponent.affinityType}</small>
+                          <small>{selectedComponent.duplicateKind === 'exact'
+                            ? `${selectedComponent.duplicateCount} identical instances`
+                            : selectedComponent.duplicateKind === 'similar'
+                              ? `${selectedComponent.similarCount} related visuals`
+                              : 'Unique visual'}</small>
+                        </div>
+                      </div>
+
+                      {!selectedReviewed && selectedPriority !== 'ready' && (
+                        <div className={`component-inspector-alert is-${selectedPriority}`}>
+                          <CircleAlert size={17} />
+                          <div>
+                            <b>{selectedPriority === 'critical' ? 'Kryeo needs your decision' : 'This is worth a quick check'}</b>
+                            {(selectedComponent.reviewReasons?.length ? selectedComponent.reviewReasons : ['The scan could not approve this decision automatically.'])
+                              .slice(0, 3)
+                              .map((reason) => <span key={reason}>{reason}</span>)}
+                          </div>
+                        </div>
+                      )}
+
+                      <label className="component-inspector-include">
+                        <input type="checkbox" checked={included.has(selectedComponent.id)} onChange={(event) => setIncluded((current) => {
+                          const next = new Set(current);
+                          if (event.target.checked) next.add(selectedComponent.id); else next.delete(selectedComponent.id);
+                          return next;
+                        })} />
+                        Include when applying changes to Affinity
+                      </label>
+
+                      <div className="component-inspector-form">
+                        <label className="component-family-field">
+                          Layer name
+                          <input value={selectedComponent.familyName} onChange={(event) => updateFamily(selectedComponent, { familyName: event.target.value })} />
+                          <span>{componentContextLabel(selectedComponent)}</span>
+                        </label>
+                        <div className="component-classification-fields">
+                          <label className="component-role-field">
+                            What is it?
+                            <select value={selectedComponent.assetType} onChange={(event) => updateFamily(selectedComponent, { assetType: event.target.value as ComponentAssetType })}>
+                              {COMPONENT_ASSET_TYPES.map((type) => <option key={type}>{type}</option>)}
+                            </select>
+                          </label>
+                          <label className="component-role-field">
+                            Roblox object
+                            <select value={selectedComponent.role} onChange={(event) => updateFamily(selectedComponent, { role: event.target.value as RobloxUiRole })}>
+                              {ROBLOX_UI_ROLES.map((role) => <option key={role}>{role}</option>)}
+                            </select>
+                          </label>
+                          {selectedComponent.childHierarchyKeys.length > 0 && (
+                            <label className="component-dive-field">
+                              Export this group as
+                              <select value={selectedComponent.diveMode} onChange={(event) => updateDiveMode(selectedComponent, event.target.value as ComponentDiveMode)}>
+                                <option value="keep-together">One combined asset</option>
+                                <option value="children-only">Child assets only</option>
+                                <option value="parent-and-children">Group and child assets</option>
+                              </select>
+                              <span>{selectedComponent.diveRemembered
+                                ? 'Using your saved choice for matching groups.'
+                                : selectedComponent.diveReasons[0]
+                                  || (selectedComponent.diveMode === selectedComponent.recommendedDiveMode
+                                    ? 'Chosen from the group structure and visual overlap.'
+                                    : `Kryeo recommends ${selectedComponent.recommendedDiveMode.replace(/-/g, ' ')}.`)}</span>
+                            </label>
+                          )}
+                        </div>
+                      </div>
+
+                      {selectedComponent.semanticConflict && <div className="semantic-conflict"><CircleAlert size={13} /><span>{selectedComponent.semanticConflictMessage}</span></div>}
+                      {selectedComponent.diveConflict && <div className="semantic-conflict"><CircleAlert size={13} /><span>{selectedComponent.diveConflictMessage}</span></div>}
+                      {selectedComponent.keptInsideParent && <div className="component-inspector-note">This layer stays inside its parent because of a project rule.</div>}
+
+                      <details
+                        className={`component-inspector-details ${selectedComponent.semanticConflict ? 'has-conflict' : ''}`}
+                        onToggle={(event) => {
+                          if (event.currentTarget.open && selectedComponent.aiConfidence !== undefined && !selectedEvidenceAvailable) void loadFamilyEvidence(selectedComponent);
+                        }}
+                      >
+                        <summary>Why Kryeo chose this</summary>
+                        <div>
+                          <p>{selectedComponent.analysisReason || 'Kryeo combined the artwork, layer name, hierarchy, and learned project choices.'}</p>
+                          {selectedComponent.aiConfidence !== undefined && <b>{Math.round(selectedComponent.aiConfidence * 100)}% model confidence</b>}
+                          {selectedEvidenceLoading && <span>Loading detailed evidence from {hostedReviewer}…</span>}
+                          {selectedEvidenceAvailable && (
+                            <div className="component-evidence-grid">
+                              <span>Visual <b>{Math.round((selectedComponent.aiEvidence?.visual || 0) * 100)}%</b></span>
+                              <span>Name <b>{Math.round((selectedComponent.aiEvidence?.layerName || 0) * 100)}%</b></span>
+                              <span>Hierarchy <b>{Math.round((selectedComponent.aiEvidence?.hierarchy || 0) * 100)}%</b></span>
+                              <span>Memory <b>{Math.round((selectedComponent.aiEvidence?.learned || 0) * 100)}%</b></span>
+                            </div>
+                          )}
+                          {selectedComponent.aiModelSuggestedType && <span>Cloud proposal: {selectedComponent.aiModelSuggestedName || selectedComponent.familyName} · {selectedComponent.aiModelSuggestedType}</span>}
+                          {selectedComponent.aiNormalizationReason && <span>{selectedComponent.aiNormalizationReason}</span>}
+                        </div>
+                      </details>
+
+                      {selectedInstances.length > 1 && (
+                        <details className="component-instances component-inspector-details">
+                          <summary>{selectedInstances.length} matching instances</summary>
+                          <div>{selectedInstances.map((item) => <span key={item.id}>{item.name} · {item.members[0]?.path.join('.') || 'unknown path'}</span>)}</div>
+                        </details>
+                      )}
+                    </div>
+
+                    <footer className="component-inspector-action">
+                      {selectedPriority === 'ready'
+                        ? <span><CircleCheck size={16} />No decision needed</span>
+                        : <button className={selectedReviewed ? 'secondary-button' : 'run-button'} type="button" onClick={toggleSelectedReviewed}>
+                            {selectedReviewed ? <RefreshCw size={15} /> : <CircleCheck size={15} />}
+                            {selectedReviewed ? 'Reopen decision' : 'Approve and continue'}
+                          </button>}
+                    </footer>
+                  </>
+                )}
+              </section>
+            </div>
           </section>
 
           <footer className="scan-actions">
@@ -2326,9 +2486,9 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                 ? <><CircleAlert size={16} />Review {reviewStats.attention} remaining {reviewStats.attention === 1 ? 'exception' : 'exceptions'} before applying</>
                 : <><CircleCheck size={16} />{included.size} of {scan.components.length} components included · review complete</>}</div>
             <button className="secondary-button" disabled={scanning} onClick={() => void runScan()}><RefreshCw size={16} />Rescan {scanScope}</button>
-            <button className="run-button" disabled={saving || reviewStats.attention > 0} title={reviewStats.attention ? 'Clear the exception queue before saving these choices.' : ''} onClick={() => void rememberChoices()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saving ? 'Saving choices' : 'Remember choices'}</button>
-            <button className="secondary-button" disabled={applying || scanScope !== 'document' || included.size === 0 || reviewStats.attention > 0} title={reviewStats.attention ? 'Clear the exception queue before renaming Affinity layers.' : ''} onClick={() => void applyNames()}>{applying ? <LoaderCircle className="spin" size={16} /> : <FileCode2 size={16} />}{applying ? 'Applying names' : 'Apply names'}</button>
-            <button className="run-button" disabled={applying || scanScope !== 'document' || included.size === 0 || reviewStats.attention > 0} title={reviewStats.attention ? 'Clear the exception queue before changing Affinity organization.' : ''} onClick={() => void applyOrganization()}>{applying ? <LoaderCircle className="spin" size={16} /> : <Layers3 size={16} />}{applying ? 'Organizing Affinity' : 'Apply to Affinity'}</button>
+            <button className="run-button" disabled={saving || reviewStats.attention > 0} title={reviewStats.attention ? 'Resolve the remaining decisions before saving.' : ''} onClick={() => void rememberChoices()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saving ? 'Saving decisions' : 'Save decisions'}</button>
+            <button className="secondary-button" disabled={applying || scanScope !== 'document' || included.size === 0 || reviewStats.attention > 0} title={reviewStats.attention ? 'Resolve the remaining decisions before renaming layers.' : ''} onClick={() => void applyNames()}>{applying ? <LoaderCircle className="spin" size={16} /> : <FileCode2 size={16} />}{applying ? 'Renaming layers' : 'Rename layers'}</button>
+            <button className="run-button" disabled={applying || scanScope !== 'document' || included.size === 0 || reviewStats.attention > 0} title={reviewStats.attention ? 'Resolve the remaining decisions before organizing the document.' : ''} onClick={() => void applyOrganization()}>{applying ? <LoaderCircle className="spin" size={16} /> : <Layers3 size={16} />}{applying ? 'Organizing layers' : 'Organize layers'}</button>
           </footer>
         </>
       )}
