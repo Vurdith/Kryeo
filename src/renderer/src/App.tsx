@@ -2452,7 +2452,8 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                               <span>Memory <b>{Math.round((selectedComponent.aiEvidence?.learned || 0) * 100)}%</b></span>
                             </div>
                           )}
-                          {selectedComponent.aiModelSuggestedType && <span>Cloud proposal: {selectedComponent.aiModelSuggestedName || selectedComponent.familyName} · {selectedComponent.aiModelSuggestedType}</span>}
+                          {selectedComponent.aiEvidenceSupportsClassification === false && <span className="component-evidence-warning">This cloud explanation does not support the earlier classification. Kryeo requires a review instead of trusting it.</span>}
+                          {selectedComponent.aiModelSuggestedType && <span>{selectedComponent.aiEvidenceSupportsClassification === false ? 'Cloud proposal (not accepted):' : 'Cloud proposal:'} {selectedComponent.aiModelSuggestedName || selectedComponent.familyName} · {selectedComponent.aiModelSuggestedType}</span>}
                           {selectedComponent.aiNormalizationReason && <span>{selectedComponent.aiNormalizationReason}</span>}
                         </div>
                       </details>

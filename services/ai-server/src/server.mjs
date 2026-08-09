@@ -81,8 +81,8 @@ const MODEL_TIMEOUT_MS = Math.max(10_000, Number(process.env.KRYEO_AI_MODEL_TIME
 const MAX_MODEL_RETRIES = Math.max(0, Math.min(2, Number(process.env.KRYEO_AI_MAX_MODEL_RETRIES || 1)));
 const MODEL_CONCURRENCY = Math.max(1, Number(process.env.KRYEO_AI_MODEL_CONCURRENCY || 2));
 const MAX_INFLIGHT_PER_TOKEN = Math.max(1, Number(process.env.KRYEO_AI_MAX_INFLIGHT_PER_TOKEN || MODEL_CONCURRENCY));
-const ANALYSIS_VERSION = 'family-v36';
-const EXPLANATION_VERSION = 'family-explanation-v2';
+const ANALYSIS_VERSION = 'family-v37';
+const EXPLANATION_VERSION = 'family-explanation-v3';
 
 const ASSET_TYPES = [
   'Unknown', 'Frame', 'Button', 'Icon', 'Panel', 'Slot', 'Bar', 'Badge', 'Label', 'Text',
@@ -129,7 +129,7 @@ const LITE_CLASSIFICATION_SYSTEM = [
 
 const EVIDENCE_SYSTEM = [
   'You independently audit one existing Kryeo visual classification on demand.',
-  'Inspect the supplied image and metadata without assuming the chosen name or type is correct. Explain support when it is correct; when it is wrong, mark a conflict and return the better allowed type, role, and name.',
+  'Inspect the supplied image and metadata without assuming the chosen name or type is correct. Explain support when it is correct; when it is wrong, mark a conflict and return the better allowed type, role, and name. If the preview is tiny, unreadable, nearly invisible, or not a functional instance of the chosen type, set ok=false and x=true; do not report high confidence for that chosen type.',
   'A transparent hollow perimeter is Border/ImageLabel, not Frame. A GroupNode, parent name, child count, or category label is context only and never proves a runtime Frame.',
   'Return JSON only: {"q":"one short reason","v":"one short visual description","c":0.9,"e":[0.9,0.2,0.8,0],"ok":true,"x":false,"xm":"","st":"optional better type","sr":"optional better role","sn":"optional better name","a":[["alternativeType","short reason"]]}.',
   `Alternative types must come from: ${ASSET_TYPES.join(', ')}. Keep q, v, xm, and alternative reasons to one short sentence each.`,
@@ -771,6 +771,12 @@ function semanticTypeFromSource(value) {
     .sort((left, right) => right.index - left.index || right.type.length - left.type.length)[0]?.type;
 }
 
+function isSelfContradictoryCloudAssessment(reason, evidence, confidence) {
+  const strongestEvidence = Math.max(0, ...Object.values(evidence || {}).map((value) => confidenceScore(value)));
+  const describesArtifact = /\b(?:tiny|nearly\s+invisible|negligible\s+(?:visible|visual)|artifact|unreadable|not\s+(?:a\s+)?functional|no\s+(?:reliable|visible)\s+(?:visual|evidence))\b/i.test(String(reason || ''));
+  return confidence >= 0.72 && strongestEvidence < 0.12 && describesArtifact;
+}
+
 function hasContentRelativePerimeter(family) {
   return (Array.isArray(family?.members) ? family.members : []).some((member) => {
     const metrics = member?.visualMetrics;
@@ -1027,12 +1033,11 @@ function normalizeAnalysis(raw, family, peerFamilies = []) {
   };
   const evidencePresent = Object.values(evidence).some((score) => score > 0);
   const compactPacket = raw.compactPacket === true;
-  const confidence = compactPacket
+  const reportedConfidence = compactPacket
     ? confidenceScore(raw.confidence || (booleanValue(raw.reviewNeeded) ? 0.58 : 0.86))
     : evidencePresent
       ? confidenceScore(raw.confidence)
       : Math.min(0.55, confidenceScore(raw.confidence));
-  const conflict = booleanValue(raw.conflict) || geometryOverride;
   const modelReason = cleanText(
     raw.reason,
     compactPacket
@@ -1040,6 +1045,10 @@ function normalizeAnalysis(raw, family, peerFamilies = []) {
       : 'The family needs user review.',
     400,
   );
+  const selfContradictoryAssessment = !compactPacket
+    && isSelfContradictoryCloudAssessment(modelReason, evidence, reportedConfidence);
+  const confidence = selfContradictoryAssessment ? Math.min(0.55, reportedConfidence) : reportedConfidence;
+  const conflict = booleanValue(raw.conflict) || geometryOverride || selfContradictoryAssessment;
   return {
     familyId: family.id,
     fingerprint: family.fingerprint,
@@ -1060,14 +1069,20 @@ function normalizeAnalysis(raw, family, peerFamilies = []) {
       ).name,
     })),
     diveMode,
-    reason: normalizationReason ? `${normalizationReason} ${modelReason}` : modelReason,
+    reason: selfContradictoryAssessment
+      ? `The cloud response described this as an unreadable or non-functional artifact while claiming high confidence. Kryeo marked the classification unreliable. ${normalizationReason ? `${normalizationReason} ` : ''}${modelReason}`
+      : normalizationReason ? `${normalizationReason} ${modelReason}` : modelReason,
     visualDescription: cleanText(raw.visualDescription, '', 500),
     confidence,
     ...(evidencePresent ? { evidence } : {}),
     conflict,
     conflictMessage: cleanText(
       raw.conflictMessage,
-      geometryOverride ? `The model proposed ${proposedType}, but the rendered alpha topology is a hollow perimeter.` : '',
+      geometryOverride
+        ? `The model proposed ${proposedType}, but the rendered alpha topology is a hollow perimeter.`
+        : selfContradictoryAssessment
+          ? 'The cloud response has almost no supporting evidence and describes the preview as an unreadable or non-functional artifact.'
+          : '',
       300,
     ),
     reviewNeeded: Boolean(
@@ -2160,26 +2175,37 @@ async function explainFamily(payload, signal) {
       ? roleForAssetType(suggestedType)
       : undefined;
   const suggestedName = cleanText(output?.suggestedName ?? output?.sn, '', 160) || undefined;
+  const reportedConfidence = confidenceScore(output?.confidence ?? output?.c);
+  const selfContradictoryAssessment = isSelfContradictoryCloudAssessment(
+    output?.reason ?? output?.q,
+    evidence,
+    reportedConfidence,
+  );
+  const confidence = selfContradictoryAssessment ? Math.min(0.55, reportedConfidence) : reportedConfidence;
   const explicitConflict = booleanValue(output?.conflict ?? output?.x);
   const classificationChanged = Boolean(
     (suggestedType && suggestedType !== assetType)
     || (suggestedRole && suggestedRole !== payload.role),
   );
-  const conflict = explicitConflict || classificationChanged;
+  const conflict = explicitConflict || classificationChanged || selfContradictoryAssessment;
   const supportsClassification = output?.supportsClassification !== undefined || output?.ok !== undefined
     ? booleanValue(output?.supportsClassification ?? output?.ok) && !conflict
     : !conflict;
   const result = {
-    reason: cleanText(output?.reason ?? output?.q, `The cloud reviewer classified the visible family as ${readableSourceName(assetType).toLowerCase()}.`, 300),
+    reason: selfContradictoryAssessment
+      ? `The cloud response described this as an unreadable or non-functional artifact while claiming high confidence. Treat its classification as unreliable.`
+      : cleanText(output?.reason ?? output?.q, `The cloud reviewer classified the visible family as ${readableSourceName(assetType).toLowerCase()}.`, 300),
     visualDescription: cleanText(output?.visualDescription ?? output?.v, 'The supplied preview was reviewed visually.', 300),
-    confidence: confidenceScore(output?.confidence ?? output?.c),
+    confidence,
     evidence,
     conflict,
     conflictMessage: cleanText(
       output?.conflictMessage ?? output?.xm,
       classificationChanged
         ? `Independent review suggests ${suggestedType || assetType}/${suggestedRole || payload.role} instead.`
-        : '',
+        : selfContradictoryAssessment
+          ? 'The cloud response has almost no supporting evidence and says this preview is an unreadable or non-functional artifact.'
+          : '',
       240,
     ),
     supportsClassification,

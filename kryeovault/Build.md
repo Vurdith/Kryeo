@@ -4,18 +4,26 @@
 
 ## Current packaged build
 
-- **Release:** `0.15.38`
+- **Release:** `0.15.39`
 - **Built and verified:** 2026-08-08
-- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.38.exe`
-- **Installer size:** `272,213,335` bytes
-- **Installer SHA-256:** `125E513A40271A1B86A4700D711B845CEA40415A456EED3630D948278E1F28F1`
-- **Packaged app.asar SHA-256:** `C92C3A8668FC65D7658AEC4F83F6732FD2632ACF70EFAC802037E7F1EB186647`
+- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.39.exe`
+- **Installer size:** `272,215,068` bytes
+- **Installer SHA-256:** `C29C1584819F2827646788A63C3A8C518FC03CDF527D348FE1B88231E73D69F1`
+- **Packaged app.asar SHA-256:** `A6CC584E04CF482EEA8F7D9639E2FC8F3973942350DED73EC303B14FD23A3F4D`
 - **Authenticode:** not signed
 - **Installed app:** `C:\Users\reece\AppData\Local\Programs\Kryeo\Kryeo.exe`
 - **Installed version at last check:** `0.15.37.0`
 - **Installed app.asar SHA-256:** `055F3656666BD9A68298E79945D6B5A2784B9C8557C90A8D208A3ABAD5B0AA20`
 
-The `0.15.38` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The installed desktop is `0.15.37.0`. The local gateway is running the current `family-v36` source with zero active or queued requests at the last check.
+The `0.15.39` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The installed desktop is `0.15.37.0`. The gateway source is `family-v37`; its currently running loopback process reported `family-v36` at the last check and must be restarted to activate the new contract.
+
+## Cloud contradiction guard in `0.15.39`
+
+- Kryeo now rejects a self-contradictory cloud explanation: a high-confidence result that calls the preview tiny, nearly invisible, unreadable, an artifact, or not a functional instance while supplying less than 12% evidence on every signal is capped at 55% and marked for review.
+- The same rule applies to full family analysis and to the on-demand `Why Kryeo chose this` audit. Evidence details now say that the cloud proposal was not accepted instead of presenting an internally inconsistent proposal as trustworthy.
+- The affected example, `Regular Slot / Slot`, had a cloud reason that explicitly said it was not a functional slot while reporting 90% confidence with 1% visual and hierarchy evidence. Under `0.15.39` it returns `conflict: true`, `supportsClassification: false`, and cannot clear the review queue automatically.
+- Analysis keys advance from `family-v36` to `family-v37`; evidence keys advance from `family-explanation-v2` to `family-explanation-v3`. Existing generated cache data is preserved but cannot satisfy the new keys, so a fresh scan/audit receives the guard automatically.
+- Restart only the Kryeo gateway after updating its source to make `family-v37` live. No Affinity document, approved decision, or generated cache file needs to be deleted.
 
 ## Layer review workspace in `0.15.38`
 
@@ -111,7 +119,7 @@ Every unresolved unique family remains eligible for cloud analysis. No local lan
 | Parameter compatibility | `KRYEO_OPENROUTER_REQUIRE_PARAMETERS=false` |
 | Result cache | `services\ai-server\.data\family-cache.json` |
 | Cache cap | `KRYEO_AI_MAX_CACHE_ENTRIES=20000` |
-| Analysis contract | `family-v36` |
+| Analysis contract | `family-v37` |
 
 The gateway reserves against current Qwen pricing with a 2x allowance for repair and token-accounting variance. It records provider-reported cost and the real provider-call count per scan, which the desktop summary displays separately from gateway batches. Valid partial results are stored immediately; missing aliases receive one grouped repair, followed by bounded single-family repairs only for aliases that are still absent.
 
@@ -161,7 +169,7 @@ Start-Process -FilePath 'C:\Program Files\nodejs\node.exe' `
 Invoke-RestMethod http://127.0.0.1:8787/health
 ```
 
-The health response should report `analysisVersion: family-v36`, Qwen3.7 Flash on both lanes, a `$0.01` target, an enforced `$0.03` ceiling, 16-family batching, two model slots, bounded-cache counters, and zero active requests when idle.
+The health response should report `analysisVersion: family-v37`, Qwen3.7 Flash on both lanes, a `$0.01` target, an enforced `$0.03` ceiling, 16-family batching, two model slots, bounded-cache counters, and zero active requests when idle.
 
 ## Build, validate, and install
 
@@ -186,7 +194,7 @@ The health response should report `analysisVersion: family-v36`, Qwen3.7 Flash o
 
 4. Close only running installed `Kryeo.exe` processes. Run `release\Kryeo-Setup-<version>.exe`, relaunch Kryeo, then verify the installed Windows product version and `resources\app.asar` hash.
 
-Recorded passes for `0.15.38`: typecheck, adaptive Affinity-export recovery and telemetry, component-context, component-learning persistence, component-scan and group-structure conflict coverage, local-AI, family-AI, gateway cache/budget/evidence/recovery suite, gateway syntax check, production build, desktop/narrow rendered UI inspection, NSIS package build, and packaged-resource verification. The installer and unpacked package report `0.15.38`; the packaged model is `11,846,843` bytes and taxonomy is `440,707` bytes.
+Recorded passes for `0.15.39`: typecheck, family-AI smoke coverage, gateway syntax check, gateway cache/budget/evidence/recovery suite including a self-contradictory Slot audit, production build, NSIS package build, and packaged-resource verification. The installer and unpacked package report `0.15.39`; the packaged model is `11,846,843` bytes and taxonomy is `440,707` bytes.
 
 ## Clear generated family results
 

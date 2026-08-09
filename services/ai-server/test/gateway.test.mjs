@@ -87,6 +87,17 @@ function modelResponse(prompt, state = {}) {
         a: [['Ornament', 'It could be ornamental if it is not used as an enclosing perimeter.']],
       };
     }
+    if (prompt.includes('Audit Unreadable Slot')) {
+      return {
+        q: 'The element is a tiny, nearly invisible artifact with negligible visible pixels, not a functional UI slot.',
+        v: 'A nearly transparent fragment without a usable slot silhouette.',
+        c: 0.9,
+        e: [0.01, 0, 0.01, 0],
+        ok: true,
+        x: false,
+        xm: '',
+      };
+    }
     return {
       q: 'The centered close mark and control silhouette support the chosen button classification.',
       v: 'A square red control with a centered pale close mark.',
@@ -298,7 +309,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(health.liteOutputPricePerMillion, 0.13);
     assert.equal(health.costEstimateSafetyFactor, 2);
     assert.equal(health.maxHostedFamiliesPerScan, 0);
-    assert.equal(health.analysisVersion, 'family-v36');
+    assert.equal(health.analysisVersion, 'family-v37');
     assert.equal(health.maxCacheEntries, 1000);
     assert.equal(modelPrompts.length, 0);
     const unauthorized = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`);
@@ -383,6 +394,24 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(independentFrameAudit.suggestedType, 'Border');
     assert.equal(independentFrameAudit.suggestedRole, 'ImageLabel');
     assert.equal(independentFrameAudit.suggestedName, 'Decorative Border');
+
+    const contradictorySlotAudit = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/explain`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        ...evidenceRequest,
+        familyFingerprint: `audit-unreadable-slot-${runId}`,
+        visualHash: `audit-unreadable-slot-hash-${runId}`,
+        familyName: 'Regular Slot',
+        assetType: 'Slot',
+        role: 'Frame',
+        sourceName: 'Audit Unreadable Slot',
+      }),
+    }).then((response) => response.json());
+    assert.equal(contradictorySlotAudit.supportsClassification, false);
+    assert.equal(contradictorySlotAudit.conflict, true);
+    assert.equal(contradictorySlotAudit.confidence, 0.55);
+    assert.match(contradictorySlotAudit.conflictMessage, /almost no supporting evidence/i);
 
     const concurrentResults = await Promise.all(['one', 'two'].map((suffix) => fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',

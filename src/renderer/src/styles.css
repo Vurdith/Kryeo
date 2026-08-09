@@ -6081,6 +6081,7 @@ button:active:not(:disabled) { transform: translate(2px, 2px); }
 .component-inspector-details > div { display: grid; gap: 7px; padding: 0 10px 10px; color: var(--quiet); }
 .component-inspector-details p { margin: 0; line-height: 1.5; }
 .component-inspector-details span { display: block; }
+.component-evidence-warning { padding: 7px 8px; border-left: 3px solid #bd3a2e; background: #fff0ed; color: #8b221a; font-weight: 700; line-height: 1.4; }
 .component-evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
 .component-evidence-grid span { padding: 6px 7px; background: #eeece3; }
 .component-instances span { overflow: hidden; font-family: ui-monospace, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }

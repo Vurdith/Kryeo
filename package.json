@@ -1,6 +1,6 @@
 {
   "name": "kryeo",
-  "version": "0.15.38",
+  "version": "0.15.39",
   "description": "A free desktop companion for Affinity scripts and creative workflows.",
   "main": "./out/main/index.js",
   "author": "Kryeo",
