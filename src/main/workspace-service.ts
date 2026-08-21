@@ -7,11 +7,12 @@ import type {
   AssistantMessage,
   AssistantSession,
   ComponentDecision,
+  ComponentCandidate,
   ComponentHierarchyManifest,
   JobRecord,
   PlacementLink,
   ProjectKnowledge,
-  ProjectRecipe,
+  ScanIntentProfile,
   SaveProjectNoteRequest,
   ScriptRunResult,
   SaveComponentReviewRequest,
@@ -22,7 +23,6 @@ import { componentCategory, componentSubcategory } from './component-context-ser
 
 interface WorkspaceData {
   jobs: JobRecord[];
-  recipes: ProjectRecipe[];
   presets: WorkflowPreset[];
   links: PlacementLink[];
   preferences: AssetPreference[];
@@ -32,9 +32,22 @@ interface WorkspaceData {
   assistantSessions: AssistantSession[];
   assistantMessages: AssistantMessage[];
   projectKnowledge: ProjectKnowledge[];
+  scanIntentProfiles: ScanIntentProfile[];
 }
 
-const emptyData = (): WorkspaceData => ({ jobs: [], recipes: [], presets: [], links: [], preferences: [], componentDecisions: [], componentManifests: [], assistantMemories: [], assistantSessions: [], assistantMessages: [], projectKnowledge: [] });
+const emptyData = (): WorkspaceData => ({ jobs: [], presets: [], links: [], preferences: [], componentDecisions: [], componentManifests: [], assistantMemories: [], assistantSessions: [], assistantMessages: [], projectKnowledge: [], scanIntentProfiles: [] });
+
+function correctionLearningContext(component: ComponentCandidate): NonNullable<ComponentDecision['learningContext']> {
+  return {
+    ...(component.visualStructureType ? { visualStructureType: component.visualStructureType } : {}),
+    ...(component.semanticType ? { sourceTypeHint: component.semanticType } : {}),
+    hierarchyKind: component.assetBoundary === 'composed-parent'
+      ? 'composed-parent'
+      : component.assetBoundary === 'construction-child'
+        ? 'construction-child'
+        : 'standalone',
+  };
+}
 
 function enrichMetadataFromNote(knowledge: ProjectKnowledge, text: string, tags: string[]): void {
   const colors = [...text.matchAll(/#[0-9a-f]{6}\b/gi)].map((match) => match[0].toUpperCase());
@@ -72,7 +85,6 @@ export class WorkspaceService {
       const parsed = JSON.parse(await fs.readFile(this.filePath(), 'utf8')) as Partial<WorkspaceData>;
       this.data = {
         jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
-        recipes: Array.isArray(parsed.recipes) ? parsed.recipes : [],
         presets: Array.isArray(parsed.presets) ? parsed.presets : [],
         links: Array.isArray(parsed.links) ? parsed.links : [],
         preferences: Array.isArray(parsed.preferences) ? parsed.preferences : [],
@@ -82,11 +94,8 @@ export class WorkspaceService {
         assistantSessions: Array.isArray(parsed.assistantSessions) ? parsed.assistantSessions : [],
         assistantMessages: Array.isArray(parsed.assistantMessages) ? parsed.assistantMessages : [],
         projectKnowledge: Array.isArray(parsed.projectKnowledge) ? parsed.projectKnowledge : [],
+        scanIntentProfiles: Array.isArray(parsed.scanIntentProfiles) ? parsed.scanIntentProfiles : [],
       };
-      this.data.recipes = this.data.recipes.map((recipe) => ({
-        ...recipe,
-        targets: recipe.targets.filter((target) => target === 'folder' || target === 'roblox'),
-      }));
       this.migrateAssistantData();
     } catch {
       this.data = emptyData();
@@ -146,12 +155,12 @@ export class WorkspaceService {
     await this.ensureLoaded();
     return {
       jobs: this.data.jobs.slice(0, 80),
-      recipes: [...this.data.recipes],
       presets: [...this.data.presets],
       links: this.data.links.slice(0, 200),
       preferences: [...this.data.preferences],
       componentDecisions: [...this.data.componentDecisions],
       componentManifests: [...this.data.componentManifests],
+      scanIntentProfiles: [...this.data.scanIntentProfiles],
       assistantMemories: [...this.data.assistantMemories],
       assistantSessions: [...this.data.assistantSessions],
       assistantMessages: [...this.data.assistantMessages],
@@ -222,15 +231,6 @@ export class WorkspaceService {
     return true;
   }
 
-  async saveRecipe(recipe: ProjectRecipe): Promise<WorkspaceSnapshot> {
-    await this.ensureLoaded();
-    const index = this.data.recipes.findIndex((candidate) => candidate.project === recipe.project);
-    if (index >= 0) this.data.recipes[index] = recipe;
-    else this.data.recipes.push(recipe);
-    await this.persist();
-    return this.snapshot();
-  }
-
   async savePreset(input: Omit<WorkflowPreset, 'id' | 'updatedAt'> & { id?: string }): Promise<WorkspaceSnapshot> {
     await this.ensureLoaded();
     const preset: WorkflowPreset = { ...input, id: input.id || randomUUID(), updatedAt: new Date().toISOString() };
@@ -261,12 +261,13 @@ export class WorkspaceService {
     await this.ensureLoaded();
     const updatedAt = new Date().toISOString();
     for (const input of decisions) {
+      const canonicalName = (input.exportName || input.familyName || input.layerLabel || '').trim().slice(0, 120);
       const previous = this.data.componentDecisions.find((candidate) =>
         candidate.visualHash === input.visualHash
         || Boolean(input.familyFingerprint && candidate.familyFingerprint === input.familyFingerprint));
       const corrected = Boolean(
         (input.suggestedName
-          && input.familyName.trim().toLowerCase() !== input.suggestedName.trim().toLowerCase())
+          && canonicalName.toLowerCase() !== input.suggestedName.trim().toLowerCase())
         || (input.suggestedType && input.assetType !== input.suggestedType)
         || (input.suggestedRole && input.role !== input.suggestedRole)
       );
@@ -278,10 +279,14 @@ export class WorkspaceService {
         project: input.project,
         scope: input.scope || 'project',
         approved: input.approved !== false,
+        decisionStatus: input.decisionStatus || (input.approved === false ? 'generated' : 'accepted'),
         analysisSource: input.analysisSource,
         role: input.role,
         assetType: input.assetType || 'Unknown',
-        familyName: input.familyName.trim().slice(0, 120),
+        familyName: canonicalName,
+        layerLabel: canonicalName,
+        exportName: canonicalName,
+        codeName: input.codeName?.trim().slice(0, 120),
         semanticHint: input.semanticHint,
         suggestedName: input.suggestedName,
         suggestedType: input.suggestedType,
@@ -292,6 +297,7 @@ export class WorkspaceService {
         diveDecisions: input.diveDecisions,
         documentTitle: input.documentTitle,
         provenance: input.provenance || previous?.provenance,
+        learningContext: input.learningContext || previous?.learningContext,
         influenceCount: previous?.influenceCount || input.influenceCount || 0,
         lastInfluencedAt: previous?.lastInfluencedAt || input.lastInfluencedAt,
         confidenceSamples: (previous?.confidenceSamples || 0) + 1,
@@ -360,18 +366,24 @@ export class WorkspaceService {
     }
     await this.saveComponentDecisions([...grouped.values()].map((family) => {
       const component = family[0];
+      const accepted = request.decisionStatus !== 'generated'
+        && family.some((member) => included.has(member.id) && member.automationState !== 'exception' && !(member.automationIssues?.length));
       return {
         visualHash: component.visualHash,
         familyFingerprint: component.familyFingerprint,
         familyMemberHashes: [...new Set(family.map((member) => member.visualHash))],
-        memberNames: family.map((member) => ({ visualHash: member.visualHash, name: member.familyName })),
+        memberNames: family.map((member) => ({ visualHash: member.visualHash, name: member.exportName || member.familyName })),
         project: request.project,
         scope: 'project' as const,
-        approved: true,
+        approved: accepted,
+        decisionStatus: accepted ? (request.decisionStatus || 'accepted') : 'generated',
         analysisSource: component.analysisSource,
         role: component.role,
         assetType: component.assetType,
-        familyName: component.familyName,
+        familyName: component.exportName || component.familyName,
+        layerLabel: component.exportName || component.familyName,
+        exportName: component.exportName || component.familyName,
+        codeName: component.codeName,
         semanticHint: component.semanticHint,
         suggestedName: component.aiSuggestedName,
         suggestedType: component.aiSuggestedType,
@@ -392,6 +404,7 @@ export class WorkspaceService {
           originalType: component.aiSuggestedType,
           originalRole: component.aiSuggestedRole,
         },
+        learningContext: correctionLearningContext(component),
       };
     }));
 
@@ -405,10 +418,14 @@ export class WorkspaceService {
       documentSessionUuid: request.documentSessionUuid,
       createdAt,
       path: manifestPath,
+      scanIntent: request.scanIntent,
       nodes: request.components.map((component) => ({
         id: component.hierarchyKey,
         parentId: component.parentHierarchyKey,
-        familyName: component.familyName,
+        familyName: component.exportName || component.familyName,
+        layerLabel: component.exportName || component.familyName,
+        exportName: component.exportName || component.familyName,
+        codeName: component.codeName,
         assetType: component.assetType,
         category: componentCategory(component.assetType),
         subcategory: componentSubcategory(component, request.components),
@@ -427,6 +444,30 @@ export class WorkspaceService {
     await fs.rm(manifestPath, { force: true });
     await fs.rename(temporary, manifestPath);
     this.data.componentManifests = [manifest, ...this.data.componentManifests.filter((item) => item.documentTitle !== request.documentTitle)].slice(0, 40);
+    await this.persist();
+    return this.snapshot();
+  }
+
+  async saveScanIntentProfile(input: Omit<ScanIntentProfile, 'id' | 'updatedAt'> & { id?: string }): Promise<WorkspaceSnapshot> {
+    await this.ensureLoaded();
+    const profile: ScanIntentProfile = {
+      id: input.id || randomUUID(),
+      project: input.project.trim().slice(0, 160) || 'General',
+      documentTitle: input.documentTitle.trim().slice(0, 180) || 'Untitled',
+      structureFingerprint: input.structureFingerprint.trim().slice(0, 80),
+      mode: input.mode,
+      answers: input.answers.slice(0, 3).map((answer) => ({ id: answer.id, value: answer.value.trim().slice(0, 80) })),
+      updatedAt: new Date().toISOString(),
+    };
+    const index = this.data.scanIntentProfiles.findIndex((candidate) => (
+      candidate.project === profile.project
+      && candidate.documentTitle === profile.documentTitle
+      && candidate.structureFingerprint === profile.structureFingerprint
+    ));
+    if (index >= 0) profile.id = this.data.scanIntentProfiles[index].id;
+    if (index >= 0) this.data.scanIntentProfiles[index] = profile;
+    else this.data.scanIntentProfiles.unshift(profile);
+    this.data.scanIntentProfiles = this.data.scanIntentProfiles.slice(0, 80);
     await this.persist();
     return this.snapshot();
   }
@@ -616,8 +657,4 @@ export class WorkspaceService {
     await this.persist();
   }
 
-  async recipe(project: string): Promise<ProjectRecipe | undefined> {
-    await this.ensureLoaded();
-    return this.data.recipes.find((candidate) => candidate.project === project);
-  }
 }

@@ -1,4 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import * as ort from 'onnxruntime-node';
 import sharp from 'sharp';
@@ -8,7 +9,8 @@ const modelRoot = path.join(root, 'resources', 'models', 'mobileclip-s0');
 const prototypesPath = path.join(modelRoot, 'ui-visual-prototypes.json');
 const taxonomyPath = path.join(modelRoot, 'ui-taxonomy.json');
 const outputPath = path.join(modelRoot, 'ui-compact-classifier.json');
-const previewDirectory = path.join(root, 'tmp', 'visual-prototypes');
+const buildRoot = process.env.KRYEO_BUILD_TMP || path.join(tmpdir(), 'kryeo-build');
+const previewDirectory = path.join(buildRoot, 'visual-prototypes');
 const prototypes = JSON.parse(await readFile(prototypesPath, 'utf8'));
 const taxonomy = JSON.parse(await readFile(taxonomyPath, 'utf8'));
 const labels = taxonomy.labels.map((label) => label.type).filter((type) => type !== 'Unknown');

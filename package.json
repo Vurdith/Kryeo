@@ -1,6 +1,6 @@
 {
   "name": "kryeo",
-  "version": "0.15.39",
+  "version": "0.15.91",
   "description": "A free desktop companion for Affinity scripts and creative workflows.",
   "main": "./out/main/index.js",
   "author": "Kryeo",
@@ -12,12 +12,20 @@
     "dist": "npm run build && electron-builder --win nsis && npm run verify:package",
     "verify:package": "node scripts/verify-packaged-build.mjs",
     "typecheck": "tsc --noEmit",
+    "test:library": "node --experimental-strip-types scripts/smoke-library-embedded.mjs",
+    "test:ipc-contract": "node scripts/smoke-ipc-contract.mjs",
+    "test:ui-contract": "node scripts/smoke-ui-contract.mjs",
+    "test:affinity-connection": "node scripts/smoke-affinity-connection.mjs",
+    "test:evaluation": "node --experimental-strip-types scripts/smoke-component-evaluation.mjs",
+    "test:asset-intelligence": "node --experimental-strip-types scripts/smoke-asset-intelligence.mjs",
     "test:affinity-export": "node --experimental-strip-types scripts/smoke-affinity-component-export.mjs",
     "test:component-context": "node --experimental-strip-types scripts/smoke-component-context.mjs",
     "test:component-learning": "node --experimental-strip-types scripts/smoke-component-learning.mjs",
     "test:component-scan": "node --experimental-strip-types scripts/smoke-component-scan.mjs",
+    "test:scan-intent": "node --experimental-strip-types scripts/smoke-scan-intent.mjs",
     "test:local-ai": "node --experimental-strip-types scripts/smoke-local-ai.mjs",
-    "test:family-ai": "node --experimental-strip-types scripts/smoke-family-ai.mjs"
+    "test:family-ai": "node --experimental-strip-types scripts/smoke-family-ai.mjs",
+    "test:anonymized-visual-regressions": "node --experimental-strip-types scripts/smoke-anonymized-visual-regressions.mjs"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",

@@ -1,11 +1,11 @@
 import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import { buildComponentScan } from '../src/main/component-scan-service.ts';
 import { applyComponentIntelligence } from '../src/main/component-intelligence-service.ts';
 
-const root = path.resolve('tmp', 'component-scan-smoke');
-await fs.rm(root, { recursive: true, force: true });
+const root = await fs.mkdtemp(path.join(tmpdir(), 'kryeo-component-scan-'));
 await fs.mkdir(root, { recursive: true });
 
 const redA = path.join(root, 'red-a.png');
@@ -41,6 +41,78 @@ if (result.reusedInstances !== 1) throw new Error(`Expected one avoided upload, 
 if (result.components[0].visualHash !== result.components[1].visualHash) throw new Error('Identical RGBA pixels did not share a hash.');
 if (result.components[0].visualHash === result.components[2].visualHash) throw new Error('Different RGBA pixels shared a hash.');
 
+const flattenedDuplicate = {
+  ...result.components[0],
+  id: 'flattened-duplicate',
+  renderHash: result.components[0].visualHash,
+  hierarchyKey: 'flat',
+  parentHierarchyKey: '',
+  childHierarchyKeys: [],
+};
+const editableDuplicateChild = {
+  ...result.components[2],
+  id: 'editable-duplicate-child',
+  hierarchyKey: 'editable.0',
+  parentHierarchyKey: 'editable',
+  childHierarchyKeys: [],
+};
+const editableDuplicate = {
+  ...result.components[0],
+  id: 'editable-duplicate',
+  affinityType: 'GroupNode',
+  // Structural fallback groups receive a distinct analysis hash even when
+  // their rendered pixels match a flattened sibling.
+  visualHash: 'f'.repeat(64),
+  renderHash: result.components[0].visualHash,
+  hierarchyKey: 'editable',
+  parentHierarchyKey: '',
+  childHierarchyKeys: ['editable.0'],
+  diveRemembered: false,
+};
+applyComponentIntelligence([flattenedDuplicate, editableDuplicate, editableDuplicateChild]);
+if (!flattenedDuplicate.keptInsideParent || editableDuplicate.diveMode !== 'keep-together') {
+  throw new Error('Expected an exact flattened duplicate to yield to its editable composed GroupNode.');
+}
+
+const cautiousHostedFamily = {
+  ...result.components[0],
+  id: 'cautious-hosted-family',
+  name: 'CloseControl',
+  familyName: 'Close Control Button',
+  exportName: 'Close Control Button',
+  assetType: 'Button',
+  role: 'ImageButton',
+  analysisSource: 'hosted-family',
+  analysisState: 'needs-review',
+  semanticConflict: false,
+  diveConflict: false,
+  childHierarchyKeys: [],
+};
+applyComponentIntelligence([cautiousHostedFamily]);
+if (cautiousHostedFamily.reviewPriority !== 'check') {
+  throw new Error(`Expected a cautious hosted result without a conflict to be a routine check, received ${cautiousHostedFamily.reviewPriority}.`);
+}
+
+const internalConstructionLayer = {
+  ...result.components[0],
+  id: 'internal-construction-layer',
+  familyName: 'Layer10',
+  layerLabel: 'Part',
+  exportName: 'Part',
+  exportTarget: false,
+  assetBoundary: 'construction-child',
+  assetType: 'Unknown',
+  analysisSource: 'unavailable',
+  analysisState: 'provisional',
+  semanticConflict: false,
+  diveConflict: false,
+  childHierarchyKeys: [],
+};
+applyComponentIntelligence([internalConstructionLayer]);
+if (internalConstructionLayer.reviewPriority !== 'check') {
+  throw new Error(`Expected an unclassified construction layer to remain visible for semantic review, received ${internalConstructionLayer.reviewPriority}.`);
+}
+
 const groupResult = await buildComponentScan({
   documentTitle: 'Smoke Test',
   documentSessionUuid: 'group-role-smoke',
@@ -63,7 +135,7 @@ if ((insetMetrics.contentPerimeterVisibleRatio ?? 0) <= 0.05 || (insetMetrics.co
 const repeatedChildren = Array.from({ length: 10 }, (_, index) => ({
   ...result.components[0],
   id: `slot-${index}`,
-  name: `HotbarSlot${index + 1}`,
+  name: `InventoryCell${index + 1}`,
   hierarchyKey: `0.${index}`,
   parentHierarchyKey: '0',
   childHierarchyKeys: [],
@@ -75,15 +147,15 @@ const repeatedChildren = Array.from({ length: 10 }, (_, index) => ({
 const repeatedParent = {
   ...result.components[2],
   id: 'slots-parent',
-  name: 'Hotbar Slots',
+  name: 'Inventory Cells',
   hierarchyKey: '0',
   parentHierarchyKey: '',
   childHierarchyKeys: repeatedChildren.map((child) => child.hierarchyKey),
   assetType: 'Slot',
 };
 applyComponentIntelligence([repeatedParent, ...repeatedChildren]);
-if (repeatedParent.recommendedDiveMode !== 'children-only') {
-  throw new Error(`Expected repeated slot aggregate to recommend children-only, received ${repeatedParent.recommendedDiveMode}.`);
+if (repeatedParent.recommendedDiveMode !== 'parent-and-children') {
+  throw new Error(`Expected a meaningfully named repeated collection to retain its parent and children, received ${repeatedParent.recommendedDiveMode}.`);
 }
 if (!repeatedParent.diveStructureSignature) throw new Error('Expected a structural signature for the repeated group.');
 const rememberedRepeatedParent = {
@@ -105,14 +177,14 @@ const hostedRepeatedParent = {
   diveRemembered: false,
   analysisSource: 'hosted-family',
   analysisState: 'analyzed',
-  familyName: 'Hotbar Slots',
+  familyName: 'Inventory Cells',
 };
 applyComponentIntelligence([hostedRepeatedParent, ...repeatedChildren]);
-if (hostedRepeatedParent.recommendedDiveMode !== 'children-only' || !hostedRepeatedParent.diveConflict) {
-  throw new Error('Expected strong repeated-child structure to challenge an incorrect hosted keep-together choice.');
+if (hostedRepeatedParent.recommendedDiveMode !== 'parent-and-children' || !hostedRepeatedParent.diveConflict) {
+  throw new Error('Expected a repeated named collection to challenge an incorrect hosted keep-together choice.');
 }
-if (hostedRepeatedParent.reviewPriority !== 'critical') {
-  throw new Error('Expected a hosted/structural group-export disagreement to enter the blocking review queue.');
+if (hostedRepeatedParent.reviewPriority !== 'check') {
+  throw new Error('Expected a hosted/structural group-export disagreement to remain a non-blocking AI fallback note.');
 }
 
 const closeChildren = [

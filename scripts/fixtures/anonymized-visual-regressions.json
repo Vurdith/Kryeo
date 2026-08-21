@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Anonymized hierarchy-and-thumbnail regression cases. Names are generic evidence, never expected answers.",
+  "cases": [
+    {
+      "id": "filled-surface-source-conflict",
+      "thumbnail": "visual/red-background-real.png",
+      "nodes": [
+        { "id": "surface", "name": "SuggestedBorder", "affinityType": "RasterNode", "parentId": "", "bounds": [0, 0, 1920, 1080] }
+      ],
+      "expect": {
+        "sourceHint": "Border",
+        "requiresIndependentReviewWhenVisualType": "Background",
+        "topology": "filled",
+        "decision": { "type": "Background", "name": "Neutral Background", "role": "ImageLabel", "diveMode": "keep-together" }
+      }
+    },
+    {
+      "id": "composed-parent-and-construction-children",
+      "thumbnail": "visual/border-wide-double.png",
+      "nodes": [
+        { "id": "assembly", "name": "Group", "affinityType": "GroupNode", "parentId": "", "bounds": [0, 0, 128, 128] },
+        { "id": "assembly.0", "name": "Layer", "affinityType": "RasterNode", "parentId": "assembly", "bounds": [0, 0, 128, 20] },
+        { "id": "assembly.1", "name": "Layer", "affinityType": "RasterNode", "parentId": "assembly", "bounds": [0, 108, 128, 20] }
+      ],
+      "expect": {
+        "parentKind": "composed-parent",
+        "childKind": "construction-child",
+        "requiresMemberNames": true,
+        "topology": "perimeter",
+        "decision": { "type": "Border", "name": "Neutral Border", "role": "ImageLabel", "diveMode": "keep-together" }
+      }
+    },
+    {
+      "id": "repeated-visual-siblings",
+      "thumbnail": "visual/close-button-red-real.png",
+      "nodes": [
+        { "id": "root", "name": "Group", "affinityType": "GroupNode", "parentId": "", "bounds": [0, 0, 256, 96] },
+        { "id": "root.0", "name": "Layer", "affinityType": "RasterNode", "parentId": "root", "bounds": [0, 0, 64, 64] },
+        { "id": "root.1", "name": "Layer", "affinityType": "RasterNode", "parentId": "root", "bounds": [80, 0, 64, 64] }
+      ],
+      "expect": {
+        "documentOrder": ["root.0", "root.1"],
+        "noParentNameInChildIdentity": true,
+        "topology": "filled",
+        "decision": { "type": "Background", "name": "Neutral Background", "role": "ImageLabel", "diveMode": "keep-together" }
+      }
+    },
+    {
+      "id": "editable-composite-over-flattened-render-copy",
+      "thumbnail": "visual/border-wide-double.png",
+      "nodes": [
+        { "id": "editable", "name": "Group", "affinityType": "GroupNode", "parentId": "", "bounds": [0, 0, 128, 128], "renderKey": "shared-composition" },
+        { "id": "editable.0", "name": "Layer", "affinityType": "RasterNode", "parentId": "editable", "bounds": [0, 0, 128, 20] },
+        { "id": "flat", "name": "Raster", "affinityType": "RasterNode", "parentId": "", "bounds": [160, 0, 128, 128], "renderKey": "shared-composition" }
+      ],
+      "expect": {
+        "editableOwner": "editable",
+        "suppressedRepresentation": "flat",
+        "topology": "perimeter",
+        "decision": { "type": "Border", "name": "Neutral Border", "role": "ImageLabel", "diveMode": "keep-together" }
+      }
+    }
+  ]
+}

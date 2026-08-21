@@ -1,6 +1,6 @@
 {
   "name": "@kryeo/ai-server",
-  "version": "0.2.10",
+  "version": "0.2.17",
   "private": true,
   "type": "module",
   "scripts": {

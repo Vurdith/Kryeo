@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AutoTokenizer, CLIPTextModelWithProjection, env } from '@huggingface/transformers';
@@ -7,7 +8,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.join(root, 'resources', 'models', 'mobileclip-s0', 'ui-taxonomy.json');
 const modelId = 'Xenova/mobileclip_s0';
 
-env.cacheDir = path.join(root, 'tmp', 'transformers-cache');
+const buildRoot = process.env.KRYEO_BUILD_TMP || path.join(tmpdir(), 'kryeo-build');
+env.cacheDir = path.join(buildRoot, 'transformers-cache');
 env.allowLocalModels = true;
 
 const taxonomy = [

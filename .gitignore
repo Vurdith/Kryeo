@@ -13,6 +13,9 @@ $dest/
 launch-video/
 launch-video-node-modules-partial/
 NVIDIA Corporation/
+apps/kryeo-tauri/node_modules/
+apps/kryeo-tauri/dist/
+apps/kryeo-tauri/src-tauri/target/
 coverage/
 *.exe
 *.asar

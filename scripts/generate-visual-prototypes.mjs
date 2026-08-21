@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import * as ort from 'onnxruntime-node';
 import sharp from 'sharp';
@@ -6,7 +7,8 @@ import sharp from 'sharp';
 const root = path.resolve(import.meta.dirname, '..');
 const modelRoot = path.join(root, 'resources', 'models', 'mobileclip-s0');
 const output = path.join(modelRoot, 'ui-visual-prototypes.json');
-const previewDirectory = path.join(root, 'tmp', 'visual-prototypes');
+const buildRoot = process.env.KRYEO_BUILD_TMP || path.join(tmpdir(), 'kryeo-build');
+const previewDirectory = path.join(buildRoot, 'visual-prototypes');
 const fixtureDirectory = path.join(root, 'scripts', 'fixtures', 'visual');
 const imageSize = 256;
 

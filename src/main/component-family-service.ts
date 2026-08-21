@@ -1,149 +1,24 @@
 import { createHash } from 'node:crypto';
 import type {
   ComponentAssetType,
+  ComponentAssetBoundary,
   ComponentCandidate,
   ComponentDecision,
   ComponentFamilyReviewSignals,
   ComponentVisualFamily,
   HostedFamilyReviewPlan,
   HostedFamilyAnalysis,
+  HostedFamilyEvidenceResult,
 } from '../shared/types';
 import { isMeaninglessName } from './name-quality.ts';
+import { componentAssetTypes, normalizeAiName, strictProductionName } from './asset-intelligence-service.ts';
 
-const ASSET_TYPE_NAMES: ComponentAssetType[] = [
-  'Unknown', 'Frame', 'Button', 'Icon', 'Panel', 'Slot', 'Bar', 'Badge', 'Label', 'Text',
-  'TextBox', 'ScrollBar', 'Divider', 'Background', 'Wallpaper', 'Texture', 'Overlay', 'Cursor',
-  'Tooltip', 'Modal', 'Input', 'Tab', 'Tile', 'Ornament', 'Border', 'Corner', 'Edge', 'Fill', 'FX',
-];
-const TYPE_NOUNS = new Set(ASSET_TYPE_NAMES.flatMap((type) => (
-  readableSourceName(type).toLowerCase().split(/\s+/).flatMap((word) => [word, `${word}s`])
-)));
-const GENERIC_MODEL_NAMES = new Set([
-  'scene', 'visual', 'asset', 'component', 'object', 'image', 'picture', 'artwork', 'item', 'element',
-  'background', 'wallpaper', 'texture', 'overlay', 'frame', 'border', 'corner', 'edge', 'fill',
-  'ornament', 'badge', 'icon', 'fx', 'scene asset', 'visual asset',
-]);
-const STRUCTURAL_MODEL_WORDS = new Set([
-  ...TYPE_NOUNS,
-  'ui', 'root', 'container', 'containers', 'group', 'groups', 'layer', 'layers',
-  'middle', 'outer', 'inner', 'center', 'centre', 'base', 'main', 'foreground',
-  'backdrop', 'outline', 'outlines', 'content', 'contents', 'top', 'bottom',
-  'left', 'right', 'side', 'sides', 'glow', 'shine', 'highlight', 'light', 'shadow',
-  'img', 'jpg', 'jpeg', 'png', 'webp', 'gif', 'tiff', 'export',
-]);
-const BORDER_CONFLICT_TYPES = new Set<ComponentAssetType>([
-  'Frame', 'Panel', 'Slot', 'Background', 'Wallpaper', 'Texture', 'Overlay',
-]);
-
-function readableSourceName(value: string): string {
-  return value
-    .replace(/\.(?:png|jpe?g|webp|gif|tiff?|afdesign)$/i, '')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/([A-Za-z])(\d+)/g, '$1 $2')
-    .replace(/(\d+)([A-Za-z])/g, '$1 $2')
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function words(value: string): string[] {
-  return readableSourceName(value).toLowerCase().split(/\s+/).filter(Boolean);
-}
-
-function isStructuralOnlyName(value: string): boolean {
-  const semanticWords = words(value).filter((word) => !/^\d+$/.test(word));
-  return semanticWords.length > 0 && semanticWords.every((word) => STRUCTURAL_MODEL_WORDS.has(word));
-}
-
-function hasDistinctiveIdentityWord(value: string): boolean {
-  return words(value).some((word) => /^[a-z]+$/i.test(word) && !STRUCTURAL_MODEL_WORDS.has(word));
-}
-
-function isGenericModelName(value: string): boolean {
-  const normalized = words(value).join(' ').trim();
-  return !normalized
-    || (isMeaninglessName(value) && !hasDistinctiveIdentityWord(value))
-    || isStructuralOnlyName(value)
-    || GENERIC_MODEL_NAMES.has(normalized)
-    || /^family\s+\d+\s+member\s+\d+$/i.test(normalized);
-}
-
-function retargetTrailingTypeName(
-  value: string,
-  originalType: ComponentAssetType,
-  resolvedType: ComponentAssetType,
-): string {
-  const name = readableSourceName(value);
-  if (!name || originalType === resolvedType) return name;
-  const original = readableSourceName(originalType);
-  const resolved = readableSourceName(resolvedType);
-  const escapedOriginal = original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-  const escapedResolved = resolved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-  const retyped = name.replace(new RegExp(`\\b${escapedOriginal}s?$`, 'i'), resolved);
-  return retyped.replace(new RegExp(`\\b${escapedResolved}(?:\\s+${escapedResolved})+\\b`, 'gi'), resolved);
-}
-
-function fallbackFamilyName(assetType: ComponentAssetType): string {
-  // A bare type is especially unhelpful after a model supplied only a generic
-  // name. This is intentionally conservative: a richer visible descriptor
-  // still wins whenever the hosted result provided one.
-  return assetType === 'Border' ? 'Decorative Border' : assetType;
-}
-
-function nameFromVisualDescription(description: string, assetType: ComponentAssetType): string {
-  const stopWords = new Set([
-    'a', 'an', 'the', 'and', 'or', 'of', 'with', 'for', 'in', 'on', 'at', 'to', 'from', 'this',
-    'that', 'is', 'are', 'appears', 'appearing', 'shows', 'showing', 'depicts', 'depicting',
-    'detailed', 'image', 'visual', 'artwork', 'asset', 'scene', 'element', 'background', 'layer',
-  ]);
-  const descriptors = readableSourceName(description)
-    .replace(/[^A-Za-z0-9 ]+/g, ' ')
-    .split(/\s+/)
-    .map((word) => word.toLowerCase())
-    .filter((word) => word.length >= 3 && !stopWords.has(word) && !TYPE_NOUNS.has(word))
-    .filter((word, index, values) => values.indexOf(word) === index)
-    .slice(0, 3);
-  return descriptors.length ? `${descriptors.map((word) => word[0].toUpperCase() + word.slice(1)).join(' ')} ${assetType}` : '';
-}
-
-function sourceTypeSuffix(source: string): ComponentAssetType | undefined {
-  return [...ASSET_TYPE_NAMES]
-    .sort((left, right) => right.length - left.length)
-    .find((type) => {
-      const typeWords = readableSourceName(type).replace(/\s+/g, '\\s*');
-      return new RegExp(`\\b${typeWords}s?$`, 'i').test(source);
-    });
-}
-
-function sourceIdentityName(
-  component: ComponentCandidate,
-  visualType: ComponentCandidate['assetType'],
-  proposedName: string,
-): string {
-  if (
-    isStructuralOnlyName(component.name)
-    || (isMeaninglessName(component.name) && !hasDistinctiveIdentityWord(component.name))
-  ) return '';
-  const source = readableSourceName(component.name);
-  if (!source) return '';
-
-  const sourceWords = words(source);
-  const proposedWords = words(proposedName);
-  const proposedWordSet = new Set(proposedWords.map((word) => word.replace(/s$/i, '')));
-  const sourceIsContained = sourceWords.every((word) => proposedWordSet.has(word.replace(/s$/i, '')));
-  if (sourceIsContained) return source.replace(/\s+\d+$/i, '').trim();
-
-  const namedType = sourceTypeSuffix(source);
-  if (namedType && namedType !== visualType) {
-    const typeWords = readableSourceName(namedType).replace(/\s+/g, '\\s*');
-    const descriptor = source.replace(new RegExp(`\\s+${typeWords}s?$`, 'i'), '').trim();
-    return descriptor ? `${descriptor} ${visualType}` : visualType;
-  }
-
-  const proposedDescriptors = proposedWords.filter((word) => !TYPE_NOUNS.has(word));
-  if (proposedDescriptors.length === 0) return source.replace(/\s+\d+$/i, '').trim();
-  return '';
+function isOpaqueModelName(value: string): boolean {
+  const compact = value.replace(/\s+/g, '');
+  return !compact
+    || /^\d+$/.test(compact)
+    || /^(?:layer|group|image|asset|export)\s*\d*$/i.test(value)
+    || /^[a-f0-9]{12,}$/i.test(compact);
 }
 
 export function reviewCategory(assetType: ComponentCandidate['assetType']): ComponentCandidate['reviewCategory'] {
@@ -231,6 +106,154 @@ export function visualStructureAnchor(component: ComponentCandidate): VisualStru
   return undefined;
 }
 
+function sourceTypeHint(name: string): ComponentAssetType | undefined {
+  const normalized = String(name || '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized || isMeaninglessName(normalized)) return undefined;
+  const matches = componentAssetTypes
+    .filter((type) => type !== 'Unknown')
+    .flatMap((type) => {
+      const words = type.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\s+/g, '\\s+');
+      const match = new RegExp(`\\b${words}s?\\b`, 'i').exec(normalized);
+      return match ? [{ type, index: match.index }] : [];
+    })
+    .sort((left, right) => right.index - left.index || right.type.length - left.type.length);
+  return matches[0]?.type;
+}
+
+/**
+ * A human label is evidence, never a local override. When it meaningfully
+ * disagrees with the visual result, request an independent visual audit.
+ */
+export function familySourceTypeHint(family: ComponentVisualFamily): ComponentAssetType | undefined {
+  const hints = [...new Set(family.members.map((member) => sourceTypeHint(member.name)).filter(Boolean))];
+  return hints.length === 1 ? hints[0] : undefined;
+}
+
+export function requiresIndependentFamilyReview(
+  analysis: HostedFamilyAnalysis,
+  family: ComponentVisualFamily | undefined,
+): boolean {
+  if (analysis.conflict || analysis.reviewNeeded || Number(analysis.confidence || 0) < 0.72) return true;
+  return familyDecisionConsistencyIssues(analysis, family).length > 0;
+}
+
+/**
+ * These are review triggers, never local corrections. A second visual model
+ * must provide a complete replacement decision before anything changes.
+ */
+export function familyDecisionConsistencyIssues(
+  analysis: HostedFamilyAnalysis,
+  family: ComponentVisualFamily | undefined,
+): string[] {
+  const issues: string[] = [];
+  // Source labels deliberately do not create a review by themselves. They are
+  // useful context for the visual model, but they are neither a taxonomy rule
+  // nor an independent visual observation. Escalating every name/type mismatch
+  // caused harmless Affinity labels to overwhelm the reviewer lane and let
+  // hierarchy wording compete with the artwork itself.
+  const structureTypes = family
+    ? [...new Set(family.members
+      .map((member) => visualStructureAnchor(member as ComponentCandidate)?.type)
+      .filter(Boolean))]
+    : [];
+  if (structureTypes.length === 1 && structureTypes[0] !== analysis.assetType) {
+    issues.push('Strong rendered structure and visual proposal disagree.');
+  }
+  const normalized = normalizeAiName(analysis.familyName || '').displayName;
+  if (!normalized) issues.push('The visual proposal has no usable overall name.');
+  if (analysis.assetType !== 'Unknown') {
+    issues.push(...strictProductionName(analysis.familyName || '', analysis.assetType).issues);
+  }
+  const mentionedTypes = componentAssetTypes
+    .filter((type) => type !== 'Unknown')
+    .filter((type) => new RegExp(`\\b${type.replace(/([a-z])([A-Z])/g, '$1\\s*$2')}s?\\b`, 'i').test(normalized));
+  if (mentionedTypes.some((type) => type !== analysis.assetType)) {
+    issues.push('The visual proposal name contains a type that disagrees with its final type.');
+  }
+  if (analysis.assetType !== 'Unknown' && !mentionedTypes.includes(analysis.assetType)) {
+    issues.push(`The visual proposal name is missing its final ${analysis.assetType} type.`);
+  }
+  if (family && family.members.length > 1 && analysis.memberNames.length > 0) {
+    const named = new Set(analysis.memberNames.map((member) => member.visualHash));
+    if (family.members.some((member) => !named.has(member.visualHash))) {
+      issues.push('The visual proposal omitted one or more construction siblings.');
+    }
+  }
+  if (family) {
+    const proposalWords = normalized.toLowerCase().split(/\s+/).filter(Boolean);
+    const directWords = new Set(family.members.flatMap((member) => member.name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)));
+    for (const parent of family.hierarchyContext?.map((context) => context.parentName).filter(Boolean) || []) {
+      const parentWords = parent.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 2 && !componentAssetTypes.some((type) => type.toLowerCase() === word));
+      if (parentWords.length >= 2 && parentWords.every((word) => proposalWords.includes(word)) && !parentWords.every((word) => directWords.has(word))) {
+        issues.push('The visual proposal repeats an ancestor identity that is absent from the target family.');
+        break;
+      }
+    }
+  }
+  return [...new Set(issues)];
+}
+
+/**
+ * Checks coherent sibling names without renaming them. Any issue is routed
+ * back through the same complete-decision reviewer as a normal uncertainty.
+ */
+export function familyBatchConsistencyIssues(
+  analyses: HostedFamilyAnalysis[],
+  families: ComponentVisualFamily[],
+): Map<string, string[]> {
+  const byId = new Map(families.map((family) => [family.id, family]));
+  const scopes = new Map<string, HostedFamilyAnalysis[]>();
+  for (const analysis of analyses) {
+    const family = byId.get(analysis.familyId);
+    if (!family || analysis.assetType === 'Unknown') continue;
+    if (!family.members.every((member) => isMeaninglessName(member.name))) continue;
+    const key = family.namingScopeKey || family.members[0]?.parentHierarchyKey;
+    if (!key) continue;
+    const scope = scopes.get(key) || [];
+    scope.push(analysis);
+    scopes.set(key, scope);
+  }
+  const issues = new Map<string, string[]>();
+  for (const scope of scopes.values()) {
+    if (scope.length < 2) continue;
+    const ordered = [...scope].sort((left, right) => {
+      const leftFamily = byId.get(left.familyId);
+      const rightFamily = byId.get(right.familyId);
+      const ordinalDelta = (leftFamily?.siblingOrdinal || Number.MAX_SAFE_INTEGER) - (rightFamily?.siblingOrdinal || Number.MAX_SAFE_INTEGER);
+      if (ordinalDelta) return ordinalDelta;
+      const leftKey = leftFamily?.members[0]?.hierarchyKey || '';
+      const rightKey = rightFamily?.members[0]?.hierarchyKey || '';
+      return leftKey.localeCompare(rightKey, undefined, { numeric: true });
+    });
+    const typeWords = componentAssetTypes
+      .filter((type) => type !== 'Unknown')
+      .map((type) => type.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|');
+    const roots = ordered.map((analysis) => normalizeAiName(analysis.familyName)
+      .displayName.toLowerCase()
+      .replace(new RegExp(`\\b(?:${typeWords})s?\\b`, 'gi'), '')
+      .replace(/\b\d+\b/g, '')
+      .replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    const numbered = ordered.map((analysis) => Number(/\b(\d+)\s*$/.exec(analysis.familyName)?.[1] || 0));
+    const inconsistentTypes = new Set(ordered.map((analysis) => analysis.assetType)).size > 1;
+    const inconsistentRoot = new Set(roots).size > 1;
+    const outOfOrderNumbering = numbered.some((number, index) => number !== index + 1);
+    if (!inconsistentTypes && !inconsistentRoot && !outOfOrderNumbering) continue;
+    const reason = inconsistentTypes
+      ? 'Anonymous construction siblings disagree on their shared construction type.'
+      : inconsistentRoot
+        ? 'Anonymous construction siblings do not share one visual root.'
+        : 'Anonymous construction sibling numbering does not follow document order.';
+    for (const analysis of ordered) issues.set(analysis.familyId, [reason]);
+  }
+  return issues;
+}
+
 function fingerprint(memberHashes: string[], parentNames: string[], sourceNames: string[] = [], hierarchyKeys: string[] = []): string {
   return createHash('sha256')
     .update(JSON.stringify({
@@ -243,19 +266,19 @@ function fingerprint(memberHashes: string[], parentNames: string[], sourceNames:
 }
 
 function approvedDecisionFor(
-  memberHashes: string[],
+  _memberHashes: string[],
   familyFingerprint: string,
   decisions: ComponentDecision[],
   project: string,
 ): ComponentDecision | undefined {
-  const hashes = new Set(memberHashes);
   return decisions
-    .filter((decision) => decision.approved !== false)
+    .filter((decision) => decision.approved !== false && decision.decisionStatus !== 'generated')
     .filter((decision) => !decision.project || decision.scope === 'global' || decision.project === project)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .find((decision) =>
-      decision.familyFingerprint === familyFingerprint
-      || hashes.has(decision.visualHash));
+    // An accepted correction may inform the local learner by visual hash, but
+    // it cannot bypass a new hierarchy decision. Only an exact decision graph
+    // fingerprint is safe to reuse as a final answer.
+    .find((decision) => decision.familyFingerprint === familyFingerprint);
 }
 
 function score(value: number | undefined): number {
@@ -315,7 +338,7 @@ export function planHostedFamilyReview(family: ComponentVisualFamily): HostedFam
     return {
       tier: 'escalation',
       riskScore: 1,
-      reasons: ['No local review signals were available, so hosted review is required.'],
+      reasons: ['No local review signals were available, so cloud review is required.'],
     };
   }
   const reasons: string[] = [];
@@ -384,22 +407,203 @@ export function planHostedFamilyReview(family: ComponentVisualFamily): HostedFam
   };
 }
 
+/**
+ * Count families resolved without a cloud request for the current availability
+ * path. Approved decisions stay local when the gateway is available; when the
+ * gateway is unavailable, unresolved families remain local and provisional.
+ */
+export function countLocallyHandledFamilies(
+  families: ComponentVisualFamily[],
+  cloudAvailable: boolean,
+): number {
+  return families.filter((family) => cloudAvailable ? Boolean(family.approvedDecision) : !family.approvedDecision).length;
+}
+
+function boundaryMember(component: ComponentCandidate): ComponentVisualFamily['members'][number] {
+  return {
+    id: component.id,
+    visualHash: component.visualHash,
+    name: component.name,
+    affinityType: component.affinityType,
+    bounds: component.bounds,
+    hierarchyKey: component.hierarchyKey,
+    parentHierarchyKey: component.parentHierarchyKey,
+    childHierarchyKeys: component.childHierarchyKeys,
+    previewUrl: component.previewUrl,
+    hostedPreviewUrl: component.hostedPreviewUrl,
+    analysisPreviewUrls: component.analysisPreviewUrls || [],
+    visualMetrics: component.visualMetrics,
+  };
+}
+
+function boundaryReason(boundary: ComponentAssetBoundary): string {
+  switch (boundary) {
+    case 'composed-parent':
+      return 'This editable group is the composed export owner for its overlapping construction layers.';
+    case 'construction-child':
+      return 'This layer is construction artwork inside an owned composed asset, so it is not a competing export decision.';
+    case 'organizational-parent':
+      return 'This group is structural organization only; its children are the export decisions.';
+    case 'duplicate-representation':
+      return 'An editable composed representation renders the same pixels, so this flattened duplicate is retained only as evidence.';
+    default:
+      return 'This layer is an independent export decision.';
+  }
+}
+
+/**
+ * Export ownership and semantic naming are separate concerns. A construction
+ * layer cannot compete with its composed parent in the export plan, but it
+ * still needs a visual name and classification so the document remains
+ * intelligible and can be organised consistently.
+ */
+function receivesSemanticDecision(component: ComponentCandidate): boolean {
+  return ['standalone', 'composed-parent', 'construction-child']
+    .includes(component.assetBoundary || 'standalone');
+}
+
+function ownsAssetExport(component: ComponentCandidate): boolean {
+  return ['standalone', 'composed-parent'].includes(component.assetBoundary || 'standalone');
+}
+
+function semanticExportReady(component: ComponentCandidate): boolean {
+  if (component.analysisSource === 'local-provisional' || component.analysisSource === 'unavailable' || component.analysisState === 'provisional' || component.analysisState === 'queued') return false;
+  if (component.analysisSource === 'hosted-family' && (
+    component.analysisState === 'needs-review'
+    || component.semanticConflict
+    || component.assetType === 'Unknown'
+    || component.role === 'Unknown'
+  )) return false;
+  return true;
+}
+
+/**
+ * Establish structural ownership before any hosted semantic decision. This is
+ * deliberately generic: it only uses hierarchy, dive policy, and exact render
+ * identity. Names and asset types remain entirely model-owned later.
+ */
+export function applyAssetBoundaries(components: ComponentCandidate[]): ComponentCandidate[] {
+  const byKey = new Map(components.map((component) => [component.hierarchyKey, component]));
+  const duplicateOwnerByRender = new Map<string, ComponentCandidate>();
+  for (const component of components) {
+    const render = component.renderHash || component.visualHash;
+    if (!component.childHierarchyKeys.length) continue;
+    const current = duplicateOwnerByRender.get(render);
+    if (!current
+      || component.childHierarchyKeys.length > current.childHierarchyKeys.length
+      || (component.childHierarchyKeys.length === current.childHierarchyKeys.length
+        && component.hierarchyDepth < current.hierarchyDepth)
+    ) {
+      duplicateOwnerByRender.set(render, component);
+    }
+  }
+
+  const visit = (component: ComponentCandidate, inheritedOwner?: ComponentCandidate): void => {
+    const render = component.renderHash || component.visualHash;
+    const duplicateOwner = duplicateOwnerByRender.get(render);
+    const children = component.childHierarchyKeys
+      .map((key) => byKey.get(key))
+      .filter((child): child is ComponentCandidate => Boolean(child));
+    const boundaryDiveMode = component.structuralDiveMode || component.diveMode;
+    if (!component.structuralDiveMode) component.structuralDiveMode = boundaryDiveMode;
+    component.diveMode = boundaryDiveMode;
+
+    if (
+      !children.length
+      && duplicateOwner
+      && duplicateOwner.hierarchyKey !== component.hierarchyKey
+      && (component.keptInsideParent || (component.renderHash || component.visualHash) === (duplicateOwner.renderHash || duplicateOwner.visualHash))
+    ) {
+      component.assetBoundary = 'duplicate-representation';
+      component.boundaryOwnerHierarchyKey = duplicateOwner.hierarchyKey;
+      component.decisionScopeKey = duplicateOwner.hierarchyKey;
+      component.boundaryReason = boundaryReason(component.assetBoundary);
+      component.exportTarget = false;
+      component.reviewPriority = 'ready';
+      component.reviewReasons = [];
+      return;
+    }
+    if (inheritedOwner) {
+      component.assetBoundary = 'construction-child';
+      component.boundaryOwnerHierarchyKey = inheritedOwner.hierarchyKey;
+      component.decisionScopeKey = inheritedOwner.hierarchyKey;
+      component.boundaryReason = boundaryReason(component.assetBoundary);
+      component.exportTarget = false;
+      component.reviewPriority = 'ready';
+      component.reviewReasons = [];
+      children.forEach((child) => visit(child, inheritedOwner));
+      return;
+    }
+    if (!children.length) {
+      component.assetBoundary = 'standalone';
+      component.boundaryOwnerHierarchyKey = component.hierarchyKey;
+      component.decisionScopeKey = byKey.has(component.parentHierarchyKey)
+        ? component.parentHierarchyKey
+        : component.hierarchyKey;
+      component.boundaryReason = boundaryReason(component.assetBoundary);
+      component.exportTarget = semanticExportReady(component);
+      return;
+    }
+    if (boundaryDiveMode === 'children-only') {
+      component.assetBoundary = 'organizational-parent';
+      component.boundaryOwnerHierarchyKey = component.hierarchyKey;
+      component.decisionScopeKey = component.hierarchyKey;
+      component.boundaryReason = boundaryReason(component.assetBoundary);
+      component.exportTarget = false;
+      component.reviewPriority = 'ready';
+      component.reviewReasons = [];
+      children.forEach((child) => visit(child));
+      return;
+    }
+    component.assetBoundary = 'composed-parent';
+    component.boundaryOwnerHierarchyKey = component.hierarchyKey;
+    component.decisionScopeKey = component.hierarchyKey;
+    component.boundaryReason = boundaryReason(component.assetBoundary);
+    component.exportTarget = semanticExportReady(component);
+    children.forEach((child) => visit(child, boundaryDiveMode === 'keep-together' ? component : undefined));
+  };
+
+  const roots = components.filter((component) => !component.parentHierarchyKey || !byKey.has(component.parentHierarchyKey));
+  roots.forEach((component) => visit(component));
+  // Be defensive about malformed hierarchy exports: every node still gets a
+  // deterministic structural boundary rather than silently retaining stale state.
+  for (const component of components) {
+    if (!component.assetBoundary) visit(component);
+  }
+  return components;
+}
+
 export function buildVisualFamilies(
   components: ComponentCandidate[],
   decisions: ComponentDecision[],
   project: string,
   documentTitle: string,
 ): ComponentVisualFamily[] {
+  applyAssetBoundaries(components);
   const byKey = new Map(components.map((component) => [component.hierarchyKey, component]));
   const grouped = new Map<string, ComponentCandidate[]>();
   for (const component of components) {
-    const key = component.visualHash;
+    // Pixel equality is a render-deduplication signal, not semantic identity.
+    // A group, its flattened raster duplicate, and a child fragment may render
+    // identical pixels while belonging to different export decisions.
+    if (!receivesSemanticDecision(component)) continue;
+    const renderIdentity = component.renderHash || component.visualHash;
+    const key = [component.assetBoundary, component.decisionScopeKey || component.hierarchyKey, renderIdentity].join('|');
     const family = grouped.get(key) || [];
     family.push(component);
     grouped.set(key, family);
   }
 
-  return [...grouped.entries()].map(([id, members]) => {
+  const families = [...grouped.entries()].map(([decisionIdentity, members]) => {
+    const owner = members[0];
+    const decisionScopeKey = owner.decisionScopeKey || owner.hierarchyKey;
+    const ownerParent = byKey.get(owner.parentHierarchyKey);
+    const exportSiblings = (ownerParent?.childHierarchyKeys || [owner.hierarchyKey])
+      .map((key) => byKey.get(key))
+      .filter((sibling): sibling is ComponentCandidate => Boolean(sibling))
+      .filter((sibling) => receivesSemanticDecision(sibling));
+    const siblingOrdinal = exportSiblings.findIndex((sibling) => sibling.hierarchyKey === owner.hierarchyKey) + 1;
+    const id = `scope-${createHash('sha256').update(decisionIdentity).digest('hex').slice(0, 24)}`;
     const parentNames = members
       .map((member) => byKey.get(member.parentHierarchyKey)?.name || '')
       .filter(Boolean);
@@ -430,26 +634,26 @@ export function buildVisualFamilies(
           .slice(0, 16) || [],
       };
     });
+    const contextMembers = owner.assetBoundary === 'composed-parent'
+      ? owner.childHierarchyKeys
+        .map((key) => byKey.get(key))
+        .filter((child): child is ComponentCandidate => Boolean(child))
+        .slice(0, 12)
+        .map(boundaryMember)
+      : [];
     return {
       id,
       fingerprint: familyFingerprint,
       project,
       documentTitle,
+      namingScopeKey: decisionScopeKey,
+      decisionScopeKey,
+      assetBoundary: owner.assetBoundary,
+      structuralDiveMode: owner.structuralDiveMode || owner.diveMode,
+      ...(siblingOrdinal > 0 ? { siblingOrdinal, siblingCount: exportSiblings.length } : {}),
       parentNames: [...new Set(parentNames)],
-      members: members.map((member) => ({
-        id: member.id,
-        visualHash: member.visualHash,
-        name: member.name,
-        affinityType: member.affinityType,
-        bounds: member.bounds,
-        hierarchyKey: member.hierarchyKey,
-        parentHierarchyKey: member.parentHierarchyKey,
-        childHierarchyKeys: member.childHierarchyKeys,
-        previewUrl: member.previewUrl,
-        hostedPreviewUrl: member.hostedPreviewUrl,
-        analysisPreviewUrls: member.analysisPreviewUrls || [],
-        visualMetrics: member.visualMetrics,
-      })),
+      members: members.map(boundaryMember),
+      ...(contextMembers.length ? { contextMembers } : {}),
       representativeHash: members[0].visualHash,
       exactInstanceCount: Math.max(
         members.length,
@@ -460,18 +664,39 @@ export function buildVisualFamilies(
       approvedDecision: approvedDecisionFor(memberHashes, familyFingerprint, decisions, project),
     };
   });
+  // Similarity is visual evidence, not authority to merge semantic scopes.
+  // Separate hierarchy roots stay separate even when they look alike; only an
+  // exact flattened representation can be suppressed by applyAssetBoundaries.
+  return families;
 }
 
 export function applyApprovedFamilies(
   components: ComponentCandidate[],
   families: ComponentVisualFamily[],
 ): ComponentCandidate[] {
-  const familyByHash = new Map<string, ComponentVisualFamily>();
+  const familyByHierarchyKey = new Map<string, ComponentVisualFamily>();
   for (const family of families) {
-    for (const member of family.members) familyByHash.set(member.visualHash, family);
+    for (const member of family.members) familyByHierarchyKey.set(member.hierarchyKey, family);
   }
   return components.map((component) => {
-    const family = familyByHash.get(component.visualHash);
+    if (!receivesSemanticDecision(component)) {
+      return {
+        ...component,
+        familyName: '',
+        layerLabel: component.name,
+        exportName: undefined,
+        codeName: undefined,
+        assetType: 'Unknown',
+        role: 'Unknown',
+        exportTarget: false,
+        analysisSource: 'local-provisional',
+        analysisState: 'analyzed',
+        analysisReason: component.boundaryReason || 'This structural layer is not an independent export decision.',
+        automationState: 'ready',
+        automationIssues: undefined,
+      };
+    }
+    const family = familyByHierarchyKey.get(component.hierarchyKey);
     const decision = family?.approvedDecision;
     if (!family || !decision) {
       return {
@@ -487,11 +712,14 @@ export function applyApprovedFamilies(
       ...component,
       familyFingerprint: family.fingerprint,
       familyMemberHashes: family.members.map((member) => member.visualHash),
-      familyName: decision.memberNames?.find((member) => member.visualHash === component.visualHash)?.name || decision.familyName,
+      familyName: decision.memberNames?.find((member) => member.visualHash === component.visualHash)?.name || decision.exportName || decision.familyName,
+      layerLabel: decision.memberNames?.find((member) => member.visualHash === component.visualHash)?.name || decision.exportName || decision.familyName,
+      exportName: decision.memberNames?.find((member) => member.visualHash === component.visualHash)?.name || decision.exportName || decision.familyName,
       assetType: decision.assetType || 'Unknown',
       role: decision.role,
       reviewCategory: reviewCategory(decision.assetType || 'Unknown'),
       diveMode: decision.diveMode || component.diveMode,
+      structuralDiveMode: decision.diveMode || component.structuralDiveMode || component.diveMode,
       remembered: true,
       analysisSource: 'approved-family',
       analysisState: 'approved',
@@ -509,66 +737,77 @@ export function applyHostedFamilyAnalyses(
   families: ComponentVisualFamily[],
   analyses: HostedFamilyAnalysis[],
 ): ComponentCandidate[] {
-  const familyByHash = new Map<string, ComponentVisualFamily>();
+  const familyByHierarchyKey = new Map<string, ComponentVisualFamily>();
   for (const family of families) {
-    for (const member of family.members) familyByHash.set(member.visualHash, family);
+    for (const member of family.members) familyByHierarchyKey.set(member.hierarchyKey, family);
   }
   const analysisById = new Map(analyses.map((analysis) => [analysis.familyId, analysis]));
   return components.map((component) => {
+    if (!receivesSemanticDecision(component)) {
+      return {
+        ...component,
+        familyName: '',
+        layerLabel: component.name,
+        exportName: undefined,
+        codeName: undefined,
+        assetType: 'Unknown',
+        role: 'Unknown',
+        exportTarget: false,
+        analysisSource: 'local-provisional',
+        analysisState: 'analyzed',
+        analysisReason: component.boundaryReason || 'This structural layer is not an independent export decision.',
+        automationState: 'ready',
+        automationIssues: undefined,
+      };
+    }
     if (component.analysisSource === 'approved-family') return component;
-    const family = familyByHash.get(component.visualHash);
+    const family = familyByHierarchyKey.get(component.hierarchyKey);
     const analysis = family ? analysisById.get(family.id) : undefined;
-    const visualAnchor = visualStructureAnchor(component);
     if (!family || !analysis) {
-      if (!component.remembered && visualAnchor) {
-        return {
-          ...component,
-          assetType: visualAnchor.type,
-          reviewCategory: reviewCategory(visualAnchor.type),
-          aiSuggestedType: visualAnchor.type,
-          aiConfidence: Math.max(component.aiConfidence || 0, visualAnchor.confidence),
-          aiReason: visualAnchor.reason,
-          analysisSource: 'local-provisional',
-          analysisState: 'provisional',
-          analysisReason: 'No hosted result was returned; the rendered structure remains the current provisional classification.',
-        };
-      }
       return {
         ...component,
         familyFingerprint: family?.fingerprint,
         familyMemberHashes: family?.members.map((member) => member.visualHash),
+        // A missing cloud packet is not a semantic decision. Do not leave the
+        // local bootstrap guess in the export fields where it can be mistaken
+        // for an accepted AI classification.
+        familyName: '',
+        layerLabel: undefined,
+        exportName: undefined,
+        codeName: undefined,
+        assetType: 'Unknown',
+        role: 'Unknown',
+        exportTarget: false,
+        automationState: 'exception',
+        automationIssues: ['This visual family did not receive a complete cloud decision. Rescan before exporting it.'],
         analysisSource: 'local-provisional',
         analysisState: 'provisional',
-        analysisReason: 'No hosted result was returned for this visual family. The current values are provisional.',
+        analysisReason: 'No cloud result was returned for this visual family. The current values are provisional.',
       };
     }
     const memberName = analysis.memberNames.find((member) => member.visualHash === component.visualHash)?.name;
-    // Hosted review is normally final, but an exported PNG with a transparent
-    // centre and dense perimeter is strong enough evidence to reject a
-    // container-like classification. This protects decorative Affinity groups
-    // from becoming Roblox Frames simply because they contain multiple layers.
-    const visualStructureOverride = visualAnchor?.type === 'Border'
-      && BORDER_CONFLICT_TYPES.has(analysis.assetType);
-    const assetType = visualStructureOverride ? 'Border' : analysis.assetType;
-    const role = visualStructureOverride ? 'ImageLabel' : analysis.role;
-    const proposedName = retargetTrailingTypeName(
-      memberName || analysis.familyName,
-      analysis.assetType,
-      assetType,
-    );
-    const sourceIdentity = sourceIdentityName(component, assetType, proposedName);
-    const visualDescriptionName = nameFromVisualDescription(analysis.visualDescription || '', assetType);
-    const familyName = (!isGenericModelName(proposedName) ? proposedName : '')
-      || (!isGenericModelName(sourceIdentity) ? sourceIdentity : '')
-      || visualDescriptionName
-      || fallbackFamilyName(assetType);
-    const semanticReason = visualStructureOverride
-      ? `${visualAnchor.reason} Kryeo kept this as a Border/ImageLabel instead of the hosted ${analysis.assetType}/${analysis.role} result.`
-      : analysis.reason;
-    const semanticConflict = Boolean(analysis.conflict || visualStructureOverride);
-    const semanticConflictMessage = analysis.conflictMessage || (visualStructureOverride
-      ? `The hosted reviewer chose ${analysis.assetType}, but the transparent perimeter geometry identifies this exported artwork as a Border.`
-      : undefined);
+    const assetType = analysis.assetType;
+    const role = analysis.role;
+    const rawName = memberName || analysis.familyName || '';
+    const normalizedName = normalizeAiName(rawName).displayName;
+    const proposedName = isOpaqueModelName(normalizedName) ? '' : normalizedName;
+    // The hosted model is the sole author of semantic identity. Kryeo may flag
+    // a weak name later, but it must retain the model's actual proposal rather
+    // than erase, replace, or create a second local name.
+    const namePacketIsUsable = assetType !== 'Unknown'
+      && role !== 'Unknown'
+      && strictProductionName(proposedName, assetType).issues.length === 0;
+    const familyName = namePacketIsUsable ? proposedName : '';
+    const consistencyIssues = familyDecisionConsistencyIssues(analysis, family);
+    const semanticReason = analysis.reason;
+    const plannedDiveMode = component.structuralDiveMode || component.diveMode;
+    const groupingConflict = component.childHierarchyKeys.length > 0 && analysis.diveMode !== plannedDiveMode;
+    const completeDecision = namePacketIsUsable;
+    const semanticConflict = Boolean(analysis.conflict || analysis.reviewNeeded || !completeDecision || groupingConflict || consistencyIssues.length);
+    const semanticConflictMessage = analysis.conflictMessage
+      || (groupingConflict
+        ? 'The visual grouping proposal disagrees with the already planned hierarchy boundary, so this scope needs one complete review decision.'
+        : consistencyIssues[0]);
     return {
       ...component,
       familyFingerprint: family.fingerprint,
@@ -580,13 +819,14 @@ export function applyHostedFamilyAnalyses(
       aiModelSuggestedType: analysis.modelAssetType || analysis.assetType,
       aiNormalizationReason: analysis.normalizationReason,
       reviewCategory: reviewCategory(assetType),
-      diveMode: component.childHierarchyKeys.length ? analysis.diveMode : component.diveMode,
+      // The boundary graph was established before semantics. A model may
+      // challenge grouping, but it cannot split a group after its children
+      // were intentionally excluded from classification.
+      diveMode: plannedDiveMode,
       aiSuggestedName: familyName,
       aiSuggestedType: assetType,
       aiSuggestedRole: role,
-      aiConfidence: visualStructureOverride
-        ? Math.max(analysis.confidence || 0, visualAnchor.confidence)
-        : analysis.confidence,
+      aiConfidence: analysis.confidence,
       aiEvidence: analysis.evidence,
       aiSource: 'model',
       aiReason: semanticReason,
@@ -595,8 +835,110 @@ export function applyHostedFamilyAnalyses(
       analysisReason: semanticReason,
       analysisAlternatives: analysis.alternatives,
       semanticConflict,
-      semanticConflictMessage,
+      semanticConflictMessage: semanticConflictMessage || (!completeDecision
+        ? 'The cloud response did not contain one usable name, type, and Roblox role decision.'
+        : undefined),
+      // A complete child decision is used for Affinity naming and hierarchy
+      // context, never to create a second PNG beside its composed parent.
+      exportTarget: ownsAssetExport(component) && !semanticConflict,
+      automationState: semanticConflict ? 'exception' : 'ready',
+      automationIssues: semanticConflict
+        ? ['Kryeo kept this visual out of the export queue until one complete decision is available.']
+        : undefined,
       remembered: false,
     };
   });
+}
+
+/**
+ * A challenge is allowed to replace a family only as one complete decision.
+ * Keeping the primary result intact when a reviewer supplies partial criticism
+ * prevents the name/type/role contradictions that used to leak into the UI.
+ */
+export function resolveChallengedFamilyAnalysis(
+  primary: HostedFamilyAnalysis,
+  challenge: HostedFamilyEvidenceResult,
+): HostedFamilyAnalysis {
+  const hasCompleteReplacement = challenge.supportsClassification === false
+    && Boolean(challenge.suggestedName)
+    && Boolean(challenge.suggestedType)
+    && Boolean(challenge.suggestedRole)
+    && strictProductionName(challenge.suggestedName || '', challenge.suggestedType || 'Unknown').issues.length === 0;
+  if (!hasCompleteReplacement) {
+    // A reviewer that rejects the primary decision without supplying the
+    // complete replacement is useful evidence, but not safe authorization to
+    // partially mutate a decision. Keep the complete primary packet intact
+    // and expose it as unresolved instead of allowing the UI to call it ready.
+    if (challenge.supportsClassification === false || challenge.conflict) {
+      return {
+        ...primary,
+        conflict: true,
+        conflictMessage: challenge.conflictMessage
+          || 'An independent visual review found a conflict but did not return a complete replacement decision.',
+        reviewNeeded: true,
+        alternatives: challenge.alternatives?.length ? challenge.alternatives : primary.alternatives,
+        normalizationReason: 'The original name, type, and role were kept together because the independent review did not provide a complete replacement.',
+      };
+    }
+    return primary;
+  }
+  const replacementName = normalizeAiName(challenge.suggestedName || '').displayName;
+  if (!replacementName) return primary;
+  return {
+    ...primary,
+    familyName: replacementName,
+    assetType: challenge.suggestedType!,
+    role: challenge.suggestedRole!,
+    memberNames: primary.memberNames.map((member) => ({ ...member, name: replacementName })),
+    reason: challenge.reason,
+    visualDescription: challenge.visualDescription,
+    confidence: challenge.confidence,
+    evidence: challenge.evidence,
+    conflict: true,
+    conflictMessage: challenge.conflictMessage || `Independent visual review replaced the primary ${primary.assetType} decision.`,
+    reviewNeeded: false,
+    alternatives: challenge.alternatives,
+    modelFamilyName: primary.modelFamilyName || primary.familyName,
+    modelAssetType: primary.modelAssetType || primary.assetType,
+    normalizationReason: 'A complete independent visual replacement was applied atomically to the name, type, and Roblox role.',
+  };
+}
+
+export function resolveIndependentFamilyAnalysis(
+  primary: HostedFamilyAnalysis,
+  reviewer: HostedFamilyAnalysis | undefined,
+): HostedFamilyAnalysis {
+  const complete = Boolean(reviewer)
+    && reviewer!.assetType !== 'Unknown'
+    && reviewer!.role !== 'Unknown'
+    && !reviewer!.reviewNeeded
+    && !reviewer!.conflict
+    && strictProductionName(reviewer!.familyName || '', reviewer!.assetType).issues.length === 0;
+  if (!complete || !reviewer) {
+    return {
+      ...primary,
+      conflict: true,
+      reviewNeeded: true,
+      conflictMessage: 'The independent visual review did not return one complete replacement decision.',
+    };
+  }
+  const changed = reviewer.familyName !== primary.familyName
+    || reviewer.assetType !== primary.assetType
+    || reviewer.role !== primary.role
+    || reviewer.diveMode !== primary.diveMode;
+  return {
+    ...reviewer,
+    familyId: primary.familyId,
+    fingerprint: primary.fingerprint,
+    conflict: changed,
+    conflictMessage: changed
+      ? `Independent visual review replaced the primary ${primary.assetType} decision.`
+      : '',
+    reviewNeeded: false,
+    modelFamilyName: primary.modelFamilyName || primary.familyName,
+    modelAssetType: primary.modelAssetType || primary.assetType,
+    normalizationReason: changed
+      ? 'A complete independent visual replacement was applied atomically to name, type, role, grouping, and member names.'
+      : 'The independent visual reviewer confirmed the complete primary decision.',
+  };
 }

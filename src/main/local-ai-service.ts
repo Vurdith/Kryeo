@@ -11,6 +11,7 @@ import type {
   LocalAiStatus,
   RobloxUiRole,
 } from '../shared/types';
+import { componentAssetTypes, roleForAssetType } from './asset-intelligence-service.ts';
 import { cosineSimilarity, decodeEmbedding, encodeEmbedding } from './embedding-utils.ts';
 import { isMeaninglessName } from './name-quality.ts';
 
@@ -41,45 +42,10 @@ const IMAGE_SIZE = 256;
 const BATCH_SIZE = 8;
 const STRUCTURE_INSPECTION_CONCURRENCY = 4;
 const MAX_EMBEDDING_CACHE_ENTRIES = 2_048;
-const GENERIC_NAME = /^(layer|group|object|shape|curve|pixel|image|raster|rectangle|ellipse|artboard|container)[\s_-]*\d*$/i;
 
 sharp.concurrency(Math.max(1, Math.min(2, Math.floor(os.availableParallelism() / 2))));
 
-const TYPE_TO_ROLE: Record<ComponentAssetType, RobloxUiRole> = {
-  Unknown: 'Unknown',
-  Frame: 'Frame',
-  Button: 'ImageButton',
-  Icon: 'ImageLabel',
-  Panel: 'Frame',
-  Slot: 'ImageButton',
-  Bar: 'ImageLabel',
-  Badge: 'ImageLabel',
-  Label: 'TextLabel',
-  Text: 'TextLabel',
-  TextBox: 'TextBox',
-  ScrollBar: 'Frame',
-  Divider: 'ImageLabel',
-  Background: 'ImageLabel',
-  Wallpaper: 'ImageLabel',
-  Texture: 'ImageLabel',
-  Overlay: 'ImageLabel',
-  Cursor: 'ImageLabel',
-  Tooltip: 'Frame',
-  Modal: 'Frame',
-  Input: 'TextBox',
-  Tab: 'ImageButton',
-  Tile: 'ImageButton',
-  Ornament: 'ImageLabel',
-  Border: 'ImageLabel',
-  Corner: 'ImageLabel',
-  Edge: 'ImageLabel',
-  Fill: 'ImageLabel',
-  FX: 'ImageLabel',
-};
-
-export function roleForAssetType(type: ComponentAssetType): RobloxUiRole {
-  return TYPE_TO_ROLE[type] || 'Unknown';
-}
+export { roleForAssetType } from './asset-intelligence-service.ts';
 
 function clamp(value: number, minimum = 0, maximum = 1): number {
   return Math.max(minimum, Math.min(maximum, value));
@@ -94,26 +60,11 @@ function titleCase(value: string): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function usefulName(component: ComponentCandidate, type: ComponentAssetType): string {
-  const primary = titleCase(component.name);
-  if (isMeaninglessName(component.name)) return type === 'Unknown' ? 'Unlabelled visual' : type;
-  const typedSourceName = new RegExp(`\\b${type}(?:s|\\s*\\d+)?\\b`, 'i');
-  if (type !== 'Unknown' && typedSourceName.test(primary) && !GENERIC_NAME.test(primary)) {
-    return primary.slice(0, 80);
-  }
-  if (type === 'Bar' && /\bbar\b/i.test(primary) && !GENERIC_NAME.test(primary)) return primary.slice(0, 80);
-  if (type === 'ScrollBar' && /\bscroll\s*bar\b/i.test(primary) && !GENERIC_NAME.test(primary)) return primary.slice(0, 80);
-  const candidates = [component.name, ...component.members.map((member) => member.name)]
-    .map(titleCase)
-    .map((name) => name.replace(/\b(background|backdrop|border|borders|decoration|ornament|shadow|glow|stroke|fill|mask)\b/gi, ' ').replace(/\s+/g, ' ').trim())
-    .filter((name) => name && !GENERIC_NAME.test(name))
-    .filter(Boolean);
-  const semantic = candidates.find((name) => !new RegExp(`\\b${type}\\b`, 'i').test(name)) || candidates[0] || '';
-  if (!semantic) return type === 'Unknown' ? 'Unlabelled visual' : type;
-  if (type === 'Bar' && /\bbar\b/i.test(semantic)) return semantic.slice(0, 80);
-  if (type === 'ScrollBar' && /\bscroll\s*bar\b/i.test(semantic)) return semantic.slice(0, 80);
-  if (type === 'Unknown' || new RegExp(`\\b${type}\\b`, 'i').test(semantic)) return semantic.slice(0, 80);
-  return `${semantic} ${type}`.slice(0, 80);
+function usefulName(component: ComponentCandidate): string {
+  // Local vision ranks a Roblox type but never authors a semantic identity.
+  // Hosted AI owns names; unreadable document labels remain explicit exceptions.
+  if (isMeaninglessName(component.name)) return '';
+  return titleCase(component.name).slice(0, 80);
 }
 
 function semanticName(component: ComponentCandidate): string {
@@ -131,7 +82,7 @@ function semanticTypeFromText(name: string): ComponentAssetType | undefined {
     .replace(/[_-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  const types = (Object.keys(TYPE_TO_ROLE) as ComponentAssetType[])
+  const types = componentAssetTypes
     .filter((type) => type !== 'Unknown')
     .sort((left, right) => right.length - left.length);
   const matches = types.flatMap((type) => {
@@ -157,11 +108,8 @@ function hasMeaningfulLayerName(component: ComponentCandidate): boolean {
 }
 
 function reviewCategory(component: ComponentCandidate, type: ComponentAssetType): 'ui' | 'construction' | 'background' {
-  const name = semanticName(component).toLowerCase();
   if (['Background', 'Wallpaper'].includes(type)) return 'background';
   if (['Ornament', 'Border', 'Corner', 'Edge', 'Fill', 'FX', 'Divider', 'Texture', 'Overlay'].includes(type)) return 'construction';
-  if (type === 'Unknown' && /\b(background|backdrop|wallpaper|guide)\b/.test(name)) return 'background';
-  if (type === 'Unknown' && /\b(mask|shadow|glow|texture|construction|overlay|stroke)\b/.test(name)) return 'construction';
   return 'ui';
 }
 
@@ -199,6 +147,24 @@ function structuralPriors(component: ComponentCandidate): Partial<Record<Compone
     else priors.Background = (priors.Background || 0) + 0.07;
   }
   return priors;
+}
+
+function hierarchyKind(component: ComponentCandidate): 'standalone' | 'composed-parent' | 'construction-child' {
+  if (component.childHierarchyKeys.length) return 'composed-parent';
+  return component.parentHierarchyKey ? 'construction-child' : 'standalone';
+}
+
+/**
+ * A correction is reusable only when the visual example is genuinely similar.
+ * Source/hierarchy agreement is a small tie-breaker, never a type override.
+ */
+function correctionContextAffinity(component: ComponentCandidate, decision: ComponentDecision): number {
+  const context = decision.learningContext;
+  if (!context) return 0;
+  let affinity = context.hierarchyKind === hierarchyKind(component) ? 0.012 : -0.012;
+  if (context.visualStructureType && context.visualStructureType === component.visualStructureType) affinity += 0.012;
+  if (context.sourceTypeHint && context.sourceTypeHint === component.semanticType) affinity += 0.006;
+  return affinity;
 }
 
 function dataUrlBuffer(dataUrl: string): Buffer {
@@ -471,9 +437,12 @@ export class LocalAiService {
       const priors = structuralPriors(component);
       const scores = taxonomy.labels.map((label) => dot(embedding, label.embedding) + (priors[label.type] || 0));
       const neighbours = learned
-        .map((example) => ({ ...example, similarity: cosineSimilarity(embedding, example.embedding) }))
+        .map((example) => {
+          const similarity = cosineSimilarity(embedding, example.embedding);
+          return { ...example, similarity, contextualSimilarity: similarity + correctionContextAffinity(component, example.decision) };
+        })
         .filter((example) => example.similarity >= 0.84)
-        .sort((left, right) => right.similarity - left.similarity)
+        .sort((left, right) => right.contextualSimilarity - left.contextualSimilarity)
         .slice(0, 5);
       for (const neighbour of neighbours) {
         const labelIndex = taxonomy.labels.findIndex((label) => label.type === neighbour.decision.assetType);
@@ -499,18 +468,15 @@ export class LocalAiService {
       const fullCanvasShape = /ShapeNode/i.test(component.affinityType)
         && component.bounds.width >= 1600
         && component.bounds.height >= 900;
-      const sparseAnonymousCanvasShape = fullCanvasShape && !semanticType && structure.overallDensity < 0.12;
-      const misleadingFullCanvasFrame = fullCanvasShape && semanticType === 'Frame';
+      const sparseAnonymousCanvasShape = fullCanvasShape && structure.overallDensity < 0.12;
       const structureType: ComponentAssetType | undefined = structure.borderLike || sparseAnonymousCanvasShape
         ? 'Border'
-        : misleadingFullCanvasFrame
-          ? 'Background'
-          : structure.largeLandscape
-            && structure.imageNode
-            && structure.centerDensity >= 0.45
-            && structure.overallDensity >= 0.2
-            ? 'Wallpaper'
-            : structure.largeLandscape && structure.centerDensity >= 0.38
+        : structure.largeLandscape
+          && structure.imageNode
+          && structure.centerDensity >= 0.45
+          && structure.overallDensity >= 0.2
+          ? 'Wallpaper'
+          : structure.largeLandscape && structure.centerDensity >= 0.38
             ? 'Background'
             : undefined;
       const visualStructureConfidence = structureType === 'Border'
@@ -520,52 +486,37 @@ export class LocalAiService {
           : structureType === 'Background'
             ? 0.82
             : undefined;
-      const genericLowConfidenceVisual = !semanticType
-        && !structureType
+      const genericLowConfidenceVisual = !structureType
         && !hasMeaningfulLayerName(component)
         && !nearest
         && confidence < 0.56;
-      const semanticCorrectedByStructure = semanticType === 'Frame' && structureType === 'Background';
       const learnedType = nearest && nearest.similarity >= 0.96 && nearest.decision.assetType
         ? nearest.decision.assetType
-        : semanticCorrectedByStructure
-          ? 'Background'
-          : semanticType || structureType || (genericLowConfidenceVisual ? 'Unknown' : best.label.type);
+        : structureType || (genericLowConfidenceVisual ? 'Unknown' : best.label.type);
       const semanticScore = semanticType
         ? ranked.find((candidate) => candidate.label.type === semanticType)?.score
         : undefined;
-      const semanticConflict = Boolean(
-        semanticCorrectedByStructure
-        || (semanticType && semanticType !== best.label.type && best.score - (semanticScore ?? best.score) > 0.035),
-      );
+      const semanticConflict = Boolean(semanticType && semanticType !== learnedType && best.score - (semanticScore ?? best.score) > 0.035);
       const role = nearest && nearest.similarity >= 0.93 && nearest.decision.role !== 'Unknown'
         ? nearest.decision.role
-        : TYPE_TO_ROLE[learnedType] || component.suggestedRole;
+        : roleForAssetType(learnedType) || component.suggestedRole;
       results.push({
         visualHash: component.visualHash,
-        name: usefulName(component, learnedType),
+        name: usefulName(component),
         assetType: learnedType,
         role,
-        source: nearest && nearest.similarity >= 0.96
-          ? 'memory'
-          : semanticType && learnedType === semanticType ? 'name' : 'model',
+        source: nearest && nearest.similarity >= 0.96 ? 'memory' : 'model',
         margin: marginSignal,
-        confidence: structureType && learnedType === structureType
-          ? Math.max(0.78, confidence)
-          : semanticType && learnedType === semanticType ? Math.max(0.9, confidence) : confidence,
+        confidence: structureType && learnedType === structureType ? Math.max(0.78, confidence) : confidence,
         reason: nearest && nearest.similarity >= 0.96
           ? 'Matched a visual classification previously confirmed on this computer.'
-          : semanticCorrectedByStructure
-            ? 'The layer name says frame, but the rendered artwork is a filled landscape background.'
-            : semanticType && learnedType === semanticType
-              ? `The component name identifies this as a ${semanticType.toLowerCase()} and overrides the weaker visual match.`
-              : structureType && learnedType === structureType
-                ? structureType === 'Border'
-                  ? 'The rendered artwork has a transparent center with visible perimeter artwork, which identifies it as a border.'
-                  : `The rendered size, coverage, and layer kind identify this as a ${structureType.toLowerCase()}.`
-                : genericLowConfidenceVisual
-                  ? 'This anonymous layer has no reliable visual match. Keep it inside its parent or name it before exporting it separately.'
-                  : `${taxonomy.model} matched this visual most closely to ${best.label.type.toLowerCase()} components.`,
+          : structureType && learnedType === structureType
+            ? structureType === 'Border'
+              ? 'The rendered artwork has a transparent center with visible perimeter artwork, which identifies it as a border.'
+              : `The rendered size, coverage, and layer kind identify this as a ${structureType.toLowerCase()}.`
+            : genericLowConfidenceVisual
+              ? 'This anonymous layer has no reliable visual match. Keep it inside its parent or name it before exporting it separately.'
+              : `${taxonomy.model} matched this visual most closely to ${best.label.type.toLowerCase()} components.`,
         alternatives: ranked.slice(1, 4).map((candidate) => ({
           assetType: candidate.label.type,
           score: candidate.score,
@@ -581,16 +532,10 @@ export class LocalAiService {
         semanticType,
         semanticConflict,
         semanticConflictMessage: semanticConflict
-          ? semanticCorrectedByStructure
-            ? 'Layer name suggests Frame; rendered structure indicates Background. Kryeo used the rendered result.'
-            : `Layer name suggests ${semanticType}; the visual model leans toward ${best.label.type}. Review this classification.`
+          ? `Layer name suggests ${semanticType}; the visual classifier selected ${learnedType}. A cloud visual review is required.`
           : undefined,
         reviewCategory: reviewCategory(component, learnedType),
-        nameSource: nearest && nearest.similarity >= 0.96
-          ? 'memory'
-          : semanticCorrectedByStructure
-            ? 'visual'
-            : semanticType ? best.label.type === semanticType ? 'both' : 'layer-name' : 'visual',
+        nameSource: nearest && nearest.similarity >= 0.96 ? 'memory' : 'visual',
       });
     });
     return results;

@@ -14,6 +14,7 @@ import type {
   ApplyComponentOrganizationRequest,
   ApplyLayerNamesRequest,
 } from '../shared/types';
+import type { LibraryStoragePaths } from './library-service';
 
 export interface AffinityComponentExport {
   index: number;
@@ -87,6 +88,17 @@ const MIN_COMPONENT_EXPORT_BATCH_WORK = 12;
 const MAX_COMPONENT_EXPORT_BATCH_WORK = 56;
 const FAST_COMPONENT_EXPORT_BATCH_MS = 18_000;
 const SLOW_COMPONENT_EXPORT_BATCH_MS = 42_000;
+// DocumentViewApi.setZoom uses inverse scale rather than the percentage shown
+// by Affinity's UI. On Affinity 3.2, 0.001 produces the maximum practical
+// zoom-in (about 1000%); large values produce a zoomed-out canvas.
+const SCAN_VIEWPORT_MIN_SCALE = 0.001;
+const SCAN_VIEWPORT_MAX_ZOOM_PERCENT = 1_000;
+const SCAN_VIEWPORT_SETTLE_STEP_MS = 100;
+const SCAN_VIEWPORT_SETTLE_ATTEMPTS = 50;
+const SCAN_VIEWPORT_TIMEOUT_MS = 120_000;
+const SCAN_VIEWPORT_READ_MARKER = 'KRYEO_SCAN_VIEWPORT_READ:';
+const SCAN_VIEWPORT_MARKER = 'KRYEO_SCAN_VIEWPORT:';
+const SCAN_VIEWPORT_RESTORE_MARKER = 'KRYEO_SCAN_VIEWPORT_RESTORE:';
 
 type TextContent = { type: 'text'; text: string };
 
@@ -109,6 +121,20 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
       setTimeout(() => reject(new Error('Affinity did not respond in time.')), milliseconds);
     }),
   ]);
+}
+
+export interface AffinityComponentAssetRequest {
+  id: string;
+  name: string;
+  sourcePaths: number[][];
+  sourcePath: string;
+  rasterPath: string;
+}
+
+export interface AffinityComponentAssetResult {
+  id: string;
+  sourcePath: string;
+  rasterPath: string;
 }
 
 function isRecoverableComponentExportError(error: unknown): boolean {
@@ -182,11 +208,6 @@ function toolFromTitle(title: string): KryeoTool {
     icon = 'package';
     displayName = 'Export asset';
     description = 'Export the prepared raster version from an asset document.';
-  } else if (/asset library\s*-\s*setup/i.test(title)) {
-    category = 'Utilities';
-    icon = 'script';
-    displayName = 'Set up library';
-    description = 'Create or refresh the Asset Library folders and support files.';
   } else if (/pixel helper/i.test(title)) {
     category = 'Pixel tools';
     icon = 'wand';
@@ -245,7 +266,34 @@ function instrumentAlerts(code: string): string {
   );
 }
 
+function replaceLibraryFunction(code: string, name: string, replacement: string): string {
+  const pattern = new RegExp(`function ${name}\\(\\) \\{[\\s\\S]*?\\n\\}`);
+  const patched = code.replace(pattern, replacement);
+  if (patched === code) throw new Error(`The installed Asset Library script does not expose ${name} for Kryeo.`);
+  return patched;
+}
+
+function patchLibraryScriptPaths(code: string, paths: LibraryStoragePaths): string {
+  let patched = code;
+  const assets = JSON.stringify(paths.assets);
+  const exportsRoot = JSON.stringify(paths.exports);
+  if (/function configuredLibraryRoot\(\)/.test(patched)) {
+    patched = replaceLibraryFunction(patched, 'configuredLibraryRoot', `function configuredLibraryRoot() { return ${assets}; }`);
+  }
+  if (/function getSetupConfig\(\)/.test(patched)) {
+    patched = replaceLibraryFunction(patched, 'getSetupConfig', `function getSetupConfig() { return { assetsRoot: ${assets}, exportsRoot: ${exportsRoot} }; }`);
+  }
+  if (/function exportRoot\(\)/.test(patched)) {
+    patched = replaceLibraryFunction(patched, 'exportRoot', `function exportRoot() { return ${exportsRoot}; }`);
+  }
+  if (/function libraryRoot\(\)/.test(patched)) {
+    patched = replaceLibraryFunction(patched, 'libraryRoot', `function libraryRoot() { return ${assets}; }`);
+  }
+  return patched;
+}
+
 export class AffinityService {
+  private readonly libraryPaths?: () => Promise<LibraryStoragePaths>;
   private client: Client | null = null;
   private transport: SSEClientTransport | null = null;
   private connecting: Promise<void> | null = null;
@@ -255,6 +303,10 @@ export class AffinityService {
     serverUrl: SERVER_URL,
     checkedAt: new Date().toISOString(),
   };
+
+  constructor(libraryPaths?: () => Promise<LibraryStoragePaths>) {
+    this.libraryPaths = libraryPaths;
+  }
 
   getStatus(): AffinityStatus {
     return this.status;
@@ -295,6 +347,80 @@ export class AffinityService {
     }
   }
 
+  private async prepareScanViewport(): Promise<number | null> {
+    // Read the original zoom in a separate, side-effect-free script. If the
+    // mutation script times out after Affinity has already changed the view,
+    // this value still reaches the finally block and cleanup can restore it.
+    const readScript = `
+'use strict';
+const { DocumentViewApi } = require('affinity:dom');
+const view = DocumentViewApi.getCurrent();
+const zoom = view ? Number(DocumentViewApi.getZoom(view)) : NaN;
+console.log(${JSON.stringify(SCAN_VIEWPORT_READ_MARKER)} + JSON.stringify({
+  zoom: Number.isFinite(zoom) && zoom > 0 ? zoom : null,
+}));`;
+    let originalZoom: number | null = null;
+    try {
+      const result = await this.callTool('execute_script', { script: readScript }, SCAN_VIEWPORT_TIMEOUT_MS);
+      const line = textFromResult(result)
+        .split(/\r?\n/)
+        .find((value) => value.startsWith(SCAN_VIEWPORT_READ_MARKER));
+      if (!line) return null;
+      const payload = JSON.parse(line.slice(SCAN_VIEWPORT_READ_MARKER.length)) as { zoom?: unknown };
+      const zoom = Number(payload.zoom);
+      originalZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : null;
+    } catch {
+      // View optimization is best effort. An SDK/version without DocumentView
+      // support must not prevent the normal component scan from running.
+      return null;
+    }
+    if (originalZoom === null) return null;
+
+    const script = `
+'use strict';
+const { DocumentViewApi } = require('affinity:dom');
+const timers = require('affinity:timers');
+const view = DocumentViewApi.getCurrent();
+let preparedZoom = NaN;
+if (view) {
+  DocumentViewApi.setZoom(view, ${SCAN_VIEWPORT_MIN_SCALE});
+  for (let attempt = 0; attempt < ${SCAN_VIEWPORT_SETTLE_ATTEMPTS}; attempt += 1) {
+    preparedZoom = Number(DocumentViewApi.getZoom(view));
+    if (Number.isFinite(preparedZoom) && preparedZoom >= ${SCAN_VIEWPORT_MAX_ZOOM_PERCENT} * 0.99) break;
+    timers.sleep(${SCAN_VIEWPORT_SETTLE_STEP_MS});
+  }
+}
+console.log(${JSON.stringify(SCAN_VIEWPORT_MARKER)} + JSON.stringify({
+  zoom: ${JSON.stringify(originalZoom)},
+  preparedZoom: Number.isFinite(preparedZoom) && preparedZoom > 0 ? preparedZoom : null,
+}));`;
+    try {
+      await this.callTool('execute_script', { script }, SCAN_VIEWPORT_TIMEOUT_MS);
+    } catch {
+      // Cleanup still runs with the captured original zoom if the mutation
+      // script fails after Affinity has changed the view.
+    }
+    return originalZoom;
+  }
+
+  private async restoreScanViewport(originalZoom: number | null): Promise<void> {
+    if (originalZoom === null) return;
+    const restoreScale = 100 / originalZoom;
+    if (!Number.isFinite(restoreScale) || restoreScale <= 0) return;
+    const script = `
+'use strict';
+const { DocumentViewApi } = require('affinity:dom');
+const view = DocumentViewApi.getCurrent();
+if (view) DocumentViewApi.setZoom(view, ${JSON.stringify(restoreScale)});
+console.log(${JSON.stringify(SCAN_VIEWPORT_RESTORE_MARKER)} + JSON.stringify({ zoom: ${JSON.stringify(originalZoom)} }));`;
+    try {
+      await this.callTool('execute_script', { script }, SCAN_VIEWPORT_TIMEOUT_MS);
+    } catch {
+      // The scan result is still valid if Affinity closes before the viewport
+      // can be restored; do not turn cleanup into a scan failure.
+    }
+  }
+
   async connect(force = false): Promise<void> {
     if (this.client && !force) return;
     if (this.connecting) return this.connecting;
@@ -309,9 +435,12 @@ export class AffinityService {
         transport.onerror = () => {
           if (this.transport === transport) this.markDisconnected(new Error('The Affinity connection was interrupted.'));
         };
+        // Retain the transport before the handshake starts so a timed-out
+        // connect can close its underlying SSE request and not leak a session
+        // in Affinity's local MCP server.
+        this.transport = transport;
         await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS);
         this.client = client;
-        this.transport = transport;
 
         const preamble = await this.callTool('read_sdk_documentation_topic', { filename: 'preamble' });
         if (preamble.isError) throw new Error('Affinity rejected the SDK preamble request.');
@@ -354,7 +483,7 @@ export class AffinityService {
       const result = await this.callTool('list_library_scripts', {});
       const text = textFromResult(result);
       if (result.isError || !text) throw new Error('Affinity returned no scripts.');
-      const titles = text.split(',').map((title) => title.trim()).filter(Boolean);
+      const titles = text.split(',').map((title) => title.trim()).filter((title) => Boolean(title) && !/asset library\s*-\s*setup/i.test(title));
       const tools = newestTools(titles);
       tools.push({
         id: 'place-asset',
@@ -375,11 +504,23 @@ export class AffinityService {
 
   async runTool(title: string): Promise<ScriptRunResult> {
     const startedAt = new Date().toISOString();
+    if (/asset library\s*-\s*setup/i.test(title)) {
+      return {
+        ok: false,
+        title,
+        output: 'Asset Library setup is embedded in Kryeo. Open Assets to manage the library.',
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    }
     await this.connect();
     try {
       const scriptResult = await this.callTool('read_library_script', { title });
-      const code = textFromResult(scriptResult);
+      let code = textFromResult(scriptResult);
       if (scriptResult.isError || !code) throw new Error(`Could not read "${title}" from Affinity.`);
+      if (this.libraryPaths && /asset library\s*-\s*(load|save|update|export)/i.test(title)) {
+        code = patchLibraryScriptPaths(code, await this.libraryPaths());
+      }
 
       const runResult = await this.callTool('execute_script', { script: code });
       const output = textFromResult(runResult);
@@ -458,6 +599,7 @@ console.log('KRYEO_ASSET_OPENED:' + assetPath);
       const scriptResult = await this.callTool('read_library_script', { title: saveTitle });
       let code = textFromResult(scriptResult);
       if (scriptResult.isError || !code) throw new Error(`Could not read "${saveTitle}" from Affinity.`);
+      if (this.libraryPaths) code = patchLibraryScriptPaths(code, await this.libraryPaths());
 
       const dialogStart = code.indexOf('const dlg = buildDialog(defaultName, {');
       const saveStart = code.indexOf('// FIX (v4.24)', dialogStart);
@@ -553,11 +695,21 @@ const baseConfig = {
 
   async runConfiguredTool(request: ConfiguredToolRequest): Promise<ScriptRunResult> {
     const startedAt = new Date().toISOString();
+    if (/asset library\s*-\s*setup/i.test(request.title)) {
+      return {
+        ok: false,
+        title: request.title,
+        output: 'Asset Library setup is embedded in Kryeo. Open Assets to manage the library.',
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    }
     await this.connect();
     try {
       const scriptResult = await this.callTool('read_library_script', { title: request.title });
       let code = textFromResult(scriptResult);
       if (scriptResult.isError || !code) throw new Error(`Could not read "${request.title}" from Affinity.`);
+      if (this.libraryPaths) code = patchLibraryScriptPaths(code, await this.libraryPaths());
       const value = (key: string, fallback: string | number | boolean) => JSON.stringify(request.values[key] ?? fallback);
 
       if (request.kind === 'export') {
@@ -567,15 +719,6 @@ const dlg = {
   preset: { text: ${value('preset', 'PNG (Pixel)')} },
   latest: { value: ${value('latest', true)} },
   stable: { value: ${value('stable', true)} },
-};`);
-      } else if (request.kind === 'setup') {
-        code = replaceModalBlock(code, 'const dlg = buildDialog(defaults);', `const dlg = {
-  home: { text: ${value('home', '')} },
-  assets: { text: ${value('assets', '')} },
-  exports: { text: ${value('exports', '')} },
-  controlPanel: { value: ${value('controlPanel', true)} },
-  openers: { value: ${value('openers', true)} },
-  overwrite: { value: ${value('overwrite', true)} },
 };`);
       } else if (request.kind === 'update') {
         code = replaceModalBlock(code, 'const dlg = buildUpdateDialog(doc, root, globalIndex, currentRecord);', `const dlg = {
@@ -912,25 +1055,28 @@ console.log('KRYEO_ASSISTANT_PREVIEW:' + JSON.stringify({
     };
     assertActive();
     await this.connect();
-    // Affinity's MCP endpoint has a finite execution window. Partition the
-    // document at its top-level component sections so traversal and rendering
-    // never depend on one monolithic whole-document script.
-    let chunkSize = INITIAL_COMPONENT_EXPORT_PARTITIONS;
-    let workBudget = INITIAL_COMPONENT_EXPORT_BATCH_WORK;
-    let start = 0;
-    let totalPartitions = Number.POSITIVE_INFINITY;
-    let firstBatch: AffinityComponentExportBatch | null = null;
-    let partitionPlan: AffinityScanPartitionPlan[] = [];
-    let partitionPlanReady = scope !== 'document';
-    const components: AffinityComponentExport[] = [];
-    let totalCandidates = 0;
-    const singlePartitionRetries = new Set<string>();
-    let requestCount = 0;
-    let retryCount = 0;
-    let splitCount = 0;
-    let totalRequestMs = 0;
-    let slowestRequestMs = 0;
-    while (start < totalPartitions) {
+    let originalViewportZoom: number | null = null;
+    try {
+      originalViewportZoom = await this.prepareScanViewport();
+      // Affinity's MCP endpoint has a finite execution window. Partition the
+      // document at its top-level component sections so traversal and rendering
+      // never depend on one monolithic whole-document script.
+      let chunkSize = INITIAL_COMPONENT_EXPORT_PARTITIONS;
+      let workBudget = INITIAL_COMPONENT_EXPORT_BATCH_WORK;
+      let start = 0;
+      let totalPartitions = Number.POSITIVE_INFINITY;
+      let firstBatch: AffinityComponentExportBatch | null = null;
+      let partitionPlan: AffinityScanPartitionPlan[] = [];
+      let partitionPlanReady = scope !== 'document';
+      const components: AffinityComponentExport[] = [];
+      let totalCandidates = 0;
+      const singlePartitionRetries = new Set<string>();
+      let requestCount = 0;
+      let retryCount = 0;
+      let splitCount = 0;
+      let totalRequestMs = 0;
+      let slowestRequestMs = 0;
+      while (start < totalPartitions) {
       assertActive();
       const planning = !partitionPlanReady;
       const requestedPartitionCount = planning
@@ -1159,6 +1305,21 @@ function pushSectionPartitions(node, path, parentPath, parentName, ancestors, pa
   const children = childNodes(node);
   const currentType = nodeType(node);
   const subtreeDescendants = nodeDescendantCount(node);
+  // A non-generic editable group is itself meaningful source artwork, even
+  // when it must be split into smaller export partitions for reliability.
+  // Omitting it here leaves its construction layers loose and lets an
+  // equivalent flattened RasterNode become the only visible asset boundary.
+  const retainEditableParent = depth < 6
+    && children.length > 0
+    && children.length <= 16
+    && subtreeDescendants <= 96
+    && !genericLayerName(node)
+    && !/Container|Artboard|Spread/i.test(currentType);
+  if (retainEditableParent) {
+    pushPartition(node, path, parentPath, parentName, ancestors, parentType, parentHierarchyKey, hierarchyDepth, 'candidate');
+  }
+  const childParentHierarchyKey = retainEditableParent ? hierarchyKey(path) : parentHierarchyKey;
+  const childHierarchyDepth = retainEditableParent ? hierarchyDepth + 1 : hierarchyDepth;
   // A single export has to finish inside Affinity's fixed remote MCP window.
   // Split any dense subtree, regardless of its concrete Affinity node type:
   // imported/live groups do not consistently identify as a "Group" even when
@@ -1176,8 +1337,8 @@ function pushSectionPartitions(node, path, parentPath, parentName, ancestors, pa
         nodeName(node),
         ancestors.concat(node),
         currentType,
-        parentHierarchyKey,
-        hierarchyDepth,
+        childParentHierarchyKey,
+        childHierarchyDepth,
         depth + 1,
       );
       childIndex += 1;
@@ -1222,9 +1383,13 @@ if (providedPartitions.length > 0) {
       const type = nodeType(node);
       const parentName = 'Spread ' + (spreadIndex + 1);
       const topTypeIsComponent = !/Container|Artboard|Spread/i.test(type);
+      // A named top-level assembly is still a real editable component when it
+      // has a repeated set of children. The old <=2 limit dropped collection
+      // groups such as a slot strip before the parent-vs-raster decision ran.
       const retainedParent = topTypeIsComponent
-        && children.length <= 2
-        && nodeDescendantCount(node) <= 24;
+        && !genericLayerName(node)
+        && children.length <= 16
+        && nodeDescendantCount(node) <= 96;
       if (children.length === 0) {
         pushPartition(node, path, [spreadIndex], parentName, [], 'Spread', '', 0, 'subtree');
       } else {
@@ -1446,11 +1611,27 @@ try {
       for (const record of records.all) if (record.isSuccess) success = true;
     } catch (_) {
       // Some live-adjustment groups are valid structural parents but cannot be
-      // exported directly. Keep scanning and attach a child preview below.
+      // exported directly. A group preview must still represent its complete
+      // assembled image: substituting its first child makes a real editable
+      // component look unrelated to an equivalent flattened RasterNode.
       success = false;
-    } finally {
-      restoreVisibility(localChangedNodes, localChangedStates);
     }
+    if (!success && childCount > 0) {
+      try {
+        const directChildren = [];
+        for (const child of node.children) directChildren.push(child);
+        if (directChildren.length) {
+          const childSelection = Selection.create(doc, directChildren, true);
+          doc.selection = childSelection;
+          const childRecords = doc.export(outputPath, options, FileExportArea.createForSelection(childSelection));
+          for (const record of childRecords.all) if (record.isSuccess) success = true;
+        }
+      } catch (_) {
+        // The structural fallback below remains available only when even the
+        // direct-child composite cannot be rendered by Affinity.
+      }
+    }
+    restoreVisibility(localChangedNodes, localChangedStates);
     const componentRecord = {
       index: exportIndex,
       name: cluster.length > 1 && cluster[0].parentName ? cluster[0].parentName : nodeName(node),
@@ -1604,9 +1785,22 @@ console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
       start = end;
     }
     if (!firstBatch) throw new Error('Affinity could not scan the document components.');
+    // Parent-preserving partitions intentionally overlap child partitions.
+    // Affinity identifies a source node by its hierarchy path, so collapse
+    // those transport-level overlaps before candidates enter visual analysis.
+    // This is not visual deduplication: distinct nodes with matching pixels
+    // remain available for the editable-group preference stage.
+    const componentsByHierarchy = new Map<string, AffinityComponentExport>();
+    for (const component of components) {
+      const key = component.hierarchyKey || `index:${component.index}`;
+      const current = componentsByHierarchy.get(key);
+      if (!current || (component.childCount > current.childCount)) {
+        componentsByHierarchy.set(key, component);
+      }
+    }
     return {
       ...firstBatch,
-      components: components.sort((left, right) => left.index - right.index),
+      components: [...componentsByHierarchy.values()].sort((left, right) => left.index - right.index),
       totalCandidates,
       exportDiagnostics: {
         requestCount,
@@ -1616,6 +1810,9 @@ console.log('KRYEO_COMPONENT_SCAN:' + JSON.stringify({
         averageRequestMs: Math.round(totalRequestMs / Math.max(1, requestCount)),
       },
     };
+    } finally {
+      await this.restoreScanViewport(originalViewportZoom);
+    }
   }
 
   private async splitComponentScanPartition(partition: AffinityScanPartitionPlan): Promise<AffinityScanPartitionPlan[]> {
@@ -1819,6 +2016,7 @@ function itemAt(collection, wanted) {
     if (index === wanted) return item;
     index += 1;
   }
+
   return null;
 }
 function resolvePath(path) {
@@ -1859,6 +2057,56 @@ console.log('KRYEO_LAYERS_NAMED:' + JSON.stringify({ count: renamed.length, titl
         completedAt: new Date().toISOString(),
       };
     }
+  }
+
+  async exportConfirmedComponentAssets(documentSessionUuid: string, assets: AffinityComponentAssetRequest[]): Promise<AffinityComponentAssetResult[]> {
+    if (!assets.length) return [];
+    await this.connect();
+    const script = `
+'use strict';
+const { Document, FileExportArea, FileExportOptions } = require('/document');
+const { Selection } = require('/selections');
+const { DocumentCommand } = require('/commands');
+const request = ${JSON.stringify({ documentSessionUuid, assets })};
+const doc = Document.current;
+if (!doc || String(doc.sessionUuid || '') !== request.documentSessionUuid) throw new Error('The active Affinity document changed after Component Scan. Scan it again before creating assets.');
+function at(collection, wanted) { let i = 0; for (const item of collection) { if (i++ === wanted) return item; } return null; }
+function resolve(target, parts) { let node = at(target.spreads, parts[0]); for (let i = 1; node && i < parts.length; i += 1) node = at(node.children, parts[i]); return node; }
+function children(node) { const output = []; try { for (const child of node.children) output.push(child); } catch (_) {} return output; }
+function retain(target, selected) {
+  const keep = new Set();
+  const mark = (node) => { keep.add(node); for (const child of children(node)) mark(child); };
+  for (const node of selected) mark(node);
+  const visit = (node) => { if (keep.has(node)) return; let hasKeptChild = false; for (const child of children(node)) { visit(child); if (keep.has(child)) hasKeptChild = true; } if (hasKeptChild) keep.add(node); else target.executeCommand(DocumentCommand.createDeleteSelection(Selection.create(target, node, true), true)); };
+  for (const spread of target.spreads) for (const node of children(spread)) visit(node);
+}
+const snapshotCount = doc.snapshots.length;
+doc.executeCommand(DocumentCommand.createAddDocumentSnapshot('Kryeo component export'), false);
+const snapshot = doc.snapshots[snapshotCount];
+if (!snapshot) throw new Error('Affinity could not create a safe component snapshot.');
+const output = [];
+try {
+  for (const asset of request.assets) {
+    const clone = snapshot.createDocument();
+    try {
+      const selected = asset.sourcePaths.map((parts) => resolve(clone, parts));
+      if (selected.some((node) => !node)) throw new Error('The Affinity layer hierarchy changed after scanning.');
+      retain(clone, selected);
+      clone.saveAs(asset.sourcePath);
+      const records = clone.export(asset.rasterPath, FileExportOptions.createWithPresetName('PNG'), FileExportArea.createForSelection(Selection.create(clone, selected, true)));
+      let exported = false; for (const record of records.all) if (record.isSuccess) exported = true;
+      if (!exported) throw new Error('Affinity could not export the component PNG.');
+      output.push({ id: asset.id, sourcePath: asset.sourcePath, rasterPath: asset.rasterPath });
+    } finally { try { clone.close(); } catch (_) {} }
+  }
+} finally { try { doc.executeCommand(DocumentCommand.createDeleteDocumentSnapshot(snapshot), false); } catch (_) {} }
+console.log('KRYEO_COMPONENT_ASSETS:' + JSON.stringify(output));`;
+    const result = await this.callTool('execute_script', { script }, 240_000);
+    const output = textFromResult(result);
+    const marker = 'KRYEO_COMPONENT_ASSETS:';
+    const index = output.lastIndexOf(marker);
+    if (result.isError || index < 0) throw new Error(output || 'Affinity could not create the component assets.');
+    return JSON.parse(output.slice(index + marker.length).split(/\r?\n/, 1)[0]) as AffinityComponentAssetResult[];
   }
 
   async close(): Promise<void> {

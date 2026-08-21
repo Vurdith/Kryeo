@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { nameMeaninglessness } from '../src/main/name-quality.ts';
 
 const meaningless = [
-  '10570641.jpg',
+  'asset-0001.png',
   'Layer10',
-  'IMG_20260726_124500.png',
+  'IMG_20240101_000000.png',
   'a81f0c928bb44e4d',
   'xqzplmnr',
   'wut',
@@ -12,11 +12,11 @@ const meaningless = [
 
 const meaningful = [
   'Grid',
-  'OuterBorders',
-  'Character Menu Stat Slot',
-  'BaseHotbarFrame',
-  'SanityBar',
-  'Checkered Texture',
+  'Panel Assembly',
+  'Sample Panel Status Slot',
+  'Base Panel Frame',
+  'Status Meter',
+  'Pattern Texture',
 ];
 
 for (const name of meaningless) {

@@ -41,7 +41,7 @@ export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancell
 
 export interface JobRecord {
   id: string;
-  operation: 'tool' | 'open' | 'save' | 'configured' | 'place' | 'auto-export' | 'delivery' | 'cleanup';
+  operation: 'tool' | 'open' | 'save' | 'configured' | 'place' | 'delivery' | 'cleanup';
   title: string;
   status: JobStatus;
   progress: number;
@@ -52,15 +52,6 @@ export interface JobRecord {
   completedAt: string;
   output: string;
   cancelRequested: boolean;
-}
-
-export interface ProjectRecipe {
-  project: string;
-  autoExport: boolean;
-  outputRoot: string;
-  preset: string;
-  source: 'master' | 'base' | 'raster';
-  targets: Array<'folder' | 'roblox'>;
 }
 
 export interface WorkflowPreset {
@@ -92,10 +83,18 @@ export interface AssetPreference {
 export type RobloxUiRole = 'Unknown' | 'ImageButton' | 'ImageLabel' | 'Frame' | 'TextButton' | 'TextLabel' | 'TextBox';
 export type ComponentAssetType = 'Unknown' | 'Frame' | 'Button' | 'Icon' | 'Panel' | 'Slot' | 'Bar' | 'Badge' | 'Label' | 'Text' | 'TextBox' | 'ScrollBar' | 'Divider' | 'Background' | 'Wallpaper' | 'Texture' | 'Overlay' | 'Cursor' | 'Tooltip' | 'Modal' | 'Input' | 'Tab' | 'Tile' | 'Ornament' | 'Border' | 'Corner' | 'Edge' | 'Fill' | 'FX';
 export type ComponentScanScope = 'document' | 'selection';
+export type ComponentScanMode = 'smart' | 'group-first' | 'layer-inclusive';
 export type ComponentDiveMode = 'keep-together' | 'children-only' | 'parent-and-children';
+/**
+ * Structural ownership is decided before semantic classification. It answers
+ * which rendered node is a real export decision, without inventing a name or
+ * type from document-specific hierarchy text.
+ */
+export type ComponentAssetBoundary = 'standalone' | 'composed-parent' | 'construction-child' | 'organizational-parent' | 'duplicate-representation';
 export type ComponentAnalysisSource = 'approved-family' | 'hosted-family' | 'local-provisional' | 'unavailable';
 export type ComponentAnalysisState = 'approved' | 'analyzed' | 'provisional' | 'needs-review' | 'queued';
 export type ComponentReviewPriority = 'ready' | 'check' | 'critical';
+export type ComponentDecisionStatus = 'generated' | 'accepted' | 'corrected';
 
 export interface ComponentDecision {
   visualHash: string;
@@ -105,10 +104,18 @@ export interface ComponentDecision {
   project?: string;
   scope?: 'project' | 'library' | 'global';
   approved?: boolean;
+  /** Generated results are cache only; accepted/corrected results may influence future scans. */
+  decisionStatus?: ComponentDecisionStatus;
   analysisSource?: ComponentAnalysisSource;
   role: RobloxUiRole;
   assetType?: ComponentAssetType;
+  /** Canonical AI-owned asset identity. */
   familyName: string;
+  /** Legacy mirror of familyName, kept for existing workspace data. */
+  layerLabel?: string;
+  /** Legacy mirror of familyName, used by manifests and export organization. */
+  exportName?: string;
+  codeName?: string;
   semanticHint?: string;
   suggestedName?: string;
   suggestedType?: ComponentAssetType;
@@ -123,6 +130,12 @@ export interface ComponentDecision {
     originalName?: string;
     originalType?: ComponentAssetType;
     originalRole?: RobloxUiRole;
+  };
+  /** Generalized evidence from a user correction; never stores artwork-specific rules. */
+  learningContext?: {
+    visualStructureType?: ComponentAssetType;
+    sourceTypeHint?: ComponentAssetType;
+    hierarchyKind: 'standalone' | 'composed-parent' | 'construction-child';
   };
   influenceCount?: number;
   lastInfluencedAt?: string;
@@ -172,9 +185,37 @@ export interface ComponentCandidate {
   analysisPreviewUrls?: string[];
   visualMetrics?: ComponentVisualMetrics;
   visualHash: string;
+  /** Rendered-pixel identity retained when a structural fallback needs its own analysis hash. */
+  renderHash?: string;
   duplicateFamily: string;
   duplicateCount: number;
+  /** Legacy semantic family identity returned by analysis. */
   familyName: string;
+  /** Readable label for the Affinity/document hierarchy. */
+  layerLabel?: string;
+  /** Production name used only when this node is exported as an asset. */
+  exportName?: string;
+  /** Deterministic snake_case identity used by files, manifests, and Roblox handoff. */
+  codeName?: string;
+  /** Whether the current hierarchy policy exports this node itself. */
+  exportTarget?: boolean;
+  /** Structural relationship to the export decision selected for this node. */
+  assetBoundary?: ComponentAssetBoundary;
+  /** Hierarchy key of the owning export node when this node is not standalone. */
+  boundaryOwnerHierarchyKey?: string;
+  /** Context-scoped identity used to prevent global pixel hashes from smearing decisions across a document. */
+  decisionScopeKey?: string;
+  /** Boundary plan captured before semantic AI classification; only an explicit user grouping edit may replace it. */
+  structuralDiveMode?: ComponentDiveMode;
+  /** Human-readable structural explanation; never used as naming evidence. */
+  boundaryReason?: string;
+  /** Short explanation of how the structural/export names were derived. */
+  namingReason?: string;
+  /** Contract violations that require an exception instead of silent automation. */
+  namingIssues?: string[];
+  robloxClassReason?: string;
+  automationState?: 'ready' | 'exception';
+  automationIssues?: string[];
   suggestedRole: RobloxUiRole;
   role: RobloxUiRole;
   assetType: ComponentAssetType;
@@ -298,6 +339,24 @@ export interface ComponentVisualFamily {
   fingerprint: string;
   project: string;
   documentTitle: string;
+  /** Opaque structural scope used to plan related visual names together. */
+  namingScopeKey?: string;
+  /** Decision scope prevents visually identical nodes in different hierarchy roles from sharing one semantic packet. */
+  decisionScopeKey?: string;
+  /** Whether this family is a standalone asset or an editable composed parent. */
+  assetBoundary?: ComponentAssetBoundary;
+  /**
+   * Hierarchy planning is fixed before visual semantics are requested. The
+   * model reports this value as part of its atomic packet but cannot silently
+   * turn a parent into loose children (or the reverse) during naming.
+   */
+  structuralDiveMode?: ComponentDiveMode;
+  /** One-based document order among export-capable siblings in the immediate scope. */
+  siblingOrdinal?: number;
+  /** Number of export-capable siblings in the immediate scope. */
+  siblingCount?: number;
+  /** Supporting direct-child visuals for a composed parent; never receive this family's semantic decision. */
+  contextMembers?: ComponentFamilyMember[];
   parentNames: string[];
   members: ComponentFamilyMember[];
   representativeHash: string;
@@ -328,12 +387,6 @@ export interface ComponentFamilyReviewSignals {
 }
 
 export type HostedReviewTier = 'lite' | 'escalation';
-
-export interface HostedFamilyContactSheet {
-  previewUrl: string;
-  /** Cell order is one-based and matches this array's order. */
-  familyIds: string[];
-}
 
 export interface HostedFamilyReviewPlan {
   tier: 'local' | HostedReviewTier;
@@ -379,11 +432,20 @@ export interface HostedFamilyAnalysisRequest {
   includeDocumentContext?: boolean;
   maxMemberImages?: number;
   hostedScanId?: string;
-  familyContactSheet?: HostedFamilyContactSheet;
   serviceTier?: 'default' | 'flex' | 'priority' | 'scale';
 }
 
+export interface HostedFamilyBatchReviewRequest extends HostedFamilyAnalysisRequest {
+  currentAnalyses: HostedFamilyAnalysis[];
+  challengeReasons: Record<string, string[]>;
+}
+
 export interface HostedFamilyEvidenceRequest {
+  hostedScanId?: string;
+  challengeReasons?: string[];
+  peerDecisionNames?: string[];
+  siblingOrdinal?: number;
+  siblingCount?: number;
   familyFingerprint?: string;
   visualHash: string;
   familyName: string;
@@ -417,6 +479,8 @@ export interface HostedFamilyEvidenceResult {
   suggestedRole?: RobloxUiRole;
   alternatives: Array<{ assetType: ComponentAssetType; reason: string }>;
   cached: boolean;
+  scanProviderCostUsd?: number;
+  scanProviderRequests?: number;
 }
 
 export interface HostedAiUsage {
@@ -531,6 +595,56 @@ export interface ComponentScanProgress {
   hostedFamilies?: number;
   budgetLimitedFamilies?: number;
   partialResult?: ComponentScanResult;
+  trace?: ComponentScanTraceEntry;
+}
+
+/** Opt-in diagnostic record. It never contains image bytes, prompts, or API keys. */
+export interface ComponentScanTraceEntry {
+  at: string;
+  stage: string;
+  message: string;
+  data?: Record<string, string | number | boolean>;
+}
+
+export type DeveloperLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface DeveloperLogEntry {
+  id: string;
+  at: string;
+  level: DeveloperLogLevel;
+  source: string;
+  event: string;
+  message: string;
+  data?: unknown;
+}
+
+export interface DeveloperLogSnapshot {
+  enabled: boolean;
+  entries: DeveloperLogEntry[];
+  filePath: string;
+}
+
+export interface ScanIntentAnswer {
+  id: 'ungrouped-layers' | 'repeated-children' | 'document-purpose';
+  value: string;
+}
+
+/** A compact, user-confirmed interpretation of how this Affinity document becomes assets. */
+export interface ScanIntentProfile {
+  id: string;
+  project: string;
+  documentTitle: string;
+  structureFingerprint: string;
+  mode: ComponentScanMode;
+  answers: ScanIntentAnswer[];
+  updatedAt: string;
+}
+
+export interface ComponentScanRequest {
+  scope?: ComponentScanScope;
+  intent?: Pick<ScanIntentProfile, 'mode' | 'answers'>;
+  /** Enables local, verbose scan tracing for troubleshooting. */
+  developerMode?: boolean;
 }
 
 export interface HostedAiConfiguration {
@@ -542,6 +656,9 @@ export interface ComponentManifestNode {
   id: string;
   parentId: string;
   familyName: string;
+  layerLabel?: string;
+  exportName?: string;
+  codeName?: string;
   assetType: ComponentAssetType;
   category: string;
   subcategory: string;
@@ -560,6 +677,7 @@ export interface ComponentHierarchyManifest {
   documentSessionUuid: string;
   createdAt: string;
   path: string;
+  scanIntent?: Pick<ScanIntentProfile, 'mode' | 'answers' | 'structureFingerprint'>;
   nodes: ComponentManifestNode[];
 }
 
@@ -569,6 +687,12 @@ export interface SaveComponentReviewRequest {
   documentSessionUuid: string;
   components: ComponentCandidate[];
   includedIds: string[];
+  decisionStatus?: ComponentDecisionStatus;
+  scanIntent?: Pick<ScanIntentProfile, 'mode' | 'answers' | 'structureFingerprint'>;
+}
+
+export interface CreateComponentAssetsRequest extends SaveComponentReviewRequest {
+  structureFingerprint: string;
 }
 
 export interface ApplyComponentOrganizationRequest {
@@ -611,6 +735,7 @@ export interface ComponentScanDiagnostics {
   failureMessages: string[];
   notes: string[];
   warnings: string[];
+  trace?: ComponentScanTraceEntry[];
 }
 
 export interface ComponentScanResult {
@@ -628,17 +753,18 @@ export interface ComponentScanResult {
   hostedProviderCostUsd?: number;
   hostedTargetUsd?: number;
   hostedBudgetUsd?: number;
+  scanIntent?: Pick<ScanIntentProfile, 'mode' | 'answers' | 'structureFingerprint'>;
   diagnostics?: ComponentScanDiagnostics;
 }
 
 export interface WorkspaceSnapshot {
   jobs: JobRecord[];
-  recipes: ProjectRecipe[];
   presets: WorkflowPreset[];
   links: PlacementLink[];
   preferences: AssetPreference[];
   componentDecisions: ComponentDecision[];
   componentManifests: ComponentHierarchyManifest[];
+  scanIntentProfiles: ScanIntentProfile[];
   assistantMemories: AssistantMemory[];
   assistantSessions: AssistantSession[];
   assistantMessages: AssistantMessage[];
@@ -770,7 +896,7 @@ export interface SaveAssetRequest {
   rasterCopy: boolean;
 }
 
-export type ConfiguredToolKind = 'export' | 'setup' | 'update' | 'shade';
+export type ConfiguredToolKind = 'export' | 'update' | 'shade';
 
 export interface ConfiguredToolRequest {
   kind: ConfiguredToolKind;
@@ -808,6 +934,9 @@ export interface AssetRecord {
     nodeCount?: number;
     hasLiveFilters?: boolean;
     hasAdjustments?: boolean;
+    robloxClass?: RobloxUiRole;
+    sourcePaths?: number[][];
+    bounds?: ComponentBounds;
   };
 }
 
@@ -889,17 +1018,17 @@ export interface KryeoApi {
   getConnectors(): Promise<ConnectorSnapshot>;
   refreshConnectors(): Promise<ConnectorSnapshot>;
   getWorkspace(): Promise<WorkspaceSnapshot>;
+  setDeveloperMode(enabled: boolean): Promise<DeveloperLogSnapshot>;
+  getDeveloperLog(): Promise<DeveloperLogSnapshot>;
+  clearDeveloperLog(): Promise<DeveloperLogSnapshot>;
+  onDeveloperLog(listener: (entry: DeveloperLogEntry) => void): () => void;
   cancelJob(id: string): Promise<boolean>;
-  saveRecipe(recipe: ProjectRecipe): Promise<WorkspaceSnapshot>;
-  chooseExportFolder(): Promise<string>;
-  runAutoExport(project: string): Promise<ScriptRunResult>;
-  openExportFolder(project: string): Promise<boolean>;
   savePreset(preset: Omit<WorkflowPreset, 'id' | 'updatedAt'> & { id?: string }): Promise<WorkspaceSnapshot>;
   deletePreset(id: string): Promise<WorkspaceSnapshot>;
   setAssetPreference(preference: AssetPreference): Promise<WorkspaceSnapshot>;
   deliverProject(project: string, target: 'roblox'): Promise<DeliveryResult>;
   cleanupStaging(): Promise<ScriptRunResult>;
-  scanComponents(scope?: ComponentScanScope): Promise<ComponentScanResult>;
+  scanComponents(request?: ComponentScanScope | ComponentScanRequest): Promise<ComponentScanResult>;
   cancelComponentScan(): Promise<boolean>;
   onComponentScanProgress(listener: (progress: ComponentScanProgress) => void): () => void;
   getLocalAiStatus(): Promise<LocalAiStatus>;
@@ -914,6 +1043,8 @@ export interface KryeoApi {
   setComponentDecisionScope(visualHash: string, scope: 'project' | 'global'): Promise<WorkspaceSnapshot>;
   clearComponentDecisions(): Promise<WorkspaceSnapshot>;
   saveComponentReview(request: SaveComponentReviewRequest): Promise<WorkspaceSnapshot>;
+  createComponentAssets(request: CreateComponentAssetsRequest): Promise<ScriptRunResult>;
+  saveScanIntentProfile(profile: Omit<ScanIntentProfile, 'id' | 'updatedAt'> & { id?: string }): Promise<WorkspaceSnapshot>;
   getAssistantStatus(): Promise<AssistantStatus>;
   installAssistant(modelPack?: 'portable' | 'balanced'): Promise<AssistantStatus>;
   chatWithAssistant(request: AssistantChatRequest): Promise<AssistantChatResponse>;

@@ -1,0 +1,17 @@
+[package]
+name = "kryeo-desktop-next"
+version = "0.1.0"
+description = "Kryeo's Tauri desktop shell"
+authors = ["Kryeo"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.7.2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

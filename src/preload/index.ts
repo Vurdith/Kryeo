@@ -5,12 +5,20 @@ const api: KryeoApi = {
   getStatus: () => ipcRenderer.invoke('kryeo:get-status'),
   reconnect: () => ipcRenderer.invoke('kryeo:reconnect'),
   getDocumentContext: () => ipcRenderer.invoke('kryeo:get-document-context'),
-  scanComponents: (scope = 'document') => ipcRenderer.invoke('kryeo:scan-components', scope),
+  scanComponents: (request = 'document') => ipcRenderer.invoke('kryeo:scan-components', request),
   cancelComponentScan: () => ipcRenderer.invoke('kryeo:cancel-component-scan'),
   onComponentScanProgress: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: Parameters<typeof listener>[0]) => listener(progress);
     ipcRenderer.on('kryeo:scan-progress', handler);
     return () => ipcRenderer.removeListener('kryeo:scan-progress', handler);
+  },
+  setDeveloperMode: (enabled) => ipcRenderer.invoke('kryeo:set-developer-mode', enabled),
+  getDeveloperLog: () => ipcRenderer.invoke('kryeo:get-developer-log'),
+  clearDeveloperLog: () => ipcRenderer.invoke('kryeo:clear-developer-log'),
+  onDeveloperLog: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, entry: Parameters<typeof listener>[0]) => listener(entry);
+    ipcRenderer.on('kryeo:developer-log', handler);
+    return () => ipcRenderer.removeListener('kryeo:developer-log', handler);
   },
   getLocalAiStatus: () => ipcRenderer.invoke('kryeo:get-local-ai-status'),
   getHostedAiStatus: () => ipcRenderer.invoke('kryeo:get-hosted-ai-status'),
@@ -39,6 +47,8 @@ const api: KryeoApi = {
   setComponentDecisionScope: (visualHash, scope) => ipcRenderer.invoke('kryeo:set-component-decision-scope', visualHash, scope),
   clearComponentDecisions: () => ipcRenderer.invoke('kryeo:clear-component-decisions'),
   saveComponentReview: (request) => ipcRenderer.invoke('kryeo:save-component-review', request),
+  createComponentAssets: (request) => ipcRenderer.invoke('kryeo:create-component-assets', request),
+  saveScanIntentProfile: (profile) => ipcRenderer.invoke('kryeo:save-scan-intent-profile', profile),
   listTools: () => ipcRenderer.invoke('kryeo:list-tools'),
   runTool: (title) => ipcRenderer.invoke('kryeo:run-tool', title),
   openAsset: (path, displayName) => ipcRenderer.invoke('kryeo:open-asset', path, displayName),
@@ -52,10 +62,6 @@ const api: KryeoApi = {
   refreshConnectors: () => ipcRenderer.invoke('kryeo:refresh-connectors'),
   getWorkspace: () => ipcRenderer.invoke('kryeo:get-workspace'),
   cancelJob: (id) => ipcRenderer.invoke('kryeo:cancel-job', id),
-  saveRecipe: (recipe) => ipcRenderer.invoke('kryeo:save-recipe', recipe),
-  chooseExportFolder: () => ipcRenderer.invoke('kryeo:choose-export-folder'),
-  runAutoExport: (project) => ipcRenderer.invoke('kryeo:run-auto-export', project),
-  openExportFolder: (project) => ipcRenderer.invoke('kryeo:open-export-folder', project),
   savePreset: (preset) => ipcRenderer.invoke('kryeo:save-preset', preset),
   deletePreset: (id) => ipcRenderer.invoke('kryeo:delete-preset', id),
   setAssetPreference: (preference) => ipcRenderer.invoke('kryeo:set-asset-preference', preference),

@@ -8,7 +8,7 @@ await fs.rm(root, { recursive: true, force: true });
 const service = new WorkspaceService(() => root);
 
 let snapshot = await service.saveProjectNote({
-  project: 'Devil Hunter',
+  project: 'Example Project',
   text: 'Brush: Textured Shadow. Palette uses #FF5733 and #3357FF.',
   tags: ['brush', 'style:pixel'],
 });
@@ -18,7 +18,7 @@ assert.deepEqual(snapshot.projectKnowledge[0].metadata.brushes, ['Textured Shado
 assert.equal(snapshot.projectKnowledge[0].metadata.colors?.color1, '#FF5733');
 assert.equal(snapshot.projectKnowledge[0].metadata.design?.style, 'pixel');
 
-snapshot = await service.mergeProjectKnowledge('Devil Hunter', {
+snapshot = await service.mergeProjectKnowledge('Example Project', {
   project: 'Imported',
   notes: [{ id: 'foreign', text: 'Keep the moon icons blue.', tags: ['color'], createdAt: '', updatedAt: '' }],
   metadata: { design: { mood: 'occult' } },
@@ -29,7 +29,7 @@ assert.equal(snapshot.projectKnowledge[0].metadata.design?.mood, 'occult');
 assert.equal(snapshot.projectKnowledge[0].metadata.design?.style, 'pixel');
 
 const noteId = snapshot.projectKnowledge[0].notes[0].id;
-snapshot = await service.deleteProjectNote('Devil Hunter', noteId);
+snapshot = await service.deleteProjectNote('Example Project', noteId);
 assert.equal(snapshot.projectKnowledge[0].notes.length, 1);
 
 console.log(JSON.stringify(snapshot.projectKnowledge[0], null, 2));

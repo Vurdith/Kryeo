@@ -7,8 +7,8 @@ Kryeo uses a hybrid visual-family pipeline.
 3. MobileCLIP creates embeddings only for visual grouping and approved-memory retrieval.
 4. Approved visual families are reused without a network request.
 5. Novel families are sent together to the authenticated Kryeo AI server.
-6. Qwen analyses each family using its visuals, hierarchy, sibling context, project rules, and meaningful layer names.
-7. A text-only reconciliation pass checks the complete document for inconsistent names, types, and roles.
+6. Qwen analyses each family using its labelled target PNG, hierarchy, sibling context, project rules, and meaningful layer names.
+7. One deterministic local resolver validates each complete packet and applies a bounded independent visual review only when evidence conflicts.
 8. The user approves or corrects the review. That family decision is stored for the project and reused later.
 
 Local embeddings never decide semantic asset types. There are no confidence percentages in the review UI. If hosted analysis is unavailable, unresolved values remain visibly provisional.

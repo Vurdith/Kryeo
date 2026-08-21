@@ -7,25 +7,25 @@ const root = path.resolve('tmp', 'assistant-session-smoke');
 await fs.rm(root, { recursive: true, force: true });
 const service = new WorkspaceService(() => root);
 
-let snapshot = await service.createAssistantSession('Devil Hunter');
+let snapshot = await service.createAssistantSession('Example Project');
 const session = snapshot.assistantSessions[0];
 assert.equal(session.title, 'New conversation');
 
 snapshot = await service.saveAssistantExchange(
-  { id: 'user', project: 'Devil Hunter', sessionId: session.id, role: 'user', text: 'Review the hotbar hierarchy', createdAt: new Date().toISOString() },
-  { id: 'assistant', project: 'Devil Hunter', sessionId: session.id, role: 'assistant', text: 'Ready to review it.', createdAt: new Date().toISOString() },
-  [{ id: 'memory', project: 'Devil Hunter', scope: 'project', kind: 'hierarchy', text: 'Keep borders inside slots.', createdAt: new Date().toISOString() }],
+  { id: 'user', project: 'Example Project', sessionId: session.id, role: 'user', text: 'Review the inventory hierarchy', createdAt: new Date().toISOString() },
+  { id: 'assistant', project: 'Example Project', sessionId: session.id, role: 'assistant', text: 'Ready to review it.', createdAt: new Date().toISOString() },
+  [{ id: 'memory', project: 'Example Project', scope: 'project', kind: 'hierarchy', text: 'Keep borders inside slots.', createdAt: new Date().toISOString() }],
 );
-assert.equal(snapshot.assistantSessions[0].title, 'Review the hotbar hierarchy');
+assert.equal(snapshot.assistantSessions[0].title, 'Review the inventory hierarchy');
 assert.equal(snapshot.assistantMessages.length, 2);
 
-snapshot = await service.updateAssistantSession(session.id, { pinned: true, title: 'Hotbar review' });
+snapshot = await service.updateAssistantSession(session.id, { pinned: true, title: 'Inventory review' });
 assert.equal(snapshot.assistantSessions[0].pinned, true);
-snapshot = await service.setAssistantMemoryScope('memory', 'global', 'Devil Hunter');
+snapshot = await service.setAssistantMemoryScope('memory', 'global', 'Example Project');
 assert.equal(snapshot.assistantMemories[0].scope, 'global');
 assert.equal(snapshot.assistantMemories[0].project, 'General');
 
-snapshot = await service.importAssistantSession('Devil Hunter', 'Imported notes', [
+snapshot = await service.importAssistantSession('Example Project', 'Imported notes', [
   { id: 'old', project: 'Other', role: 'user', text: 'Imported question', createdAt: new Date().toISOString() },
 ]);
 assert.equal(snapshot.assistantSessions.length, 2);

@@ -96,9 +96,11 @@ function structuralRecommendation(component: ComponentCandidate, children: Compo
 
   if (repeatedChildFamily && separation >= 0.6) {
     return {
-      mode: 'children-only',
-      confidence: 0.98,
-      reasons: ['Repeated child visuals occupy separate regions, so the parent behaves like an organizational container.'],
+      mode: genericContainer ? 'children-only' : 'parent-and-children',
+      confidence: genericContainer ? 0.98 : 0.9,
+      reasons: genericContainer
+        ? ['Repeated child visuals occupy separate regions, so the parent behaves like an organizational container.']
+        : ['A meaningfully named repeated collection is useful as an assembled asset and also contains reusable child instances.'],
     };
   }
 
@@ -133,35 +135,83 @@ function structuralRecommendation(component: ComponentCandidate, children: Compo
   };
 }
 
+/**
+ * Affinity can expose a flattened RasterNode and the editable GroupNode that
+ * renders exactly the same pixels. The raster is useful visual evidence, but
+ * exporting it instead of the group loses the user's actual layer assembly.
+ * Prefer the editable composition only for exact pixel matches; similar art
+ * remains independently reviewable.
+ */
+function preferEditableExactComposites(components: ComponentCandidate[]): void {
+  const byVisualHash = new Map<string, ComponentCandidate[]>();
+  for (const component of components) {
+    component.keptInsideParent = false;
+    const renderIdentity = component.renderHash || component.visualHash;
+    const family = byVisualHash.get(renderIdentity) || [];
+    family.push(component);
+    byVisualHash.set(renderIdentity, family);
+  }
+  for (const family of byVisualHash.values()) {
+    const groups = family.filter((component) => component.childHierarchyKeys.length > 0);
+    const flatCopies = family.filter((component) => component.childHierarchyKeys.length === 0);
+    if (!groups.length || !flatCopies.length) continue;
+    const owner = [...groups].sort((left, right) => (
+      right.childHierarchyKeys.length - left.childHierarchyKeys.length
+      || left.hierarchyDepth - right.hierarchyDepth
+      || left.hierarchyKey.localeCompare(right.hierarchyKey)
+    ))[0];
+    for (const flatCopy of flatCopies) flatCopy.keptInsideParent = true;
+    if (owner.diveRemembered) continue;
+    owner.diveMode = 'keep-together';
+    owner.recommendedDiveMode = 'keep-together';
+    owner.diveConfidence = 1;
+    owner.diveReasons = ['An exact flattened copy exists, so Kryeo preserves the editable composed group as the export owner.'];
+    owner.diveConflict = false;
+    owner.diveConflictMessage = undefined;
+  }
+}
+
 function reviewAssessment(component: ComponentCandidate): {
   priority: ComponentReviewPriority;
   reasons: string[];
 } {
   const critical: string[] = [];
-  const checks: string[] = [];
-  if (component.semanticConflict) critical.push(component.semanticConflictMessage || 'Visual and semantic evidence disagree.');
-  if (component.diveConflict) critical.push(component.diveConflictMessage || 'The hosted group-export choice conflicts with structural evidence.');
-  if (component.assetType === 'Unknown') critical.push('No reliable asset type was assigned.');
-  if (component.analysisState === 'needs-review') critical.push('The hosted reviewer explicitly requested human review.');
-  if (component.analysisState === 'provisional' || component.analysisState === 'queued') {
-    critical.push('This family does not have a complete hosted classification.');
+  const reasons: string[] = [];
+  const structuralOnly = ['duplicate-representation', 'organizational-parent']
+    .includes(component.assetBoundary || '');
+  if (structuralOnly || (!component.assetBoundary && component.exportTarget === false)) return { priority: 'ready', reasons: [] };
+  // A semantic candidate excluded for uncertainty still belongs in the review
+  // lane. Only structural non-assets are allowed to disappear from it.
+  const reviewsAsset = true;
+  if (reviewsAsset && component.semanticConflict) critical.push(component.semanticConflictMessage || 'Visual and semantic evidence disagree.');
+  if (component.diveConflict) critical.push(component.diveConflictMessage || 'The cloud group-export choice conflicts with structural evidence.');
+  if (reviewsAsset && component.assetType === 'Unknown') critical.push('No reliable asset type was assigned.');
+  if (reviewsAsset && component.namingIssues?.length) critical.push(...component.namingIssues);
+  if (reviewsAsset && component.automationIssues?.length) critical.push(...component.automationIssues);
+  // A provisional candidate is useful audit information, but it is never an
+  // automatic export decision. Keep it visible without pretending it is ready.
+  if (reviewsAsset && component.analysisState === 'needs-review' && !component.semanticConflict && !component.diveConflict) {
+    reasons.push('The cloud reviewer marked this candidate uncertain, so Kryeo kept it out of the export queue.');
   }
-  const normalizedFamilyName = component.familyName.replace(/[\s_-]+/g, '').toLowerCase();
+  if (reviewsAsset && (component.analysisState === 'provisional' || component.analysisState === 'queued')) {
+    critical.push('This family does not have a complete cloud classification.');
+  }
+  const productionName = component.exportName || component.familyName;
+  const normalizedFamilyName = productionName.replace(/[\s_-]+/g, '').toLowerCase();
   const normalizedAssetType = component.assetType.replace(/[\s_-]+/g, '').toLowerCase();
-  if (GENERIC_FAMILY_NAME.test(component.familyName.trim()) || normalizedFamilyName === normalizedAssetType) {
-    critical.push(`“${component.familyName}” is too generic to be a production layer name.`);
+  if (reviewsAsset && (GENERIC_FAMILY_NAME.test(productionName.trim()) || normalizedFamilyName === normalizedAssetType)) {
+    critical.push(`“${productionName}” is too generic to be a production asset name.`);
   }
-  if (component.aiConfidence !== undefined && component.aiConfidence < 0.72) {
-    checks.push(`Classification confidence is ${Math.round(component.aiConfidence * 100)}%.`);
+  if (reviewsAsset && component.aiConfidence !== undefined && component.aiConfidence < 0.72) {
+    reasons.push(`Classification confidence is ${Math.round(component.aiConfidence * 100)}%; this remains a candidate rather than an accepted export decision.`);
   }
   if (component.childHierarchyKeys.length > 0 && component.diveConfidence < 0.8) {
-    checks.push('The group-export decision has ambiguous structural evidence.');
+    reasons.push('The group-export decision has mixed structural evidence; Kryeo chose the safer reversible boundary.');
   }
-  if (component.analysisSource === 'unavailable' || !component.analysisSource) {
-    checks.push('The classification has not been confirmed by hosted analysis or saved learning.');
+  if (reviewsAsset && (component.analysisSource === 'unavailable' || !component.analysisSource)) {
+    reasons.push('Cloud analysis was unavailable; no automatic export decision was made.');
   }
-  if (critical.length) return { priority: 'critical', reasons: [...new Set(critical)] };
-  if (checks.length) return { priority: 'check', reasons: [...new Set(checks)] };
+  if (critical.length || reasons.length) return { priority: 'check', reasons: [...new Set([...critical, ...reasons])] };
   return { priority: 'ready', reasons: [] };
 }
 
@@ -252,22 +302,22 @@ function recommendation(component: ComponentCandidate, children: ComponentCandid
       return {
         ...structural,
         confidence: Math.max(structural.confidence, component.analysisState === 'needs-review' ? 0.62 : 0.9),
-        reasons: [...structural.reasons, 'Hosted and structural group analysis agree.'],
+        reasons: [...structural.reasons, 'Cloud and structural group analysis agree.'],
       };
     }
     if (structural.confidence >= 0.84) {
       return {
         ...structural,
         confidence: Math.min(0.68, structural.confidence),
-        reasons: [...structural.reasons, `Hosted analysis proposed ${hostedMode.replace(/-/g, ' ')}.`],
+        reasons: [...structural.reasons, `Cloud analysis proposed ${hostedMode.replace(/-/g, ' ')}.`],
         conflict: true,
-        conflictMessage: `Hosted analysis proposed ${hostedMode.replace(/-/g, ' ')}, but strong hierarchy and geometry evidence supports ${structural.mode.replace(/-/g, ' ')}.`,
+        conflictMessage: `Cloud analysis proposed ${hostedMode.replace(/-/g, ' ')}, but strong hierarchy and geometry evidence supports ${structural.mode.replace(/-/g, ' ')}.`,
       };
     }
     return {
       mode: hostedMode,
       confidence: component.analysisState === 'needs-review' ? 0.45 : 0.72,
-      reasons: [...structural.reasons, `Hosted analysis selected ${hostedMode.replace(/-/g, ' ')}; review this ambiguous group.`],
+      reasons: [...structural.reasons, `Cloud analysis selected ${hostedMode.replace(/-/g, ' ')}; Kryeo kept a conservative group boundary automatically.`],
     };
   }
   if (component.learnedDiveMode && component.nearestLearnedSimilarity && component.nearestLearnedSimilarity >= 0.92) {
@@ -329,5 +379,6 @@ export function applyComponentIntelligence(
     component.reviewPriority = review.priority;
     component.reviewReasons = review.reasons;
   }
+  preferEditableExactComposites(components);
   return components;
 }

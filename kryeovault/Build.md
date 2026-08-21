@@ -1,164 +1,72 @@
-# Kryeo Build
+# Kryeo Build & Release
 
-> Repository mirror of the current operational release note. The authoritative Hermes note is `Kryeo/Build/Build & Release.md`.
+> Runtime contract documentation for the checked-out `family-v70` source. The installer record below does not prove that a separately running local gateway has been updated or restarted.
 
-## Current packaged build
+## Recorded package state
 
-- **Release:** `0.15.39`
-- **Built and verified:** 2026-08-08
-- **Installer:** `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.39.exe`
-- **Installer size:** `272,215,068` bytes
-- **Installer SHA-256:** `C29C1584819F2827646788A63C3A8C518FC03CDF527D348FE1B88231E73D69F1`
-- **Packaged app.asar SHA-256:** `A6CC584E04CF482EEA8F7D9639E2FC8F3973942350DED73EC303B14FD23A3F4D`
-- **Authenticode:** not signed
-- **Installed app:** `C:\Users\reece\AppData\Local\Programs\Kryeo\Kryeo.exe`
-- **Installed version at last check:** `0.15.37.0`
-- **Installed app.asar SHA-256:** `055F3656666BD9A68298E79945D6B5A2784B9C8557C90A8D208A3ABAD5B0AA20`
+- Source checkout version: `0.15.91`
+- Installer: `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.91.exe`
+- Installer bytes: `272229232`
+- Installer SHA-256: `7FF778595F8909DF5F898FDD472E08581512D226977F15DD95C95C8F3239CF3C`
+- Packaged app.asar bytes: `202591651`
+- Packaged app.asar SHA-256: `7F6C86B80EB0B68826B336CAC696A2F158233CF2EE725F8D1B219EE72E8B8E95`
+- Installed executable: `C:\Users\reece\AppData\Local\Programs\Kryeo\Kryeo.exe`
+- Installed product version before installing this release: `0.15.78.0`
+- Installed package: `C:\Users\reece\AppData\Local\Programs\Kryeo\resources\app.asar`
+- Installed package timestamp: `2026-08-13 21:46:54 +01:00`
 
-The `0.15.39` installer is ready, but it has not been applied. Do not describe it as the installed desktop version until the installer is run and the installed version is verified. The installed desktop is `0.15.37.0`. The gateway source is `family-v37`; its currently running loopback process reported `family-v36` at the last check and must be restarted to activate the new contract.
+Historical release snapshots are intentionally excluded from active documentation. Use Git history when older implementation context is genuinely required.
 
-## Cloud contradiction guard in `0.15.39`
+## Validation
 
-- Kryeo now rejects a self-contradictory cloud explanation: a high-confidence result that calls the preview tiny, nearly invisible, unreadable, an artifact, or not a functional instance while supplying less than 12% evidence on every signal is capped at 55% and marked for review.
-- The same rule applies to full family analysis and to the on-demand `Why Kryeo chose this` audit. Evidence details now say that the cloud proposal was not accepted instead of presenting an internally inconsistent proposal as trustworthy.
-- The affected example, `Regular Slot / Slot`, had a cloud reason that explicitly said it was not a functional slot while reporting 90% confidence with 1% visual and hierarchy evidence. Under `0.15.39` it returns `conflict: true`, `supportsClassification: false`, and cannot clear the review queue automatically.
-- Analysis keys advance from `family-v36` to `family-v37`; evidence keys advance from `family-explanation-v2` to `family-explanation-v3`. Existing generated cache data is preserved but cannot satisfy the new keys, so a fresh scan/audit receives the guard automatically.
-- Restart only the Kryeo gateway after updating its source to make `family-v37` live. No Affinity document, approved decision, or generated cache file needs to be deleted.
+```powershell
+npm install
+npm run typecheck
+npm run test:library
+npm run test:ipc-contract
+npm run test:ui-contract
+npm run test:affinity-connection
+npm run test:evaluation
+npm run test:affinity-export
+npm run test:component-context
+npm run test:component-learning
+npm run test:component-scan
+npm run test:scan-intent
+npm run test:local-ai
+npm run test:family-ai
+npm test --prefix services\ai-server
+node --check services\ai-server\src\server.mjs
+git diff --check
+npm run dist
+```
 
-## Layer review workspace in `0.15.38`
+`npm run dist` creates `release\Kryeo-Setup-<version>.exe` and verifies packaged resources. A successful package does not prove that the installed app was replaced: close only installed Kryeo processes, run the installer, relaunch, then verify the Windows product version and installed `app.asar` timestamp. It also does not package, deploy, stop, or restart `services\ai-server`; gateway deployment and restart are a separate release step.
 
-- Component Scan now uses a design-app-style workspace instead of rendering one complete form per scanned layer. A compact Affinity hierarchy scrolls on the left while the selected layer's preview, name, classification, group export, evidence, and approval action stay in one inspector on the right.
-- `Needs input`, `Groups`, `Looks good`, and `All layers` provide distinct review views. Search covers layer names, suggested names, asset types, and Roblox roles; category filtering remains available without a separate wall of filter buttons.
-- Up/down arrow keys and previous/next buttons move through visible decisions. Hierarchy disclosure works in `All layers`; exception views preserve indentation while surfacing matching nested items even when their parents are collapsed.
-- Large documents no longer grow the page by hundreds of cards. The navigator and inspector scroll independently inside a bounded workbench; thumbnails lazy-load and off-screen rows use native rendering containment.
-- Routine non-critical checks can be accepted together. Critical semantic or group-structure conflicts still require an explicit decision. Editing a field no longer removes the selected row mid-typing; only `Approve and continue` clears it from `Needs input`.
-- Group-export choices are labelled `One combined asset`, `Child assets only`, and `Group and child assets`. The structural voting, conflict safeguards, and structure-scoped learning from `0.15.37` remain unchanged.
-- The bottom actions are now `Save decisions`, `Rename layers`, and `Organize layers`. They remain locked while unresolved decisions exist. The workspace redesign adds no cloud requests and does not change full-document coverage, the `$0.01` target, or the `$0.03` ceiling.
-
-Rendered QA used the production stylesheet at 1440x1000 and 800x1000. Both viewports had zero horizontal overflow; the desktop workbench measured 1,392px wide with a 720px review area, and the narrow layout stacked a 360px layer navigator over a 737px-wide inspector.
-
-## Exception-first review and group safety in `0.15.37`
-
-- Component Scan no longer opens large results as one fully expanded form. Above 120 components the hierarchy starts collapsed, while nested exceptions remain discoverable through the focused review lanes.
-- The default `Needs review` lane contains semantic conflicts, generic or type-only names, unknown types, incomplete hosted results, low-confidence decisions, and disputed group exports. `Group exports`, `Low risk`, and `Everything` remain available for targeted auditing.
-- Exact duplicate instances share one review decision. Low-risk families stay included but out of the default queue; Kryeo does not silently rewrite them. Editing a decision or explicitly marking it reviewed clears that exact visual from the exception queue.
-- `Remember choices`, `Apply names`, and `Apply to Affinity` remain locked while exceptions are unresolved. This prevents a thousand-layer scan from applying known weak names or hierarchy decisions merely because the user reached the bottom of the page.
-- Group export has an independent structural vote. Separated repeated children favor `children only`; overlapping pieces that compose one motif favor `keep together`; an assembled UI parent with spatially independent reusable children favors `parent and children`.
-- A strong structural vote that conflicts with the hosted proposal becomes a blocking review item and defaults to the structural-safe option. Saved user choices remain authoritative.
-- Saved group-export choices are keyed by a structural signature containing direct-child visuals, separation, and parent coverage. Identical parent pixels no longer reuse a dive choice when their child structure differs; older image-only dive memory is treated as advisory.
-- Gateway contract `family-v36` explains all three group modes explicitly and asks for review when hierarchy evidence is weak, invalidating older cached prompt results without changing the Qwen3.7 Flash model or cost policy.
-
-Regression coverage verifies all three structural patterns and both hosted/structure conflict directions. Typecheck, all scan/context/local/hosted AI suites, production rendering, NSIS packaging, and packaged-resource verification passed. Windows UI capture automation failed before returning a screenshot, so this release does not claim an automated screenshot inspection.
-
-## Large-scan recovery and packaging in `0.15.36`
-
-- A fresh-cache scan of the current document covered 579 unique visual families. The desktop dispatched 74 gateway batches; retries and repairs brought the real provider total to 80 calls, 122,862 prompt tokens, 17,431 completion tokens, and `$0.00595189`. Eleven families remained omitted after grouped repair, while zero were budget-limited.
-- The measured bottleneck was Affinity export at 6m 10s, followed by hosted analysis at 4m 33s. Image preparation took 13.6s, document context 1.4s, local analysis 5ms, and finalization 16ms. Cost was healthy; source extraction and provider latency were the performance constraints.
-- If a partial model response still omits aliases after grouped recovery, the gateway now performs a final parallel, single-family repair for only those unresolved aliases. Every attempt remains subject to the `$0.03` hard scan ceiling; successful families are never resent.
-- Component Scan diagnostics now distinguish desktop gateway batches from real provider calls, expose Affinity request/retry/split counts and the slowest request, and preserve concrete failure messages instead of collapsing them into a count.
-- Large scans with more than 160 unique visuals skip the optional embedded MobileCLIP context pass. Full cloud coverage is unchanged. Small scans can still use the bundled model, and `KRYEO_LOCAL_CONTEXT_MAX_VISUALS` can tune or disable the threshold.
-- The previous package omitted the MobileCLIP ONNX and taxonomy files because the electron-builder manifest did not copy them. The installer now includes both resources, and `npm run verify:package` fails packaging if the installer version or either resource is missing or implausibly small.
-- Missing optional local context is now a neutral diagnostic note rather than a red hosted-review failure. The hosted model remains the final classifier for every uncached unresolved family.
-
-## Classification and system hardening in `0.15.35`
-
-- Inset ornamental borders are measured relative to their occupied alpha bounds. Transparent padding no longer defeats hollow-perimeter detection.
-- Inner fill, perimeter density, and four-side coverage provide a deterministic type guard. Geometry-backed borders cannot be changed back to `Frame` by target or hierarchy words such as `MainFrameOuterLayers` and `Frames`.
-- Hosted results expose the raw model proposal and normalization reason. Evidence is now an independent audit that may suggest a correction.
-- Full-document context capture is lazy and only runs for an actual escalation. Cancellation reaches Affinity partition export and image preparation, and scan diagnostics report per-stage timings, cache hits, failures, and budget skips.
-- The gateway structured cache defaults to a 20,000-entry bound, evicts oldest entries, coalesces disk snapshots, reports cache health, and uses the new `family-v35` key space.
-- Dependency manifests use explicit compatible ranges. The MCP SDK is `1.30.0`; all fixable production audit findings were removed. Four high-severity transitive findings remain in the optional embedded Transformers/ONNX runtime with no upstream fix.
-- The installer remains unsigned; code signing is still a production-distribution requirement.
-
-A fresh-cache scan of the current 969-component document used 84 Qwen3.7 Flash provider requests and cost `$0.00615183`, below the `$0.01` target. Evidence panels would be additional on-demand calls.
-
-## First-scan performance in `0.15.34`
-
-- Raw alpha metrics created during component preparation are reused for local structural signals, avoiding a second PNG decode for every unique visual.
-- MobileCLIP now produces the local suggestion and reusable visual embedding in one pass; the former separate embedding pass processed every unique visual twice.
-- Affinity export starts at a conservative work budget of 24, expands toward 56 only after fast real batches, and contracts to 12 before retrying or splitting a slow/recoverable batch.
-- Full document export and cloud coverage are unchanged: every component is still exported and every unresolved unique family remains eligible for hosted analysis.
-
-## Classification correction in `0.15.33`
-
-- A generic Affinity `GroupNode` or child count no longer gives the component a preliminary Roblox `Frame` role. It is source hierarchy, not implementation semantics.
-- Raw PNG alpha metrics independently recognise a transparent centre with dense perimeter art. If hosted review calls that geometry `Frame`, `Panel`, `Slot`, `Background`, `Wallpaper`, `Texture`, or `Overlay`, the desktop keeps `Border` / `ImageLabel` and flags the contradiction for review.
-- Generic hosted names such as `Border Frame` are retargeted to the resolved type; with no trustworthy visual descriptor, the safe display fallback is `Decorative Border`, never bare `Frame`.
-- Component Scan labels now distinguish a true scanned parent from the export category, and the stale fixed `Gemini` wording now follows the active hosted reviewer.
-- Gateway contract `family-v34` reinforces the same perimeter-vs-container rule and invalidates prior structured-cache keys. Restart or redeploy the gateway from this source to activate the new prompt and cache version; the packaged desktop safeguard still corrects cached contradictory results.
-
-## Performance implementation shipped in `0.15.32`
-
-These changes were verified and packaged on 2026-08-07. They are not in the installed `0.15.30.0` app until the `0.15.32` installer is applied.
-
-- Light Affinity structural partitions are exported in bounded, weight-aware batches (four initially, up to twelve); dense/large partitions remain isolated.
-- Aggregate timeouts shrink and retry before structural splitting; a closed Affinity connection gets one reconnect attempt before fragmentation.
-- Ordinary visible exports no longer incur a hide/reveal/restore cycle. Hidden and adjustment-bearing groups retain that safety path.
-- Duplicate previews and hosted thumbnails are encoded once per exact visual, and hosted partial results no longer resend the entire thumbnail-bearing document after every cloud batch.
-- Gateway cache snapshots use queued unique temporary files and retry transient Windows locks. A generated-cache write cannot fail a completed hosted analysis; the next update retries the full in-memory snapshot.
-
-Live export-only verification of `Devil Hunter.af`: `969` components across `294` planned partitions completed in `458.2` seconds with no timeout, no connection loss, no cloud calls, and the original Affinity selection restored. This is not a claim about the full end-to-end scan duration.
-
-## Hosted Component Scan runtime
-
-Every unresolved unique family remains eligible for cloud analysis. No local language or vision model is required for final classification. Local work is limited to free preprocessing: export, exact-duplicate collapse, family grouping, contact-sheet packing, and optional embedded context.
+## Hosted classification runtime
 
 | Part | Current value |
 | --- | --- |
-| Bulk and escalation model | `qwen/qwen3.7-flash` |
-| Provider | OpenRouter at `https://openrouter.ai/api/v1` |
-| Gateway | `http://127.0.0.1:8787` locally; use authenticated HTTPS for shared deployments |
-| Client dispatch | 2 concurrent requests; 16 simple or 8 detailed families per request |
-| Gateway model slots | `KRYEO_AI_MODEL_CONCURRENCY=2` |
-| Gateway family batch | `KRYEO_AI_FAMILY_BATCH_SIZE=16` |
-| Normal target | `KRYEO_AI_SCAN_TARGET_USD=0.01` |
-| Enforced safety ceiling | `KRYEO_AI_SCAN_BUDGET_USD=0.03` |
-| Hosted family count cap | `KRYEO_AI_MAX_HOSTED_FAMILIES_PER_SCAN=0` (unlimited) |
-| Reasoning | `KRYEO_AI_REASONING_EFFORT=none` |
-| Routing | `KRYEO_AI_PROVIDER_SORT=price`, `KRYEO_AI_SERVICE_TIER=default` |
-| Parameter compatibility | `KRYEO_OPENROUTER_REQUIRE_PARAMETERS=false` |
-| Result cache | `services\ai-server\.data\family-cache.json` |
-| Cache cap | `KRYEO_AI_MAX_CACHE_ENTRIES=20000` |
-| Analysis contract | `family-v37` |
+| Primary model | `qwen/qwen3.7-flash` through OpenRouter |
+| Independent reviewer | `qwen/qwen3.7-flash` through OpenRouter |
+| Local gateway | `http://127.0.0.1:8787` |
+| Analysis contract | `family-v70` |
+| Client dispatch | Two concurrent requests; up to 8 families per request |
+| Gateway model slots | `2` |
+| Model deadline | `KRYEO_AI_MODEL_TIMEOUT_MS=35000` by default |
+| Model retries | `KRYEO_AI_MAX_MODEL_RETRIES=0` by default; maximum one when explicitly enabled |
+| Decision packets | Atomic complete primary packets; one bounded complete reviewer replacement only |
+| Normal scan target | `$0.01` |
+| Enforced scan ceiling | `$0.03` |
+| Family count cap | Unlimited; dollar ceiling remains authoritative |
+| Generated cache | `services\ai-server\.data\family-cache.json` |
 
-The gateway reserves against current Qwen pricing with a 2x allowance for repair and token-accounting variance. It records provider-reported cost and the real provider-call count per scan, which the desktop summary displays separately from gateway batches. Valid partial results are stored immediately; missing aliases receive one grouped repair, followed by bounded single-family repairs only for aliases that are still absent.
+The desktop sends unresolved export scopes through the authenticated Kryeo gateway. Embedded MobileCLIP supplies optional preprocessing/context and is not the final classifier for an unresolved scope. Hierarchy selects decision scopes before render hashes identify exact duplicate representations, so visually similar nodes in different scopes are not merged. Construction children, organizational parents, and flattened duplicate representations are non-exported; an `Unknown` result stays unresolved and cannot export automatically. Provider credentials remain server-side in `services\ai-server\.env` or the deployment secret store.
 
-Live verification on 2026-08-07:
+## Restart the local gateway separately
 
-- one uncached family: `$0.00002814`;
-- sixteen uncached families: `$0.00011936`;
-- all sixteen aliases returned with zero recovery;
-- the 1,000-family cloud-coverage fixture completed in 16-family production-shaped waves below one cent of provider-reported fixture cost.
+The Electron installer does not manage the local Node gateway. After changing `services\ai-server` source or `.env`, stop the existing gateway, start the updated one, and verify it before scanning. Do this independently of building or installing the desktop app.
 
-## Configure and run the gateway
-
-Store secrets only in `services\ai-server\.env` or a deployment secret store. Never add either value to the Electron bundle or notes.
-
-```dotenv
-KRYEO_AI_MODEL=qwen/qwen3.7-flash
-KRYEO_AI_MODEL_LITE=qwen/qwen3.7-flash
-KRYEO_AI_MODEL_ESCALATION=qwen/qwen3.7-flash
-KRYEO_MODEL_BASE_URL=https://openrouter.ai/api/v1
-KRYEO_MODEL_API_KEY=<gateway-only OpenRouter key>
-KRYEO_AI_REASONING_EFFORT=none
-KRYEO_AI_PROVIDER_SORT=price
-KRYEO_AI_SERVICE_TIER=default
-KRYEO_OPENROUTER_PROMPT_CACHE=true
-KRYEO_OPENROUTER_RESPONSE_CACHE=false
-KRYEO_OPENROUTER_REQUIRE_PARAMETERS=false
-KRYEO_AI_MODEL_CONCURRENCY=2
-KRYEO_AI_MAX_INFLIGHT_PER_TOKEN=2
-KRYEO_AI_FAMILY_BATCH_SIZE=16
-KRYEO_AI_MAX_MEMBER_IMAGES_PER_FAMILY=2
-KRYEO_AI_SCAN_TARGET_USD=0.01
-KRYEO_AI_SCAN_BUDGET_USD=0.03
-KRYEO_AI_ENFORCE_SCAN_BUDGET=true
-KRYEO_AI_MAX_HOSTED_FAMILIES_PER_SCAN=0
-KRYEO_AI_MAX_ESCALATION_FAMILIES_PER_SCAN=1
-KRYEO_AI_COST_ESTIMATE_SAFETY_FACTOR=2
-KRYEO_AI_MAX_MODEL_RETRIES=1
-KRYEO_AI_MAX_CACHE_ENTRIES=20000
-```
+Start and inspect the local gateway after the previous instance has stopped:
 
 ```powershell
 Start-Process -FilePath 'C:\Program Files\nodejs\node.exe' `
@@ -166,41 +74,22 @@ Start-Process -FilePath 'C:\Program Files\nodejs\node.exe' `
   -WorkingDirectory 'C:\Users\reece\Desktop\Kryeo\services\ai-server' `
   -WindowStyle Hidden
 
-Invoke-RestMethod http://127.0.0.1:8787/health
+$headers = @{ Authorization = 'Bearer <Kryeo AI token>' }
+Invoke-RestMethod http://127.0.0.1:8787/health -Headers $headers
 ```
 
-The health response should report `analysisVersion: family-v37`, Qwen3.7 Flash on both lanes, a `$0.01` target, an enforced `$0.03` ceiling, 16-family batching, two model slots, bounded-cache counters, and zero active requests when idle.
-
-## Build, validate, and install
-
-1. Preserve unrelated local work with `git status --short`.
-2. Update the root version and matching root `package-lock.json` entries. Leave the private AI-server package version alone unless it has a separate release.
-3. Run:
-
-   ```powershell
-   npm install
-   npm run typecheck
-   npm run test:affinity-export
-   npm run test:component-context
-   npm run test:component-learning
-   npm run test:component-scan
-   npm run test:local-ai
-   npm run test:family-ai
-   npm test --prefix services\ai-server
-   node --check services\ai-server\src\server.mjs
-   git diff --check
-   npm run dist
-   ```
-
-4. Close only running installed `Kryeo.exe` processes. Run `release\Kryeo-Setup-<version>.exe`, relaunch Kryeo, then verify the installed Windows product version and `resources\app.asar` hash.
-
-Recorded passes for `0.15.39`: typecheck, family-AI smoke coverage, gateway syntax check, gateway cache/budget/evidence/recovery suite including a self-contradictory Slot audit, production build, NSIS package build, and packaged-resource verification. The installer and unpacked package report `0.15.39`; the packaged model is `11,846,843` bytes and taxonomy is `440,707` bytes.
+The health response must report Qwen3.7 Flash as both the primary model and independent reviewer, `family-v70`, two model slots, 8-family batching, `maxModelRetries: 0` when unset, a `$0.01` target, and an enforced `$0.03` ceiling. A mismatched `analysisVersion` means the desktop must not scan against that process.
 
 ## Clear generated family results
 
-1. Confirm the exact target is `C:\Users\reece\Desktop\Kryeo\services\ai-server\.data\family-cache.json`.
-2. Stop only the Kryeo gateway.
-3. Delete that one generated cache file.
-4. Restart the gateway.
+1. Wait for active visual analysis to finish.
+2. Send the authenticated cache-clear request:
 
-This removes generated analysis results only. It does not remove Affinity assets, approved component decisions, or source documents.
+   ```powershell
+   $headers = @{ Authorization = 'Bearer <Kryeo AI token>' }
+   Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8787/v1/cache/clear -Headers $headers
+   ```
+
+3. Confirm the response contains `cleared: true`, `analysisVersion: family-v70`, and `cacheEntries: 0`.
+
+`POST /v1/cache/clear` waits for a pending cache write and refuses with `409` while work is active; it clears both memory and the derived cache file safely. This clears generated hosted analyses only. It does not remove source documents, exported assets, or saved component decisions. Cache clearing is not a substitute for restarting the gateway after source or configuration changes.

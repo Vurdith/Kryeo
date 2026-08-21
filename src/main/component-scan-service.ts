@@ -247,7 +247,12 @@ export async function buildComponentScan(
     throw error;
   };
   assertActive();
-  const remembered = new Map(decisions.map((decision) => [decision.visualHash, decision]));
+  // Generated results are a cache, never a remembered decision. Only an
+  // accepted/corrected choice may prepopulate a fresh scan; otherwise old
+  // names survive even after the hosted gateway cache has been cleared.
+  const remembered = new Map(decisions
+    .filter((decision) => decision.approved !== false && decision.decisionStatus !== 'generated')
+    .map((decision) => [decision.visualHash, decision]));
   // Large documents can contain hundreds of exports. Bounded image work keeps
   // libvips from competing with Affinity and avoids a memory-heavy promise fan-out.
   const pixelInspections = await mapWithConcurrency(batch.components, IMAGE_INSPECTION_CONCURRENCY, async (component) => {
@@ -290,6 +295,7 @@ export async function buildComponentScan(
       component,
       ...inspection,
       ...preview,
+      renderHash: inspection.hash,
       hash: component.previewFallback
         ? createHash('sha256').update(`structural:${component.hierarchyKey}:${inspection.hash}`).digest('hex')
         : inspection.hash,
@@ -301,12 +307,14 @@ export async function buildComponentScan(
   const components: ComponentCandidate[] = inspected.map(({
     component,
     hash,
+    renderHash,
     previewUrl,
     hostedPreviewUrl,
     analysisPreviewUrls,
     visualMetrics,
   }, occurrence) => {
     const decision = remembered.get(hash);
+    const canonicalName = decision?.exportName || decision?.familyName || decision?.layerLabel || component.name;
     const suggestedRole = suggestRole(
       component.name,
       component.affinityType,
@@ -326,9 +334,13 @@ export async function buildComponentScan(
       analysisPreviewUrls,
       visualMetrics,
       visualHash: hash,
+      renderHash,
       duplicateFamily: hash.slice(0, 12),
       duplicateCount: familySizes.get(hash) || 1,
-      familyName: decision?.familyName || component.name,
+      familyName: canonicalName,
+      layerLabel: canonicalName,
+      exportName: canonicalName,
+      exportTarget: true,
       suggestedRole,
       role: decision?.role || suggestedRole,
       assetType: decision?.assetType || 'Unknown',

@@ -1,10 +1,10 @@
 # Kryeo AI Server
 
-This service places authentication, rate limits, queues, family-result caching, and strict request limits in front of an OpenAI-compatible cloud vision model. The production configuration uses Qwen3.7 Flash through OpenRouter for both normal family review and the richer escalation prompt. Free desktop preprocessing extracts artwork, collapses duplicates, and packs contact sheets; every unresolved unique family is still classified by the cloud model, so users do not need a local model.
+This service places authentication, rate limits, queues, family-result caching, and strict request limits in front of cloud vision models. The default configuration uses OpenRouter's `qwen/qwen3.7-flash` through its OpenAI-compatible chat-completions API for both the primary visual decision and the bounded independent reviewer. Free desktop preprocessing establishes structural export scopes and suppresses non-export duplicates; every unresolved export scope is still classified by the cloud model, so users do not need a local model.
 
-It does not save uploaded source images. The persistent cache contains only structured family results. Context-specific results are keyed by analysis version, model, visual-family fingerprint, and context; a second context-neutral exact-asset key lets identical templates be reused across users without storing source previews. The current contract is `family-v37`. The cache is capped at 20,000 entries by default, evicts its oldest entries, and coalesces disk writes; set `KRYEO_AI_MAX_CACHE_ENTRIES` to tune that bound.
+It does not save uploaded source images. The persistent cache contains only complete structured family results. Context-specific results are keyed by analysis version, model, visual-family fingerprint, and context; a second context-neutral exact-asset key lets eligible Lite results be reused across users without storing source previews. The current decision contract is `family-v70` and the evidence contract is `family-explanation-v13`. The cache is capped at 20,000 entries by default, evicts its oldest entries, and coalesces disk writes; set `KRYEO_AI_MAX_CACHE_ENTRIES` to tune that bound.
 
-## Hosted OpenRouter/Qwen3.7 Flash
+## OpenRouter Qwen3.7 Flash
 
 The gateway, not the Electron installer, owns the provider credential. Configure the ignored `.env` file or a deployment secret store with:
 
@@ -13,37 +13,39 @@ KRYEO_AI_MODEL=qwen/qwen3.7-flash
 KRYEO_AI_MODEL_LITE=qwen/qwen3.7-flash
 KRYEO_AI_MODEL_ESCALATION=qwen/qwen3.7-flash
 KRYEO_MODEL_BASE_URL=https://openrouter.ai/api/v1
+KRYEO_MODEL_TRANSPORT=chat-completions
 KRYEO_MODEL_API_KEY=<OpenRouter key stored only on the gateway>
 KRYEO_AI_REASONING_EFFORT=none
 KRYEO_AI_PROVIDER_SORT=price
 KRYEO_AI_SERVICE_TIER=default
 KRYEO_OPENROUTER_PROMPT_CACHE=true
 KRYEO_OPENROUTER_RESPONSE_CACHE=false
-KRYEO_AI_FAMILY_BATCH_SIZE=16
+KRYEO_AI_FAMILY_BATCH_SIZE=8
 KRYEO_AI_MAX_MEMBER_IMAGES_PER_FAMILY=2
 KRYEO_AI_SCAN_TARGET_USD=0.01
 KRYEO_AI_SCAN_BUDGET_USD=0.03
 KRYEO_AI_ENFORCE_SCAN_BUDGET=true
 KRYEO_AI_MAX_HOSTED_FAMILIES_PER_SCAN=0
 KRYEO_AI_MAX_ESCALATION_FAMILIES_PER_SCAN=1
-KRYEO_AI_LITE_INPUT_PRICE_PER_MILLION=0.03
-KRYEO_AI_LITE_OUTPUT_PRICE_PER_MILLION=0.13
-KRYEO_AI_ESCALATION_INPUT_PRICE_PER_MILLION=0.03
-KRYEO_AI_ESCALATION_OUTPUT_PRICE_PER_MILLION=0.13
+KRYEO_AI_LITE_INPUT_PRICE_PER_MILLION=0
+KRYEO_AI_LITE_OUTPUT_PRICE_PER_MILLION=0
+KRYEO_AI_ESCALATION_INPUT_PRICE_PER_MILLION=0
+KRYEO_AI_ESCALATION_OUTPUT_PRICE_PER_MILLION=0
 KRYEO_AI_COST_ESTIMATE_SAFETY_FACTOR=2
-KRYEO_AI_MAX_MODEL_RETRIES=1
+KRYEO_AI_MODEL_TIMEOUT_MS=35000
+KRYEO_AI_MAX_MODEL_RETRIES=0
 KRYEO_AI_MAX_CACHE_ENTRIES=20000
 ```
 
-The gateway sends multimodal family requests to OpenRouter's OpenAI-compatible `/chat/completions` endpoint, requests JSON output, disables paid reasoning for this classification task, and selects the lowest-cost compatible provider route. Stable system rules carry an explicit prompt-cache breakpoint; changing family metadata remains in the final user message. Each scan receives a hashed `session_id`, keeping concurrent waves on a sticky provider route. The client never receives the OpenRouter key; it only authenticates to the Kryeo gateway with a revocable Kryeo token.
+The gateway sends multimodal family requests to OpenRouter's OpenAI-compatible `/chat/completions` endpoint, requests JSON output, and keeps every provider credential in the gateway. The client never receives the OpenRouter key; it only authenticates to the Kryeo gateway with a revocable Kryeo token. `KRYEO_MODEL_TRANSPORT=chat-completions` is the default; the gateway still accepts other OpenAI-compatible deployments when their base URL and transport are configured explicitly.
 
-To control vision-token cost, the desktop local pass supplies grouping, deduplication, hierarchy, and confidence context before this service is called; it is not the final classifier for unresolved families. Simple Lite work uses up to sixteen representative thumbnails in one numbered 512×512 contact sheet. Sparse, extreme-aspect, cropped, semantically conflicting, or hierarchy-ambiguous artwork stays in batches of at most eight on a 384×384 sheet. Lite returns a compact shared-root packet containing only each alias, type, complete name, uncertainty bit, and dive mode. The gateway derives Roblox role and normal review plumbing locally.
+To control vision-token cost, the desktop local pass supplies grouping, hierarchy, duplicate-representation evidence, and confidence context before this service is called; it is not the final classifier for unresolved export scopes. The runtime sends primary requests in batches of at most eight families. A composed parent carries direct child context and uses the higher-quality context path; an escalation can additionally receive a document composite. The gateway does not derive a missing semantic field from local hints.
 
-Reasons, descriptions, numeric evidence, conflicts, and alternatives are not purchased during the normal scan. `POST /v1/families/explain` generates and caches those fields only when a user opens the evidence panel. If classification omits part of a batch, the gateway stores valid entries and repairs all omitted families together first. Any aliases still absent receive parallel single-family repairs, limited to the unresolved set and checked against the hard scan budget; successful families are never resent. The desktop never retries a complete paid gateway request. High-risk escalation still uses the larger family preview plus document context. The normal target is `$0.01`; `$0.03` is an enforced safety ceiling. Reservations use current model prices with a 2x allowance for repair and token-accounting variance, while provider-reported cost and the real provider-call count are recorded separately.
+Reasons, descriptions, numeric evidence, conflicts, and alternatives are not purchased during the normal scan. `POST /v1/families/explain` generates and caches those fields only when a user opens the evidence panel. Every primary and reviewer result is one atomic packet: name, type, Roblox role, grouping, confidence, reason, and alternatives agree or the scope is unresolved. A partial packet is never completed from local fields. Complete results from an otherwise incomplete batch may be retained, but missing scopes remain `Unknown`, review-needed, and non-exportable for the next scan; there is no grouped or per-family repair fanout. Each model call has a 35-second default deadline, and `KRYEO_AI_MAX_MODEL_RETRIES` defaults to `0` (operators may explicitly opt into one bounded retry). The desktop never retries a complete paid gateway request. High-risk escalation uses the larger context path. The normal target is `$0.01`; `$0.03` is an enforced safety ceiling. Reservations use current model prices with a 2x allowance for token-accounting variance, while provider-reported cost and the real provider-call count are recorded separately.
 
-The `family-v37` contract applies a target-scoped naming pass after hosted classification. Meaningful names from the target family are preserved; parent, ancestor, child, sibling, peer-family, collection, and implementation labels are context only, and proposal words found only in that context are rejected. A `GroupNode` or child count is not Frame evidence. Border detection is relative to the occupied alpha bounds rather than the outer edge of the PNG, so transparent padding around inset ornamental frames no longer hides their hollow-perimeter topology. That geometry can normalize a contradictory hosted `Frame`, `Panel`, or `Slot` to `Border` / `ImageLabel`, with both the raw model proposal and normalization reason returned for review. A high-confidence response that simultaneously describes a tiny, unreadable, nearly invisible, or non-functional artifact with less than 12% support on every evidence signal is also marked unreliable and sent to review. Structural filler such as `Container`, `Group`, and `Element` is removed from display names, while a meaningful ordinal is retained.
+The `family-v70` contract separates structural ownership from semantic classification. Hierarchy establishes context first; render hashes then deduplicate exact flattened representations only within that scope. Visually similar nodes in distinct hierarchy scopes are not merged into one semantic decision. A composed parent remains the sole export owner, while its non-duplicate construction children receive their own visual name, type, and role for consistent layer organisation. Organizational parents and flattened duplicate representations remain context only. `Unknown` means the source supplied no complete defensible packet: it remains visibly unresolved and cannot export automatically. A `GroupNode` or child count is context, not type evidence.
 
-The same contract defines group-export modes precisely: keep overlapping construction together, return children-only only when the parent is organizational and adds no standalone asset, and return parent-and-children when both levels are reusable. Weak hierarchy evidence must set the review flag. The desktop independently validates this proposal from geometry and hierarchy before it can be applied.
+The structural plan defines whether a composed parent stays together, an organizational parent exposes children, or both levels export. The model receives that planned grouping but cannot silently rewrite its boundary. A challenged packet gets at most one bounded independent-review pass; that pass can replace the primary only with a complete replacement packet. Incomplete reviewer criticism keeps the primary packet intact but marks the scope unresolved for review.
 
 Concurrent byte-identical model requests are coalesced before entering the provider queue, so simultaneous users purchase one inference. Successful context-neutral exact assets also receive a shared structured-cache key; custom project instructions remain context-specific. Neither cache stores uploaded source images.
 
@@ -51,22 +53,35 @@ Concurrent byte-identical model requests are coalesced before entering the provi
 
 For multiple users, deploy this gateway behind HTTPS on a server reachable by the desktop clients. Set `KRYEO_AI_HOST=0.0.0.0` only behind a firewall/reverse proxy, keep the provider key in the host's secret store, and issue a separate `KRYEO_AI_TOKENS` value per user. Do not expose OpenRouter or the gateway key from the Electron process.
 
+## Cache maintenance and gateway restarts
+
+Clear generated structured results through the authenticated gateway only after active analyses finish:
+
+```powershell
+$headers = @{ Authorization = 'Bearer <Kryeo AI token>' }
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8787/v1/cache/clear -Headers $headers
+```
+
+`POST /v1/cache/clear` waits for the cache writer, removes the in-memory and on-disk derived cache, and returns `409` while analysis work is active. It does not remove source documents, exports, or saved decisions. Do not manually delete the cache while the gateway is running.
+
+The gateway is a separate Node process. Updating its source or `.env` requires stopping and restarting that process, then checking `GET /health` reports `family-v70`. Building or installing the Electron desktop app neither deploys nor restarts the local gateway.
+
 ## Local development
 
 1. Start Ollama with `OLLAMA_NUM_PARALLEL=2` and `OLLAMA_MAX_QUEUE=100`, then confirm `qwen3.5:9b` is available at `http://127.0.0.1:11434`.
-2. Copy `.env.example` to `.env` and set `KRYEO_AI_MODEL=qwen3.5:9b`, `KRYEO_MODEL_BASE_URL=http://127.0.0.1:11434/v1`, clear the hosted provider key, and set a private `KRYEO_AI_TOKENS` value.
+2. Copy `.env.example` to `.env` and set `KRYEO_AI_MODEL=qwen3.5:9b`, `KRYEO_MODEL_BASE_URL=http://127.0.0.1:11434/v1`, clear the cloud provider key, and set a private `KRYEO_AI_TOKENS` value.
 3. Start the gateway with `npm start`.
 4. Configure Kryeo to use `http://127.0.0.1:8787` and the token from `.env`.
 
-The gateway intentionally binds to loopback by default. Do not expose the raw model server or this development listener directly to the internet. A public deployment must terminate HTTPS at a reverse proxy and provide independently revocable user tokens.
+The gateway intentionally binds to loopback by default. Do not expose the raw model server or this development listener directly to the internet. A public deployment must terminate HTTPS at a reverse proxy and provide independently revocable user tokens. After changing gateway source or configuration, restart this process separately and confirm `/health` reports `family-v70` before scanning.
 
-`scripts/start-qwen.ps1` remains an alternative `llama-server` setup. The current Ollama startup commands, hosted gateway settings, and the complete rebuild procedure are recorded in the repository's [Kryeo Build note](../../kryeovault/Build.md).
+`scripts/start-qwen.ps1` remains an alternative `llama-server` setup. The current Ollama startup commands, cloud gateway settings, and the complete rebuild procedure are recorded in the repository's [Kryeo Build note](../../kryeovault/Build.md).
 
 ## Shared GPU beta
 
 One GPU can be a shared worker for several Kryeo users, but it cannot create unlimited inference capacity. The gateway accepts authenticated requests, limits each token's active requests, and queues work when all model slots are busy. Start with two model slots and lower it to one if VRAM usage becomes unstable.
 
-The desktop client dispatches two concurrent adaptive batches. Simple artwork can use sixteen families per request (up to 32 in a wave); detailed or ambiguous artwork remains capped at eight per request. Each normal request carries one numbered contact-sheet image. The current deployment has no hosted-family count cap, so large documents are processed as queued waves; `KRYEO_AI_MAX_HOSTED_FAMILIES_PER_SCAN=0` means unlimited by count. Qwen3.7 Flash is the cloud classifier for every unresolved family, including locally clear candidates. Cost grows only with uncached unique families, while duplicate families, repeated scans, shared templates, and simultaneous identical requests reuse paid work. The dollar ceiling remains authoritative even when the family-count cap is unlimited.
+The desktop client dispatches two concurrent batches. Each primary request is capped at eight families and carries one labelled target PNG per family, so adjacent artwork cannot be mistaken for the selected target. The current deployment has no cloud-family count cap, so large documents are processed as queued waves; `KRYEO_AI_MAX_HOSTED_FAMILIES_PER_SCAN=0` means unlimited by count. Qwen3.7 Flash is the cloud classifier for every unresolved export scope, including locally clear candidates. Cost grows only with uncached eligible families, while duplicate representations, repeated scans, shared templates, and simultaneous identical requests reuse paid work. The dollar ceiling remains authoritative even when the family-count cap is unlimited.
 
 The current Ollama-backed setup should use matching settings before Ollama starts:
 

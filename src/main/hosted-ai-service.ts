@@ -12,12 +12,12 @@ import type {
   HostedAiStatus,
   HostedFamilyAnalysisRequest,
   HostedFamilyAnalysisResponse,
+  HostedFamilyBatchReviewRequest,
   HostedFamilyEvidenceRequest,
   HostedFamilyEvidenceResult,
   WorkspaceSnapshot,
 } from '../shared/types';
 import type { AssistantVisualContext } from './assistant-service';
-import { buildHostedFamilyContactSheet } from './hosted-contact-sheet';
 
 const confidenceScoreSchema = z.preprocess(
   (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0),
@@ -41,13 +41,16 @@ const familyAnalysisSchema = z.object({
   analyses: z.array(z.object({
     familyId: z.string(),
     fingerprint: z.string(),
-    familyName: z.string().min(1),
+    // An empty name is a valid, explicit AI uncertainty signal. It must reach
+    // the scan pipeline so Kryeo can flag the asset instead of failing the
+    // entire cloud response.
+    familyName: z.string(),
     assetType: z.string(),
     role: z.string(),
-    modelFamilyName: z.string().min(1).optional(),
+    modelFamilyName: z.string().optional(),
     modelAssetType: z.string().optional(),
     normalizationReason: z.string().optional(),
-    memberNames: z.array(z.object({ visualHash: z.string(), name: z.string().min(1) })),
+    memberNames: z.array(z.object({ visualHash: z.string(), name: z.string() })),
     diveMode: z.enum(['keep-together', 'children-only', 'parent-and-children']),
     reason: z.string().min(1),
     visualDescription: z.string().optional(),
@@ -96,6 +99,8 @@ const familyEvidenceSchema = z.object({
   suggestedRole: z.string().optional(),
   alternatives: z.array(z.object({ assetType: z.string(), reason: z.string() })).default([]),
   cached: z.boolean().default(false),
+  scanProviderCostUsd: z.number().nonnegative().optional(),
+  scanProviderRequests: z.number().int().nonnegative().optional(),
 });
 
 const reconciliationSchema = z.object({
@@ -128,50 +133,66 @@ interface StoredConfigurationFile {
 }
 
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:8787';
-const DETAILED_FAMILY_BATCH_SIZE = 8;
-const SIMPLE_FAMILY_BATCH_SIZE = 16;
+// The desktop and local gateway share a decision contract. Refuse a gateway
+// from an older release rather than silently applying stale classifications.
+const REQUIRED_ANALYSIS_VERSION = 'family-v70';
+const DETAILED_FAMILY_BATCH_SIZE = 2;
+const SIMPLE_FAMILY_BATCH_SIZE = 8;
 const PROGRESSIVE_FAMILY_CONCURRENCY = 2;
 
-function needsDetailedLiteBatch(family: ComponentVisualFamily): boolean {
-  const signal = family.reviewSignals;
-  if (signal?.semanticConflict || Number(signal?.hierarchyAmbiguity || 0) >= 0.55) return true;
-  if (Number(signal?.localMargin ?? 1) < 0.08) return true;
-  return family.members.some((member) => {
-    const width = Number(member.bounds?.width || 0);
-    const height = Number(member.bounds?.height || 0);
-    const aspect = width > 0 && height > 0 ? width / height : 1;
-    const visible = Number(member.visualMetrics?.visiblePixelRatio ?? 1);
-    // Detail crops are sent only on the escalation lane. Treating their mere
-    // existence as a Lite-batch constraint used to cut ordinary contact-sheet
-    // batches to eight without sending any extra pixels to the hosted model.
-    return aspect > 4
-      || aspect < 0.25
-      || visible < 0.08;
-  });
+function mergeFamilyAnalysisResponse(
+  target: HostedFamilyAnalysisResponse,
+  response: HostedFamilyAnalysisResponse,
+): void {
+  target.requestId ||= response.requestId;
+  target.cached += response.cached;
+  target.analyses.push(...response.analyses);
+  target.failures.push(...response.failures);
+  target.skippedFamilyIds?.push(...(response.skippedFamilyIds || []));
+  target.budgetLimited ||= Boolean(response.budgetLimited);
+  target.model ||= response.model;
+  target.reviewTier ||= response.reviewTier;
+  if (typeof response.estimatedCostUsd === 'number') {
+    target.estimatedCostUsd = (target.estimatedCostUsd || 0) + response.estimatedCostUsd;
+  }
+  if (typeof response.scanProviderCostUsd === 'number') {
+    target.scanProviderCostUsd = Math.max(target.scanProviderCostUsd || 0, response.scanProviderCostUsd);
+  }
+  if (typeof response.scanCommittedCostUsd === 'number') {
+    target.scanCommittedCostUsd = Math.max(target.scanCommittedCostUsd || 0, response.scanCommittedCostUsd);
+  }
+  if (typeof response.scanProviderRequests === 'number') {
+    target.scanProviderRequests = Math.max(target.scanProviderRequests || 0, response.scanProviderRequests);
+  }
 }
 
 function adaptiveFamilyBatches(
   families: ComponentVisualFamily[],
   tier: HostedFamilyAnalysisRequest['reviewTier'],
 ): ComponentVisualFamily[][] {
-  if (tier === 'escalation') {
-    return Array.from({ length: Math.ceil(families.length / DETAILED_FAMILY_BATCH_SIZE) }, (_, index) => (
-      families.slice(index * DETAILED_FAMILY_BATCH_SIZE, (index + 1) * DETAILED_FAMILY_BATCH_SIZE)
-    ));
+  const maximum = tier === 'escalation' ? DETAILED_FAMILY_BATCH_SIZE : SIMPLE_FAMILY_BATCH_SIZE;
+  const scopes = new Map<string, ComponentVisualFamily[]>();
+  for (const family of families) {
+    const key = family.namingScopeKey || family.id;
+    const scope = scopes.get(key) || [];
+    scope.push(family);
+    scopes.set(key, scope);
   }
   const batches: ComponentVisualFamily[][] = [];
   let batch: ComponentVisualFamily[] = [];
-  let limit = SIMPLE_FAMILY_BATCH_SIZE;
-  for (const family of families) {
-    const familyLimit = needsDetailedLiteBatch(family) ? DETAILED_FAMILY_BATCH_SIZE : SIMPLE_FAMILY_BATCH_SIZE;
-    const nextLimit = Math.min(limit, familyLimit);
-    if (batch.length >= nextLimit) {
+  for (const scope of scopes.values()) {
+    for (let start = 0; start < scope.length; start += maximum) {
+      const unit = scope.slice(start, start + maximum);
+      if (batch.length && batch.length + unit.length > maximum) {
+        batches.push(batch);
+        batch = [];
+      }
+      batch.push(...unit);
+    }
+    if (batch.length >= maximum) {
       batches.push(batch);
       batch = [];
-      limit = SIMPLE_FAMILY_BATCH_SIZE;
     }
-    batch.push(family);
-    limit = Math.min(limit, familyLimit);
   }
   if (batch.length) batches.push(batch);
   return batches;
@@ -277,19 +298,29 @@ export class HostedAiService {
     const configuration = await this.loadConfiguration();
     try {
       const status = await this.request<HostedAiStatus>('/health', { method: 'GET' }, 3_500);
+      if (status.analysisVersion !== REQUIRED_ANALYSIS_VERSION) {
+        return {
+          ...status,
+          available: false,
+          configured: Boolean(configuration.endpoint),
+          endpoint: configuration.endpoint,
+          message: `The Kryeo AI gateway is running ${status.analysisVersion || 'an unknown decision contract'}, but this app requires ${REQUIRED_ANALYSIS_VERSION}. Restart or update the gateway before scanning so old cached rules cannot be used.`,
+        };
+      }
       return { ...status, configured: Boolean(configuration.endpoint), endpoint: configuration.endpoint };
     } catch (error) {
       return {
         available: false,
         configured: Boolean(configuration.endpoint),
         endpoint: configuration.endpoint,
-        model: 'Hosted Qwen3.7 Flash',
+        model: 'Cloud Qwen 3.7 Flash',
         modelLite: 'qwen/qwen3.7-flash',
         modelEscalation: 'qwen/qwen3.7-flash',
         queueDepth: 0,
         familyBatchSize: SIMPLE_FAMILY_BATCH_SIZE,
         serviceTier: 'auto',
         promptCacheEnabled: false,
+        analysisVersion: REQUIRED_ANALYSIS_VERSION,
         scanTargetUsd: 0.01,
         scanBudgetUsd: 0.03,
         scanBudgetEnforced: true,
@@ -297,8 +328,8 @@ export class HostedAiService {
         maxEscalationFamiliesPerScan: 1,
         liteInputPricePerMillion: 0.03,
         liteOutputPricePerMillion: 0.13,
-        escalationInputPricePerMillion: 0.03,
-        escalationOutputPricePerMillion: 0.13,
+        escalationInputPricePerMillion: 0.104,
+        escalationOutputPricePerMillion: 0.416,
         costEstimateSafetyFactor: 2,
         message: this.configurationWarning || (error instanceof Error ? error.message : 'Kryeo AI is unavailable.'),
       };
@@ -323,18 +354,45 @@ export class HostedAiService {
             ? member.analysisPreviewUrls.slice(0, 2)
             : [],
         })),
+      contextMembers: (family.contextMembers || []).slice(0, 4).map((member) => ({
+        ...member,
+        analysisPreviewUrls: [],
+      })),
     }));
-    const familyContactSheet = request.reviewTier === 'escalation'
-      ? undefined
-      : await buildHostedFamilyContactSheet(compactFamilies);
     // The gateway owns bounded provider recovery. Retrying the complete desktop
     // request here can repurchase a successful cloud call when the response was
     // merely lost between the gateway and Electron.
     const result = await this.request<unknown>('/v1/families/analyze', {
       method: 'POST',
-      body: JSON.stringify({ ...request, families: compactFamilies, familyContactSheet }),
-    }, 180_000, signal);
+      body: JSON.stringify({ ...request, families: compactFamilies }),
+    }, 50_000, signal);
     return familyAnalysisSchema.parse(result) as HostedFamilyAnalysisResponse;
+  }
+
+  private async analyzeFamiliesResilient(
+    request: HostedFamilyAnalysisRequest,
+    signal?: AbortSignal,
+  ): Promise<HostedFamilyAnalysisResponse> {
+    try {
+      return await this.analyzeFamilies(request, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // A failed request is one unresolved batch, not a request to recursively
+      // split and re-buy every family. The gateway already returns partial
+      // results when it has them, and the next scan can retry the remainder.
+      return {
+        requestId: 'desktop-recovery',
+        cached: 0,
+        analyses: [],
+        failures: [{
+          familyIds: request.families.map((family) => family.id),
+          message: error instanceof Error ? error.message : 'Cloud analysis failed for this visual family.',
+        }],
+        skippedFamilyIds: [],
+        budgetLimited: false,
+        reviewTier: request.reviewTier,
+      };
+    }
   }
 
   async explainFamily(
@@ -344,8 +402,29 @@ export class HostedAiService {
     const result = await this.request<unknown>('/v1/families/explain', {
       method: 'POST',
       body: JSON.stringify(request),
-    }, 120_000, signal);
+    }, 75_000, signal);
     return familyEvidenceSchema.parse(result) as HostedFamilyEvidenceResult;
+  }
+
+  async reviewFamilies(
+    request: HostedFamilyBatchReviewRequest,
+    signal?: AbortSignal,
+  ): Promise<HostedFamilyAnalysisResponse> {
+    const compactFamilies = request.families.slice(0, 8).map((family) => ({
+      ...family,
+      members: [...new Map(family.members.map((member) => [member.visualHash, member])).values()]
+        .slice(0, 1)
+        .map((member) => ({ ...member, analysisPreviewUrls: [] })),
+      contextMembers: (family.contextMembers || []).slice(0, 4).map((member) => ({
+        ...member,
+        analysisPreviewUrls: [],
+      })),
+    }));
+    const result = await this.request<unknown>('/v1/families/review', {
+      method: 'POST',
+      body: JSON.stringify({ ...request, families: compactFamilies, reviewTier: 'escalation' }),
+    }, 50_000, signal);
+    return familyAnalysisSchema.parse(result) as HostedFamilyAnalysisResponse;
   }
 
   async analyzeFamiliesProgressively(
@@ -368,36 +447,14 @@ export class HostedAiService {
     for (let index = 0; index < adaptiveBatches.length; index += PROGRESSIVE_FAMILY_CONCURRENCY) {
       if (signal?.aborted) throw new DOMException('Component scan cancelled.', 'AbortError');
       const batches = adaptiveBatches.slice(index, index + PROGRESSIVE_FAMILY_CONCURRENCY);
-      const responses = await Promise.all(
-        batches.map((batch) => this.analyzeFamilies({ ...request, families: batch }, signal)),
-      );
-      let waveCompleted = 0;
-      responses.forEach((response, responseIndex) => {
-        const batch = batches[responseIndex];
-        combined.requestId ||= response.requestId;
-        combined.cached += response.cached;
-        combined.analyses.push(...response.analyses);
-        combined.failures.push(...response.failures);
-        combined.skippedFamilyIds?.push(...(response.skippedFamilyIds || []));
-        combined.budgetLimited ||= Boolean(response.budgetLimited);
-        combined.model ||= response.model;
-        combined.reviewTier ||= response.reviewTier;
-        if (typeof response.estimatedCostUsd === 'number') {
-          combined.estimatedCostUsd = (combined.estimatedCostUsd || 0) + response.estimatedCostUsd;
-        }
-        if (typeof response.scanProviderCostUsd === 'number') {
-          combined.scanProviderCostUsd = Math.max(combined.scanProviderCostUsd || 0, response.scanProviderCostUsd);
-        }
-        if (typeof response.scanCommittedCostUsd === 'number') {
-          combined.scanCommittedCostUsd = Math.max(combined.scanCommittedCostUsd || 0, response.scanCommittedCostUsd);
-        }
-        if (typeof response.scanProviderRequests === 'number') {
-          combined.scanProviderRequests = Math.max(combined.scanProviderRequests || 0, response.scanProviderRequests);
-        }
-        waveCompleted += batch.length;
-        onProgress(Math.min(completedFamilies + waveCompleted, unresolved.length), unresolved.length, response);
-      });
-      completedFamilies += batches.reduce((total, batch) => total + batch.length, 0);
+      await Promise.all(batches.map(async (batch) => {
+        const response = await this.analyzeFamiliesResilient({ ...request, families: batch }, signal);
+        mergeFamilyAnalysisResponse(combined, response);
+        completedFamilies += batch.length;
+        // Report each concurrent batch as soon as it completes. Waiting for its
+        // slower sibling made healthy work look frozen for the full timeout.
+        onProgress(Math.min(completedFamilies, unresolved.length), unresolved.length, response);
+      }));
     }
     return combined;
   }

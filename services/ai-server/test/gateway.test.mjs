@@ -9,7 +9,8 @@ const MODEL_PORT = 18786;
 const GATEWAY_PORT = 18787;
 const TOKEN = 'test-token-that-is-long-enough';
 const PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+4f0ZAAAAAElFTkSuQmCC';
-const VISION_PREVIEW = `data:image/png;base64,${(await fs.readFile(new URL('../../../scripts/fixtures/visual/close-button-red-real.png', import.meta.url))).toString('base64')}`;
+const PREVIEW = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAvElEQVR4nOXOMQEAIAzAsJqcFrSglsnIwZE/zbnvZ+mAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YCWDmjpgJYOaOmAlg5o6YC2QzFCOxSb7YEAAAAASUVORK5CYII=';
+const VISION_PREVIEW = PREVIEW;
 
 function listen(server, port) {
   return new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
@@ -36,7 +37,10 @@ async function waitForGateway() {
 
 function modelResponse(prompt, state = {}) {
   const familyIds = [...new Set(
-    [...prompt.matchAll(/\\"familyId\\":\\"([^"\\]+)\\"/g)].map((match) => match[1]),
+    [
+      ...[...prompt.matchAll(/\\"familyId\\":\\"([^"\\]+)\\"/g)].map((match) => match[1]),
+      ...[...prompt.matchAll(/Observe family ([^.\s]+)\./g)].map((match) => match[1]),
+    ],
   )];
   const compactCount = Number(/Return the compact packet for f1\.\.f(\d+)/.exec(prompt)?.[1] || 0);
   const compactIds = Array.from({ length: compactCount }, (_, index) => `f${index + 1}`);
@@ -65,13 +69,38 @@ function modelResponse(prompt, state = {}) {
   }
   if (prompt.includes('User message:')) {
     return {
-      text: 'Hello from Kryeo.',
+      text: 'Hello from the test assistant.',
       memories: [],
       actions: [{ type: 'open-component-scan', label: 'Review document', description: 'Open Component Scan.' }],
       visionUsed: true,
     };
   }
-  if (prompt.includes('independently audit one existing Kryeo visual classification')) {
+  if (prompt.includes('on demand.') && prompt.includes('Inspect the supplied image and metadata')) {
+    if (prompt.includes('Audit Missing Replacement')) {
+      if (prompt.includes('first audit rejected')) {
+        return {
+          q: 'The compact visual is a decorative emblem rather than a runtime panel.',
+          v: 'A self-contained ornamental marker with a solid central motif.',
+          c: 0.91,
+          e: [0.93, 0.2, 0.3, 0],
+          ok: false,
+          x: true,
+          xm: 'The chosen Panel type conflicts with the standalone emblem artwork.',
+          st: 'Badge',
+          sr: 'ImageLabel',
+          sn: 'Sample Marker Badge',
+        };
+      }
+      return {
+        q: 'The compact visual is a decorative emblem rather than a runtime panel.',
+        v: 'A self-contained ornamental marker with a solid central motif.',
+        c: 0.91,
+        e: [0.93, 0.2, 0.3, 0],
+        ok: false,
+        x: true,
+        xm: 'The chosen Panel type conflicts with the standalone emblem artwork.',
+      };
+    }
     if (prompt.includes('Audit Wrong Frame')) {
       return {
         q: 'The artwork is a hollow ornamental perimeter rather than a runtime container.',
@@ -85,6 +114,20 @@ function modelResponse(prompt, state = {}) {
         sr: 'ImageLabel',
         sn: 'Decorative Border',
         a: [['Ornament', 'It could be ornamental if it is not used as an enclosing perimeter.']],
+      };
+    }
+    if (prompt.includes('Audit Same Type Rename')) {
+      return {
+        q: 'The source identity is compatible, while the proposed adjective and compound subtype are unsupported.',
+        v: 'A thin horizontal status bar.',
+        c: 0.92,
+        e: [0.92, 0.75, 0.2, 0],
+        ok: true,
+        x: false,
+        xm: '',
+        st: 'Bar',
+        sr: 'ImageLabel',
+        sn: 'Focus Bar',
       };
     }
     if (prompt.includes('Audit Unreadable Slot')) {
@@ -115,7 +158,7 @@ function modelResponse(prompt, state = {}) {
   if (prompt.includes('Evidence Only Family')) {
     return {
       visual: 'Large dimensions and low alpha indicate a transparent treatment.',
-      layerName: 'CheckeredTexture',
+      layerName: 'PatternTexture',
       hierarchy: 'Top-level raster node in the hierarchy context.',
       learned: 'Often used as a UI depth or technical treatment.',
     };
@@ -157,52 +200,67 @@ function modelResponse(prompt, state = {}) {
     const roots = ids.map((_, index) => overrides[index]?.name || 'Close Button');
     return {
       r: roots,
-      f: ids.map((familyId, index) => [
-        familyId,
-        index,
-        overrides[index]?.type || 'Button',
-        '',
-        overrides[index]?.uncertain ? 1 : 0,
-        0,
-      ]),
+      f: ids.map((familyId, index) => nullableEvidence
+        ? {
+            id: familyId,
+            n: overrides[index]?.name || 'Close Button',
+            t: overrides[index]?.type || 'Button',
+            r: overrides[index]?.role || 'ImageButton',
+            d: 0,
+            c: 0,
+            e: [null, null, null, null],
+            rv: true,
+          }
+        : [
+            familyId,
+            index,
+            overrides[index]?.type || 'Button',
+            overrides[index]?.name || 'Close Button',
+            overrides[index]?.uncertain ? 1 : 0,
+            0,
+            overrides[index]?.role || 'ImageButton',
+          ]),
     };
   };
   if (prompt.includes('Final Single Recovery Family')) {
     state.finalSingleRecoveryCalls = Number(state.finalSingleRecoveryCalls || 0) + 1;
     if (requestedIds.length > 1) {
       const returnedIds = requestedIds.slice(0, -1);
-      return compactPacket(returnedIds, returnedIds.map(() => ({ name: 'Recovered Visual', type: 'Button' })));
+      return compactPacket(returnedIds, returnedIds.map(() => ({ name: 'Recovered Button', type: 'Button' })));
     }
     if (state.finalSingleRecoveryCalls === 2) return { unexpected: true };
-    return compactPacket(requestedIds, [{ name: 'Final Recovered Visual', type: 'Button' }]);
+    return compactPacket(requestedIds, [{ name: 'Final Recovered Button', type: 'Button' }]);
   }
   if (prompt.includes('Partial Recovery Family')) {
     const returnedIds = requestedIds.length > 1 ? requestedIds.slice(0, -1) : requestedIds;
-    return compactPacket(returnedIds, returnedIds.map(() => ({ name: 'Recovered Visual', type: 'Button' })));
+    return compactPacket(returnedIds, returnedIds.map(() => ({ name: 'Recovered Button', type: 'Button' })));
   }
   if (prompt.includes('Scope Guard Document')) {
-    return compactPacket(requestedIds, [{ name: 'Hotbar Slot Number Holder Border 2', type: 'Border' }]);
+    return compactPacket(requestedIds, [{ name: 'Sample Cell Anchor Border 2', type: 'Border' }]);
   }
   if (prompt.includes('Context Leakage Family')) {
     return compactPacket(requestedIds, [
-      { name: 'Skill Slot', type: 'Slot' },
-      { name: 'Skill Slot Borders', type: 'Border' },
-      { name: 'Skill Slot Border 1', type: 'Border' },
-      { name: 'Skill Slot', type: 'Slot' },
+      { name: 'Action Cell Slot', type: 'Slot' },
+      { name: 'Action Cell Borders', type: 'Border' },
+      { name: 'Action Cell Border 1', type: 'Border' },
+      { name: 'Action Cell Slot', type: 'Slot' },
     ]);
+  }
+  if (prompt.includes('Save Naming Contract Family')) {
+    return compactPacket(requestedIds, [{ name: 'Accent Corner Border', type: 'Border' }]);
   }
   if (prompt.includes('Inset Perimeter Type Guard')) {
     return compactPacket(requestedIds, [
-      { name: 'Main Frame Outer Layers', type: 'Border' },
-      { name: 'Frame', type: 'Frame' },
+      { name: 'Panel Accent Border', type: 'Border', role: 'ImageLabel' },
+      { name: 'Frame', type: 'Frame', role: 'Frame' },
     ]);
   }
-  if (prompt.includes('BackgroundMiddle')) {
+  if (prompt.includes('CenterMarker')) {
     const semantic = [
-      { name: 'Stagger Meter', type: 'Bar', role: 'ImageLabel' },
-      { name: 'Number Badge', type: 'Badge', role: 'ImageLabel' },
-      { name: 'Number Display Holder', type: 'Badge', role: 'ImageLabel' },
-      { name: 'Hotbar Slot Container', type: 'Slot', role: 'ImageButton' },
+      { name: 'Status Bar', type: 'Bar', role: 'ImageLabel' },
+      { name: 'Center Badge', type: 'Badge', role: 'ImageLabel' },
+      { name: 'Anchor Badge', type: 'Badge', role: 'ImageLabel' },
+      { name: 'Sample Cell Slot', type: 'Slot', role: 'ImageButton' },
     ];
     return compactPacket(requestedIds, semantic);
   }
@@ -219,6 +277,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
   const modelImageCounts = [];
   const modelNames = [];
   const modelPrompts = [];
+  const modelRequests = [];
   let activeModelCalls = 0;
   let maxActiveModelCalls = 0;
   const modelState = {};
@@ -230,9 +289,12 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      const usesResponses = request.url === '/v1/responses';
+      const requestInput = usesResponses ? body.input || [] : body.messages || [];
+      modelRequests.push(body);
       modelNames.push(body.model);
-      modelImageCounts.push((JSON.stringify(body.messages || []).match(/\"type\":\"image_url\"/g) || []).length);
-      const prompt = JSON.stringify(body.messages || []);
+      modelImageCounts.push((JSON.stringify(requestInput).match(/\"type\":\"(?:image_url|input_image)\"/g) || []).length);
+      const prompt = JSON.stringify(requestInput);
       modelPrompts.push(prompt);
       if (prompt.includes('Slow Family')) {
         await new Promise((resolve) => {
@@ -247,9 +309,25 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         if (response.destroyed) return;
       }
       if (prompt.includes('Concurrency')) await new Promise((resolve) => setTimeout(resolve, 250));
-      const content = `${JSON.stringify(modelResponse(prompt, modelState))}\n{"trailing":true}`;
+      let content;
+      if (prompt.includes('Protocol Retry Family') && prompt.includes('Return the compact packet')) {
+        modelState.protocolRetryCalls = Number(modelState.protocolRetryCalls || 0) + 1;
+        content = modelState.protocolRetryCalls === 1
+          ? 'The decision packet was accidentally omitted.'
+          : `${JSON.stringify(modelResponse(prompt, modelState))}\n{"trailing":true}`;
+      } else {
+        content = `${JSON.stringify(modelResponse(prompt, modelState))}\n{"trailing":true}`;
+      }
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({
+      response.end(JSON.stringify(usesResponses ? {
+        output: [{ content: [{ type: 'output_text', text: content }] }],
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          total_tokens: 150,
+          cost: 0.0001,
+        },
+      } : {
         choices: [{ message: { content } }],
         usage: {
           prompt_tokens: 100,
@@ -270,16 +348,22 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       ...process.env,
       KRYEO_AI_PORT: String(GATEWAY_PORT),
       KRYEO_AI_TOKENS: TOKEN,
-      KRYEO_AI_MODEL_LITE: 'qwen/qwen3.7-flash',
-      KRYEO_AI_MODEL_ESCALATION: 'qwen/qwen3.7-flash',
-      KRYEO_MODEL_API_KEY: '',
+      KRYEO_AI_MODEL_LITE: 'test-vision-model',
+      KRYEO_AI_MODEL_ESCALATION: 'test-vision-model',
+      KRYEO_MODEL_TRANSPORT: 'responses',
+      KRYEO_MODEL_API_KEY: 'test-gateway-key',
       KRYEO_AI_ALLOW_LOOPBACK_WITHOUT_TOKEN: 'false',
       KRYEO_AI_RATE_LIMIT_PER_MINUTE: '1000',
       KRYEO_AI_MODEL_CONCURRENCY: '2',
       KRYEO_AI_MAX_INFLIGHT_PER_TOKEN: '2',
+      KRYEO_AI_MAX_MODEL_RETRIES: '1',
       KRYEO_AI_SCAN_TARGET_USD: '0.01',
       KRYEO_AI_SCAN_BUDGET_USD: '0.03',
       KRYEO_AI_ENFORCE_SCAN_BUDGET: 'true',
+      KRYEO_AI_LITE_INPUT_PRICE_PER_MILLION: '0',
+      KRYEO_AI_LITE_OUTPUT_PRICE_PER_MILLION: '0',
+      KRYEO_AI_ESCALATION_INPUT_PRICE_PER_MILLION: '0',
+      KRYEO_AI_ESCALATION_OUTPUT_PRICE_PER_MILLION: '0',
       KRYEO_AI_MAX_HOSTED_FAMILIES_PER_SCAN: '0',
       KRYEO_AI_MAX_ESCALATION_FAMILIES_PER_SCAN: '48',
       KRYEO_AI_MAX_CACHE_ENTRIES: '1000',
@@ -295,21 +379,22 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       headers: { authorization: `Bearer ${TOKEN}` },
     }).then((response) => response.json());
     assert.equal(health.modelConcurrency, 2);
-    assert.equal(health.familyBatchSize, 16);
+    assert.equal(health.familyBatchSize, 8);
     assert.equal(health.maxMemberImagesPerFamily, 2);
-    assert.equal(health.modelLite, 'qwen/qwen3.7-flash');
-    assert.equal(health.modelEscalation, 'qwen/qwen3.7-flash');
+    assert.equal(health.modelLite, 'test-vision-model');
+    assert.equal(health.modelEscalation, 'test-vision-model');
+    assert.equal(health.modelTransport, 'responses');
     assert.equal(health.providerSort, 'price');
     assert.equal(health.responseCacheEnabled, false);
     assert.equal(health.maxInflightPerToken, 2);
     assert.equal(health.scanTargetUsd, 0.01);
     assert.equal(health.scanBudgetUsd, 0.03);
     assert.equal(health.scanBudgetEnforced, true);
-    assert.equal(health.liteInputPricePerMillion, 0.03);
-    assert.equal(health.liteOutputPricePerMillion, 0.13);
+    assert.equal(health.liteInputPricePerMillion, 0);
+    assert.equal(health.liteOutputPricePerMillion, 0);
     assert.equal(health.costEstimateSafetyFactor, 2);
     assert.equal(health.maxHostedFamiliesPerScan, 0);
-    assert.equal(health.analysisVersion, 'family-v37');
+    assert.equal(health.analysisVersion, 'family-v70');
     assert.equal(health.maxCacheEntries, 1000);
     assert.equal(modelPrompts.length, 0);
     const unauthorized = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`);
@@ -332,7 +417,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         hierarchyKey: '1',
         parentHierarchyKey: '0',
         childHierarchyKeys: [],
-        previewUrl: PIXEL,
+        previewUrl: PREVIEW,
         analysisPreviewUrls: [],
       }],
     };
@@ -343,12 +428,36 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       body: JSON.stringify({ project: 'Test', documentTitle: 'Document', documentSessionUuid: 'session', families: [family] }),
     }).then((response) => response.json());
     assert.equal(first.analyses[0].assetType, 'Button');
-    assert.equal(first.analyses[0].visualDescription, '');
+    assert.equal(first.analyses[0].visualDescription, 'The supplied preview was classified visually as button.');
     assert.equal(first.analyses[0].confidence, 0.86);
     assert.equal(first.analyses[0].evidence, undefined);
     assert.equal(first.analyses[0].conflict, false);
     assert.equal(first.analyses[0].reviewNeeded, false);
     assert.equal(first.cached, 0);
+    assert.match(
+      modelPrompts.at(-1),
+      /\bjson\b/i,
+      'Every Responses API request must keep JSON instructions in the prompt.',
+    );
+    assert.deepEqual(
+      modelRequests.at(-1).text?.format,
+      { type: 'json_object' },
+      'Responses calls must request JSON mode explicitly.',
+    );
+    assert.deepEqual(
+      modelRequests.at(-1).reasoning,
+      { effort: 'minimal' },
+      'Responses calls must reserve output tokens for the completed JSON packet.',
+    );
+    assert.equal(
+      modelPrompts.at(-1).includes('Every row is [alias,unused,type,name'),
+      true,
+      'The primary request must use one compact schema rather than conflicting packet formats.',
+    );
+    assert.ok(
+      modelRequests.at(-1).max_output_tokens >= 700,
+      'Responses calls need output room beyond hidden minimal reasoning to emit the complete packet.',
+    );
 
     const evidenceRequest = {
       familyFingerprint: family.fingerprint,
@@ -376,6 +485,47 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     }).then((response) => response.json());
     assert.equal(cachedEvidence.cached, true);
 
+    const reviewFamilies = Array.from({ length: 8 }, (_, index) => ({
+      ...family,
+      id: `batch-review-${index + 1}`,
+      fingerprint: `batch-review-fingerprint-${runId}-${index + 1}`,
+      members: [{
+        ...family.members[0],
+        id: `batch-review-member-${index + 1}`,
+        visualHash: `batch-review-hash-${index + 1}`,
+        name: `Layer${index + 1}`,
+        hierarchyKey: `4.${index + 1}`,
+      }],
+    }));
+    const reviewCallsBefore = modelCalls;
+    const batchReview = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/review`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        hostedScanId: `batch-review-scan-${runId}`,
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        families: reviewFamilies,
+        currentAnalyses: reviewFamilies.map((item) => ({
+          familyId: item.id,
+          familyName: 'Uncertain Frame',
+          assetType: 'Frame',
+          role: 'Frame',
+          memberNames: [],
+          diveMode: 'keep-together',
+          reason: 'Primary decision.',
+          reviewNeeded: true,
+          alternatives: [],
+        })),
+        challengeReasons: Object.fromEntries(reviewFamilies.map((item) => [item.id, ['Name/type evidence disagrees.']])),
+      }),
+    }).then((response) => response.json());
+    assert.equal(batchReview.analyses.length, 8);
+    assert.equal(batchReview.failures.length, 0);
+    assert.equal(modelCalls - reviewCallsBefore, 1, 'Eight challenged families must share one visual-review provider call.');
+    assert.equal(modelNames.at(-1), 'test-vision-model', 'The independent reviewer should use the configured visual model.');
+
     const independentFrameAudit = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/explain`, {
       method: 'POST',
       headers,
@@ -394,6 +544,43 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(independentFrameAudit.suggestedType, 'Border');
     assert.equal(independentFrameAudit.suggestedRole, 'ImageLabel');
     assert.equal(independentFrameAudit.suggestedName, 'Decorative Border');
+
+    const sameTypeRenameAudit = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/explain`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        ...evidenceRequest,
+        familyFingerprint: `audit-same-type-rename-${runId}`,
+        visualHash: `audit-same-type-rename-hash-${runId}`,
+        familyName: 'Decorative Scroll Bar',
+        assetType: 'Bar',
+        role: 'ImageLabel',
+        sourceName: 'Audit Same Type Rename',
+      }),
+    }).then((response) => response.json());
+    assert.equal(sameTypeRenameAudit.supportsClassification, false, 'A reviewer rename must be emitted as a complete replacement even when type is unchanged.');
+    assert.equal(sameTypeRenameAudit.conflict, true);
+    assert.equal(sameTypeRenameAudit.suggestedType, 'Bar');
+    assert.equal(sameTypeRenameAudit.suggestedRole, 'ImageLabel');
+    assert.equal(sameTypeRenameAudit.suggestedName, 'Focus Bar');
+
+    const repairedEvidenceAudit = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/explain`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        ...evidenceRequest,
+        familyFingerprint: `audit-missing-replacement-${runId}`,
+        visualHash: `audit-missing-replacement-hash-${runId}`,
+        familyName: 'Sample Panel',
+        assetType: 'Panel',
+        role: 'ImageLabel',
+        sourceName: 'Audit Missing Replacement',
+      }),
+    }).then((response) => response.json());
+    assert.equal(repairedEvidenceAudit.supportsClassification, false);
+    assert.equal(repairedEvidenceAudit.suggestedType, 'Badge');
+    assert.equal(repairedEvidenceAudit.suggestedRole, 'ImageLabel');
+    assert.equal(repairedEvidenceAudit.suggestedName, 'Sample Marker Badge');
 
     const contradictorySlotAudit = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/explain`, {
       method: 'POST',
@@ -450,14 +637,14 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       }),
     }).then((response) => response.json())));
     assert.equal(coalesced.every((result) => result.analyses?.length === 1), true, JSON.stringify(coalesced));
-    assert.equal(modelCalls - callsBeforeCoalescing, 1, 'identical concurrent misses should purchase one model call');
+    assert.equal(modelCalls - callsBeforeCoalescing, 1, 'identical concurrent misses should coalesce into one atomic visual-decision call');
 
     const second = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ project: 'Test', documentTitle: 'Document', documentSessionUuid: 'session', families: [family] }),
     }).then((response) => response.json());
-    assert.equal(second.cached, 1);
+    assert.equal(second.cached, 1, JSON.stringify({ first, second }));
 
     const callsBeforeSharedCache = modelCalls;
     const sharedAcrossUsers = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
@@ -555,8 +742,8 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         families: [escalationFamily],
       }),
     }).then((response) => response.json());
-    assert.equal(escalated.model, 'qwen/qwen3.7-flash');
-    assert.equal(modelNames.at(-1), 'qwen/qwen3.7-flash');
+    assert.equal(escalated.model, 'test-vision-model');
+    assert.equal(modelNames.at(-1), 'test-vision-model');
     assert.equal(modelImageCounts.at(-1), 2, 'escalation should send one family preview plus document context');
 
     const incomplete = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
@@ -577,8 +764,9 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       }),
     }).then((response) => response.json());
     assert.equal(incomplete.analyses.length, 1);
-    assert.equal(incomplete.analyses[0].familyName, 'Diagonal Scanline Overlay');
-    assert.equal(incomplete.analyses[0].assetType, 'Overlay');
+    assert.equal(incomplete.analyses[0].familyName, 'Unlabelled visual');
+    assert.equal(incomplete.analyses[0].assetType, 'Unknown');
+    assert.equal(incomplete.analyses[0].role, 'Unknown');
     assert.equal(incomplete.analyses[0].reviewNeeded, true);
 
     const evidenceOnly = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
@@ -599,8 +787,8 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       }),
     }).then((response) => response.json());
     assert.equal(evidenceOnly.analyses.length, 1);
-    assert.equal(evidenceOnly.analyses[0].assetType, 'Overlay');
-    assert.equal(evidenceOnly.analyses[0].role, 'ImageLabel');
+    assert.equal(evidenceOnly.analyses[0].assetType, 'Unknown');
+    assert.equal(evidenceOnly.analyses[0].role, 'Unknown');
     assert.equal(evidenceOnly.analyses[0].reviewNeeded, true);
     assert.match(evidenceOnly.analyses[0].visualDescription, /transparent treatment/i);
     assert.match(evidenceOnly.analyses[0].reason, /partial evidence/i);
@@ -627,10 +815,6 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         documentTitle: 'Document',
         documentSessionUuid: 'session',
         reviewTier: 'lite',
-        familyContactSheet: {
-          previewUrl: VISION_PREVIEW,
-          familyIds: ['family-batch-one', 'family-batch-two'],
-        },
         families: [
           {
             ...family,
@@ -649,8 +833,29 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     }).then((response) => response.json());
     assert.equal(Array.isArray(batched.analyses), true, JSON.stringify(batched));
     assert.equal(batched.analyses.length, 2);
-    assert.equal(modelCalls - callsBeforeBatch, 1, 'a family batch should use one multimodal decision call');
-    assert.equal(modelImageCounts.at(-1), 1, 'a Lite family batch should send one contact-sheet image');
+    assert.equal(modelCalls - callsBeforeBatch, 1, 'a family batch should use one atomic visual-decision call');
+    assert.equal(modelImageCounts.at(-1), 2, 'a Lite family batch should send each family preview in one atomic request');
+
+    const callsBeforeProtocolRetry = modelCalls;
+    const protocolRetry = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        hostedScanId: `protocol-retry-${runId}`,
+        families: [{
+          ...family,
+          id: 'protocol-retry-family',
+          fingerprint: `protocol-retry-${runId}`,
+          members: [{ ...family.members[0], name: 'Protocol Retry Family' }],
+        }],
+      }),
+    }).then((response) => response.json());
+    assert.equal(protocolRetry.analyses.length, 1, JSON.stringify(protocolRetry));
+    assert.equal(protocolRetry.failures.length, 0, JSON.stringify(protocolRetry));
+    assert.equal(modelCalls - callsBeforeProtocolRetry, 2, 'an invalid decision packet must retry its atomic visual decision once');
 
     const sixteenIds = Array.from({ length: 16 }, (_, index) => `sixteen-family-${index + 1}`);
     const callsBeforeSixteen = modelCalls;
@@ -662,7 +867,6 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         documentTitle: 'Document',
         documentSessionUuid: 'session',
         reviewTier: 'lite',
-        familyContactSheet: { previewUrl: VISION_PREVIEW, familyIds: sixteenIds },
         families: sixteenIds.map((id, index) => ({
           ...family,
           id,
@@ -671,9 +875,9 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         })),
       }),
     }).then((response) => response.json());
-    assert.equal(sixteenFamilyBatch.analyses.length, 16);
-    assert.equal(modelCalls - callsBeforeSixteen, 1, 'sixteen simple families should fit one compact model request');
-    assert.equal(modelImageCounts.at(-1), 1, 'sixteen simple families should share one 512px contact sheet');
+    assert.equal(sixteenFamilyBatch.analyses.length, 16, JSON.stringify(sixteenFamilyBatch));
+    assert.equal(modelCalls - callsBeforeSixteen, 2, 'sixteen families should use two schema-reliable eight-family decisions');
+    assert.equal(modelImageCounts.at(-1), 8, 'each schema-reliable batch should preserve eight direct family previews');
 
     const callsBeforeShiftedBatch = modelCalls;
     const shiftedBatch = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
@@ -684,10 +888,6 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         documentTitle: 'Document',
         documentSessionUuid: 'session',
         reviewTier: 'lite',
-        familyContactSheet: {
-          previewUrl: VISION_PREVIEW,
-          familyIds: ['family-batch-one', 'family-batch-three', 'family-batch-four'],
-        },
         families: [
           {
             ...family,
@@ -717,7 +917,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       new Set(['family-batch-one', 'family-batch-three', 'family-batch-four']),
     );
     assert.equal(modelCalls - callsBeforeShiftedBatch, 1);
-    assert.equal(modelImageCounts.at(-1), 1, 'cached cells must not shift the contact-sheet mapping');
+    assert.equal(modelImageCounts.at(-1), 2, 'cached families must not remove or misalign the remaining direct previews');
 
     const callsBeforePartialBatch = modelCalls;
     const partialBatchIds = ['partial-recovery-one', 'partial-recovery-two', 'partial-recovery-three'];
@@ -729,10 +929,6 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         documentTitle: 'Document',
         documentSessionUuid: 'session',
         reviewTier: 'lite',
-        familyContactSheet: {
-          previewUrl: VISION_PREVIEW,
-          familyIds: partialBatchIds,
-        },
         families: partialBatchIds.map((id, index) => ({
           ...family,
           id,
@@ -741,14 +937,14 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         })),
       }),
     }).then((response) => response.json());
-    assert.equal(partialBatch.analyses.length, 3);
-    assert.deepEqual(new Set(partialBatch.analyses.map((item) => item.familyId)), new Set(partialBatchIds));
-    assert.equal(modelCalls - callsBeforePartialBatch, 2, 'only the one omitted family should be retried');
+    assert.equal(partialBatch.analyses.length, 2);
+    assert.deepEqual(new Set(partialBatch.analyses.map((item) => item.familyId)), new Set(partialBatchIds.slice(0, -1)));
+    assert.equal(modelCalls - callsBeforePartialBatch, 1, 'A partial packet must not fan out into per-family provider retries.');
     assert.equal(partialBatch.recovery.partialBatchResponses, 1);
-    assert.equal(partialBatch.recovery.batchRecoveries, 1);
-    assert.equal(partialBatch.recovery.recoveryFamilies, 1);
+    assert.equal(partialBatch.recovery.batchRecoveries, 0);
+    assert.equal(partialBatch.recovery.recoveryFamilies, 0);
     assert.equal(partialBatch.recovery.singleFamilyRecoveries, 0);
-    assert.deepEqual(partialBatch.failures, []);
+    assert.deepEqual(partialBatch.failures.map((failure) => failure.familyIds), [[partialBatchIds.at(-1)]]);
 
     const callsBeforeFinalSingleRecovery = modelCalls;
     const finalRecoveryIds = ['final-recovery-one', 'final-recovery-two', 'final-recovery-three'];
@@ -760,10 +956,6 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         documentTitle: 'Document',
         documentSessionUuid: 'session',
         reviewTier: 'lite',
-        familyContactSheet: {
-          previewUrl: VISION_PREVIEW,
-          familyIds: finalRecoveryIds,
-        },
         families: finalRecoveryIds.map((id, index) => ({
           ...family,
           id,
@@ -772,14 +964,14 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         })),
       }),
     }).then((response) => response.json());
-    assert.equal(finalSingleRecovery.analyses.length, 3);
-    assert.deepEqual(new Set(finalSingleRecovery.analyses.map((item) => item.familyId)), new Set(finalRecoveryIds));
-    assert.equal(modelCalls - callsBeforeFinalSingleRecovery, 3, 'a persistently omitted alias should receive exactly one final single-family repair');
-    assert.equal(finalSingleRecovery.recovery.singleFamilyRecoveryAttempts, 1);
-    assert.equal(finalSingleRecovery.recovery.singleFamilyRecoveries, 1);
+    assert.equal(finalSingleRecovery.analyses.length, 2);
+    assert.deepEqual(new Set(finalSingleRecovery.analyses.map((item) => item.familyId)), new Set(finalRecoveryIds.slice(0, -1)));
+    assert.equal(modelCalls - callsBeforeFinalSingleRecovery, 1, 'A persistently omitted alias must remain unresolved instead of triggering a retry cascade.');
+    assert.equal(finalSingleRecovery.recovery.singleFamilyRecoveryAttempts, 0);
+    assert.equal(finalSingleRecovery.recovery.singleFamilyRecoveries, 0);
     assert.equal(finalSingleRecovery.recovery.singleFamilyFailures, 0);
-    assert.equal(finalSingleRecovery.scanProviderRequests, 3);
-    assert.deepEqual(finalSingleRecovery.failures, []);
+    assert.equal(finalSingleRecovery.scanProviderRequests, 1, 'provider accounting must reflect the bounded batch request.');
+    assert.deepEqual(finalSingleRecovery.failures.map((failure) => failure.familyIds), [[finalRecoveryIds.at(-1)]]);
 
     const semanticFamilies = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',
@@ -791,44 +983,44 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         families: [
           {
             ...family,
-            id: 'family-stagger',
-            fingerprint: `stagger-${runId}`,
-            members: [{ ...family.members[0], name: 'StaggerBar' }],
+            id: 'family-meter',
+            fingerprint: `meter-${runId}`,
+            members: [{ ...family.members[0], name: 'StatusMeter' }],
           },
           {
             ...family,
-            id: 'family-middle',
-            fingerprint: `middle-${runId}`,
-            members: [{ ...family.members[0], name: 'BackgroundMiddle' }],
+            id: 'family-marker',
+            fingerprint: `marker-${runId}`,
+            members: [{ ...family.members[0], name: 'CenterMarker' }],
           },
           {
             ...family,
-            id: 'family-holder',
-            fingerprint: `holder-${runId}`,
-            members: [{ ...family.members[0], name: 'NumberHolder' }],
+            id: 'family-anchor',
+            fingerprint: `anchor-${runId}`,
+            members: [{ ...family.members[0], name: 'BadgeAnchor' }],
           },
           {
             ...family,
-            id: 'family-hotbar-slot',
-            fingerprint: `hotbar-slot-${runId}`,
-            members: [{ ...family.members[0], name: 'HotbarSlot1' }],
+            id: 'family-sample-cell',
+            fingerprint: `sample-cell-${runId}`,
+            members: [{ ...family.members[0], name: 'SampleCell1' }],
           },
         ],
       }),
     }).then((response) => response.json());
     const semanticById = new Map(semanticFamilies.analyses.map((analysis) => [analysis.familyId, analysis]));
-    assert.equal(semanticById.get('family-stagger').familyName, 'Stagger Meter');
-    assert.equal(semanticById.get('family-stagger').assetType, 'Bar');
-    assert.equal(semanticById.get('family-stagger').role, 'ImageLabel');
-    assert.equal(semanticById.get('family-middle').familyName, 'Middle Background');
-    assert.equal(semanticById.get('family-middle').assetType, 'Background');
-    assert.equal(semanticById.get('family-middle').role, 'ImageLabel');
-    assert.equal(semanticById.get('family-holder').familyName, 'Number Holder');
-    assert.equal(semanticById.get('family-holder').assetType, 'Badge');
-    assert.equal(semanticById.get('family-holder').role, 'ImageLabel');
-    assert.equal(semanticById.get('family-hotbar-slot').familyName, 'Hotbar Slot');
-    assert.equal(semanticById.get('family-hotbar-slot').assetType, 'Slot');
-    assert.equal(semanticById.get('family-hotbar-slot').role, 'ImageButton');
+    assert.equal(semanticById.get('family-meter').familyName, 'Status Bar');
+    assert.equal(semanticById.get('family-meter').assetType, 'Bar');
+    assert.equal(semanticById.get('family-meter').role, 'ImageLabel');
+    assert.equal(semanticById.get('family-marker').familyName, 'Center Badge');
+    assert.equal(semanticById.get('family-marker').assetType, 'Badge');
+    assert.equal(semanticById.get('family-marker').role, 'ImageLabel');
+    assert.equal(semanticById.get('family-anchor').familyName, 'Anchor Badge');
+    assert.equal(semanticById.get('family-anchor').assetType, 'Badge');
+    assert.equal(semanticById.get('family-anchor').role, 'ImageLabel');
+    assert.equal(semanticById.get('family-sample-cell').familyName, 'Sample Cell Slot');
+    assert.equal(semanticById.get('family-sample-cell').assetType, 'Slot');
+    assert.equal(semanticById.get('family-sample-cell').role, 'ImageButton');
 
     const scopeGuard = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',
@@ -843,10 +1035,10 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
           ...family,
           id: 'scope-guard-family',
           fingerprint: `scope-guard-${runId}`,
-          parentNames: ['OuterBorders'],
+          parentNames: ['BorderAssembly'],
           hierarchyContext: [{
-            parentName: 'OuterBorders',
-            ancestorNames: ['HotbarSlot1', 'NumberHolder'],
+            parentName: 'BorderAssembly',
+            ancestorNames: ['SampleCell1', 'BadgeAnchor'],
             childNames: ['Layer1'],
             siblingNames: ['Layer2'],
           }],
@@ -854,8 +1046,8 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         }],
       }),
     }).then((response) => response.json());
-    assert.equal(scopeGuard.analyses[0].familyName, 'Outer Border 2');
-    assert.equal(scopeGuard.analyses[0].memberNames[0].name, 'Outer Border 2');
+    assert.equal(scopeGuard.analyses[0].familyName, 'Sample Cell Anchor Border 2');
+    assert.equal(scopeGuard.analyses[0].memberNames[0].name, 'Sample Cell Anchor Border 2');
 
     const contextLeakage = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',
@@ -869,46 +1061,67 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         families: [
           {
             ...family,
-            id: 'context-number-holder',
-            fingerprint: `context-number-holder-${runId}`,
-            parentNames: ['HotbarSlot1'],
-            hierarchyContext: [{ parentName: 'HotbarSlot1', ancestorNames: [], childNames: ['OuterBorders'], siblingNames: ['SkillHolder'] }],
+            id: 'context-badge-anchor',
+            fingerprint: `context-badge-anchor-${runId}`,
+            parentNames: ['SampleCell1'],
+            hierarchyContext: [{ parentName: 'SampleCell1', ancestorNames: [], childNames: ['BorderAssembly'], siblingNames: ['ActionContainer'] }],
             reviewSignals: { localAssetType: 'Badge' },
-            members: [{ ...family.members[0], name: 'NumberHolder' }],
+            members: [{ ...family.members[0], name: 'BadgeAnchor' }],
           },
           {
             ...family,
-            id: 'context-outer-borders',
-            fingerprint: `context-outer-borders-${runId}`,
-            parentNames: ['SkillHolder'],
-            hierarchyContext: [{ parentName: 'SkillHolder', ancestorNames: [], childNames: [], siblingNames: [] }],
-            members: [{ ...family.members[0], name: 'OuterBorders' }],
+            id: 'context-border-assembly',
+            fingerprint: `context-border-assembly-${runId}`,
+            parentNames: ['ActionContainer'],
+            hierarchyContext: [{ parentName: 'ActionContainer', ancestorNames: [], childNames: [], siblingNames: [] }],
+            members: [{ ...family.members[0], name: 'BorderAssembly' }],
           },
           {
             ...family,
             id: 'context-layer-one',
             fingerprint: `context-layer-one-${runId}`,
-            parentNames: ['OuterBorders'],
-            hierarchyContext: [{ parentName: 'OuterBorders', ancestorNames: ['SkillHolder'], childNames: [], siblingNames: [] }],
+            parentNames: ['BorderAssembly'],
+            hierarchyContext: [{ parentName: 'BorderAssembly', ancestorNames: ['ActionContainer'], childNames: [], siblingNames: [] }],
             members: [{ ...family.members[0], name: 'Layer1' }],
           },
           {
             ...family,
-            id: 'context-skill-holder',
-            fingerprint: `context-skill-holder-${runId}`,
-            parentNames: ['HotbarSlot1'],
-            hierarchyContext: [{ parentName: 'HotbarSlot1', ancestorNames: [], childNames: [], siblingNames: [] }],
-            members: [{ ...family.members[0], name: 'SkillHolder' }],
+            id: 'context-action-container',
+            fingerprint: `context-action-container-${runId}`,
+            parentNames: ['SampleCell1'],
+            hierarchyContext: [{ parentName: 'SampleCell1', ancestorNames: [], childNames: [], siblingNames: [] }],
+            members: [{ ...family.members[0], name: 'ActionContainer' }],
           },
         ],
       }),
     }).then((response) => response.json());
     const contextLeakageById = new Map(contextLeakage.analyses.map((analysis) => [analysis.familyId, analysis]));
-    assert.equal(contextLeakageById.get('context-number-holder').familyName, 'Number Holder');
-    assert.equal(contextLeakageById.get('context-number-holder').assetType, 'Badge');
-    assert.equal(contextLeakageById.get('context-outer-borders').familyName, 'Outer Border');
-    assert.equal(contextLeakageById.get('context-layer-one').familyName, 'Outer Border 1');
-    assert.equal(contextLeakageById.get('context-skill-holder').familyName, 'Skill Slot');
+    assert.equal(contextLeakageById.get('context-badge-anchor').familyName, 'Action Cell Slot');
+    assert.equal(contextLeakageById.get('context-badge-anchor').assetType, 'Slot');
+    assert.equal(contextLeakageById.get('context-border-assembly').familyName, 'Action Cell Borders');
+    assert.equal(contextLeakageById.get('context-layer-one').familyName, 'Action Cell Border 1');
+    assert.equal(contextLeakageById.get('context-action-container').familyName, 'Action Cell Slot');
+
+    const saveNamingContract = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        projectKnowledge: 'Save Naming Contract Family',
+        reviewTier: 'lite',
+        families: [{
+          ...family,
+          id: 'save-naming-contract',
+          fingerprint: `save-naming-contract-${runId}`,
+          members: [{ ...family.members[0], name: 'AccentCornerHover' }],
+        }],
+      }),
+    }).then((response) => response.json());
+    assert.equal(saveNamingContract.analyses[0].assetType, 'Border');
+    assert.equal(saveNamingContract.analyses[0].familyName, 'Accent Corner Border');
+    assert.equal(saveNamingContract.analyses[0].memberNames[0].name, 'Accent Corner Border');
 
     const insetPerimeterMetrics = {
       visiblePixelRatio: 0.28,
@@ -937,7 +1150,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
             parentNames: ['Frames'],
             hierarchyContext: [{ parentName: 'Frames', ancestorNames: ['RegularSlot'], childNames: [], siblingNames: [] }],
             reviewSignals: { localAssetType: 'Frame', localRole: 'Frame' },
-            members: [{ ...family.members[0], visualHash: 'inset-model-border-hash', name: 'MainFrameOuterLayers', visualMetrics: insetPerimeterMetrics }],
+            members: [{ ...family.members[0], visualHash: 'inset-model-border-hash', name: 'PanelFrameLayers', visualMetrics: insetPerimeterMetrics }],
           },
           {
             ...family,
@@ -946,7 +1159,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
             parentNames: ['Frames'],
             hierarchyContext: [{ parentName: 'Frames', ancestorNames: ['RegularSlot'], childNames: [], siblingNames: [] }],
             reviewSignals: { localAssetType: 'Frame', localRole: 'Frame' },
-            members: [{ ...family.members[0], visualHash: 'inset-model-frame-hash', name: 'OuterLayers', visualMetrics: insetPerimeterMetrics }],
+            members: [{ ...family.members[0], visualHash: 'inset-model-frame-hash', name: 'FrameLayers', visualMetrics: insetPerimeterMetrics }],
           },
         ],
       }),
@@ -955,11 +1168,10 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(insetById.get('inset-model-border').assetType, 'Border', 'a target word such as Frame must not undo a correct visual Border result');
     assert.equal(insetById.get('inset-model-border').role, 'ImageLabel');
     assert.equal(insetById.get('inset-model-border').modelAssetType, 'Border');
-    assert.equal(insetById.get('inset-model-frame').assetType, 'Border', 'content-relative perimeter geometry must correct a hosted Frame result');
-    assert.equal(insetById.get('inset-model-frame').role, 'ImageLabel');
+    assert.equal(insetById.get('inset-model-frame').assetType, 'Frame', 'the gateway must not rewrite only the hosted type after the visual decision');
+    assert.equal(insetById.get('inset-model-frame').role, 'Frame');
     assert.equal(insetById.get('inset-model-frame').modelAssetType, 'Frame');
-    assert.match(insetById.get('inset-model-frame').normalizationReason, /hollow perimeter/i);
-    assert.equal(insetById.get('inset-model-frame').reviewNeeded, true);
+    assert.equal(insetById.get('inset-model-frame').normalizationReason, undefined);
 
     const largeFamilies = Array.from({ length: 1000 }, (_, index) => ({
       ...family,
@@ -988,10 +1200,6 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
           hostedScanId: largeScanId,
           reviewTier: 'lite',
           maxMemberImages: 1,
-          familyContactSheet: {
-            previewUrl: VISION_PREVIEW,
-            familyIds: batch.map((item) => item.id),
-          },
           families: batch,
         }),
       }).then((response) => response.json());
@@ -1002,11 +1210,19 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.deepEqual(largeSkipped, []);
     assert.equal(largeScan.budgetLimited, false);
     assert.ok(largeScan.scanProviderCostUsd > 0);
-    assert.ok(largeScan.scanProviderCostUsd < 0.01, 'large cloud scans should expose their provider-reported spend');
+    assert.ok(largeScan.scanProviderCostUsd < 0.03, 'large cloud scans should expose provider spend within the configured ceiling');
     const boundedCacheHealth = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`, { headers })
       .then((response) => response.json());
     assert.ok(boundedCacheHealth.cacheEntries <= 1000, 'structured cache growth must remain bounded');
     assert.ok(boundedCacheHealth.cacheEvictions > 0, 'the cache should evict its oldest derived entries after reaching the configured cap');
+    const clearedCache = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/cache/clear`, {
+      method: 'POST',
+      headers,
+    }).then((response) => response.json());
+    assert.deepEqual(clearedCache, { cleared: true, analysisVersion: 'family-v70', cacheEntries: 0 });
+    const clearedCacheHealth = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`, { headers })
+      .then((response) => response.json());
+    assert.equal(clearedCacheHealth.cacheEntries, 0, 'cache clearing must remove derived decisions before the next scan');
 
     const nullableEvidence = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',
@@ -1075,7 +1291,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         images: [{ label: 'document', dataUrl: PIXEL }],
       }),
     }).then((response) => response.json());
-    assert.equal(chat.text, 'Hello from Kryeo.');
+    assert.equal(chat.text, 'Hello from the test assistant.');
     assert.equal(chat.actions[0].type, 'open-component-scan');
   } finally {
     gateway.kill();

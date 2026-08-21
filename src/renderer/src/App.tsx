@@ -56,12 +56,15 @@ import type {
   ComponentDiveMode,
   ComponentScanProgress,
   ComponentScanResult,
+  ComponentScanMode,
   ComponentScanScope,
   HostedAiStatus,
   LocalAiStatus,
   ConnectorSnapshot,
   ConfiguredToolRequest,
   DocumentContext,
+  DeveloperLogEntry,
+  DeveloperLogSnapshot,
   KryeoTool,
   KryeoConnector,
   LibraryLogs,
@@ -70,7 +73,6 @@ import type {
   SaveAssetRequest,
   ToolCategory,
   JobRecord,
-  ProjectRecipe,
   RobloxUiRole,
   WorkspaceSnapshot,
   WorkflowPreset,
@@ -82,6 +84,18 @@ declare const __KRYEO_VERSION__: string;
 const APP_VERSION = __KRYEO_VERSION__;
 
 type Page = 'home' | 'assistant' | 'learning' | 'connectors' | 'tools' | 'import' | 'assets' | 'activity' | 'settings' | 'save' | 'configure' | 'place';
+type SettingsStartPage = Extract<Page, 'home' | 'assistant' | 'learning' | 'connectors' | 'tools' | 'import' | 'assets' | 'activity'>;
+
+const SETTINGS_START_PAGES: Array<{ id: SettingsStartPage; label: string }> = [
+  { id: 'home', label: 'Pipeline' },
+  { id: 'assistant', label: 'Assistant' },
+  { id: 'assets', label: 'Assets' },
+  { id: 'tools', label: 'Workflows' },
+  { id: 'import', label: 'Scan & export' },
+  { id: 'learning', label: 'Learning' },
+  { id: 'connectors', label: 'Connectors' },
+  { id: 'activity', label: 'Activity' },
+];
 
 interface ActivityEntry extends ScriptRunResult {
   id: string;
@@ -118,7 +132,13 @@ const EMPTY_LIBRARY: AssetLibrarySnapshot = {
 };
 
 const EMPTY_WORKSPACE: WorkspaceSnapshot = {
-  jobs: [], recipes: [], presets: [], links: [], preferences: [], componentDecisions: [], componentManifests: [], assistantMemories: [], assistantSessions: [], assistantMessages: [], projectKnowledge: [], updatedAt: '',
+  jobs: [], presets: [], links: [], preferences: [], componentDecisions: [], componentManifests: [], scanIntentProfiles: [], assistantMemories: [], assistantSessions: [], assistantMessages: [], projectKnowledge: [], updatedAt: '',
+};
+
+const EMPTY_DEVELOPER_LOG: DeveloperLogSnapshot = {
+  enabled: false,
+  entries: [],
+  filePath: '',
 };
 
 const EMPTY_CONNECTORS: ConnectorSnapshot = {
@@ -140,8 +160,6 @@ const toolIcons = {
 
 const categoryOrder: ToolCategory[] = ['Assets', 'Pixel tools', 'Symmetry', 'Utilities'];
 const minimumBootMs = import.meta.env.DEV ? Number(import.meta.env.VITE_KRYEO_BOOT_MS || 2400) : 2400;
-const DEFAULT_HOSTED_AI_ENDPOINT = String(import.meta.env.VITE_KRYEO_AI_ENDPOINT || 'http://127.0.0.1:8787');
-
 const ASSET_TYPES = [
   'Frame', 'Button', 'Icon', 'Panel', 'Slot', 'Bar', 'Badge', 'Label', 'Text', 'TextBox',
   'ScrollBar', 'Divider', 'Background', 'Wallpaper', 'Texture', 'Overlay', 'Cursor', 'Tooltip', 'Modal', 'Input',
@@ -161,13 +179,14 @@ function categoryForType(type: string): string {
 
 function hostedModelLabel(model?: string): string {
   const normalized = String(model || '').trim();
-  if (!normalized) return 'Hosted reviewer';
+  if (!normalized) return 'Cloud reviewer';
   const lower = normalized.toLowerCase();
   if (lower.includes('gemini-3.1-flash-lite')) return 'Gemini 3.1 Flash Lite';
   if (lower.includes('gemini-3-flash')) return 'Gemini 3 Flash';
-  if (lower.includes('gemini')) return 'Gemini hosted reviewer';
-  if (lower.includes('qwen')) return 'Qwen';
-  return normalized.split('/').pop()?.replace(/[-_]+/g, ' ') || 'Hosted reviewer';
+  if (lower.includes('gemini')) return 'Gemini cloud reviewer';
+  if (lower.includes('qwen3.7') || lower.includes('qwen-3.7') || lower.includes('qwen 3.7')) return 'Cloud Qwen 3.7 Flash';
+  if (lower.includes('qwen')) return 'Cloud Qwen reviewer';
+  return normalized.split('/').pop()?.replace(/[-_]+/g, ' ') || 'Cloud reviewer';
 }
 
 function readActivity(): ActivityEntry[] {
@@ -273,7 +292,8 @@ function AssetPreviewCanvas({ source, label }: { source: string; label: string }
 function App() {
   const workspaceContentRef = useRef<HTMLDivElement>(null);
   const [page, setPage] = useState<Page>(() => {
-    const saved = localStorage.getItem('kryeo.page') as Page | null;
+    const preferred = localStorage.getItem('kryeo.start-page') as Page | null;
+    const saved = preferred || localStorage.getItem('kryeo.page') as Page | null;
     return saved && ['home', 'assistant', 'connectors', 'tools', 'import', 'assets', 'activity', 'settings', 'save', 'configure', 'place'].includes(saved) ? saved : 'home';
   });
   const [status, setStatus] = useState<AffinityStatus>(EMPTY_STATUS);
@@ -300,6 +320,9 @@ function App() {
   const [commandQuery, setCommandQuery] = useState('');
   const [bootState, setBootState] = useState<'active' | 'leaving' | 'done'>('active');
   const [savingKey, setSavingKey] = useState(false);
+  const [developerMode, setDeveloperMode] = useState(() => localStorage.getItem('kryeo.developer-mode') === 'true');
+  const [developerLog, setDeveloperLog] = useState<DeveloperLogSnapshot>(EMPTY_DEVELOPER_LOG);
+  const developerModeSync = useRef(developerMode);
 
   const refreshDocument = useCallback(async () => {
     try {
@@ -367,23 +390,47 @@ function App() {
   }, [refreshDocument]);
 
   useEffect(() => {
+    const unsubscribe = window.kryeo.onDeveloperLog((entry) => {
+      setDeveloperLog((current) => ({
+        ...current,
+        entries: [...current.entries, entry].slice(-5000),
+      }));
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
     let active = true;
     let exitTimer = 0;
-    void Promise.all([
-      refreshAll(true),
-      new Promise((resolve) => window.setTimeout(resolve, minimumBootMs)),
-    ]).finally(() => {
+    void (async () => {
+      try {
+        setDeveloperLog(await window.kryeo.setDeveloperMode(developerMode));
+      } catch {
+        // Developer logging is optional and must not hold up the boot flow.
+      }
+      await Promise.all([
+        refreshAll(true),
+        new Promise((resolve) => window.setTimeout(resolve, minimumBootMs)),
+      ]);
       if (!active) return;
       setBootState('leaving');
       exitTimer = window.setTimeout(() => {
         if (active) setBootState('done');
       }, 360);
-    });
+    })();
     return () => {
       active = false;
       window.clearTimeout(exitTimer);
     };
   }, [refreshAll]);
+
+  useEffect(() => {
+    if (developerModeSync.current === developerMode) return;
+    developerModeSync.current = developerMode;
+    void window.kryeo.setDeveloperMode(developerMode)
+      .then(setDeveloperLog)
+      .catch(() => undefined);
+  }, [developerMode]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -458,7 +505,7 @@ function App() {
       setPage('place');
       return;
     }
-    if (/asset library\s*-\s*(export|setup|update)|pixel helper\s*-\s*hand shade/i.test(tool.title)) {
+    if (/asset library\s*-\s*(export|update)|pixel helper\s*-\s*hand shade/i.test(tool.title)) {
       setConfiguredTool(tool);
       setPage('configure');
       return;
@@ -560,7 +607,6 @@ function App() {
     if (job.operation === 'save') await window.kryeo.saveAsset(payload as unknown as SaveAssetRequest);
     if (job.operation === 'configured') await window.kryeo.runConfiguredTool(payload as unknown as ConfiguredToolRequest);
     if (job.operation === 'place') await window.kryeo.placeAsset(payload as unknown as PlaceAssetRequest);
-    if (job.operation === 'auto-export') await window.kryeo.runAutoExport(String(payload.project || ''));
     if (job.operation === 'delivery') await window.kryeo.deliverProject(String(payload.project || ''), 'roblox');
     if (job.operation === 'cleanup') await window.kryeo.cleanupStaging();
     setWorkspace(await window.kryeo.getWorkspace());
@@ -587,7 +633,6 @@ function App() {
       <header className="titlebar">
         <div className="brand-mark" aria-hidden="true"><img src={kryeoMark} alt="" /></div>
         <span className="brand-name">Kryeo</span>
-        <span className="titlebar-context">v{APP_VERSION}</span>
       </header>
 
       <aside className="command-rail" aria-label="Primary navigation">
@@ -618,8 +663,6 @@ function App() {
           assetCategory={assetCategory}
           setAssetCategory={setAssetCategory}
           library={library}
-          connectors={connectors}
-          activities={activities}
         />
       </aside>
 
@@ -701,6 +744,7 @@ function App() {
               document={document}
               connected={status.state === 'connected'}
               onWorkspace={setWorkspace}
+              developerMode={developerMode}
             />
           )}
           {page === 'assets' && (
@@ -715,6 +759,7 @@ function App() {
               project={assetProject === 'All' ? (filteredAssets[0]?.project || library.projects[0] || 'General') : assetProject}
               onWorkspace={setWorkspace}
               onPreference={savePreference}
+              onNavigate={setPage}
             />
           )}
           {page === 'activity' && (
@@ -729,7 +774,7 @@ function App() {
             />
           )}
           {page === 'settings' && (
-            <SettingsPage version={APP_VERSION} status={status} library={library} connectors={connectors} workspace={workspace} onReconnect={() => void refreshAll(true)} onWorkspace={setWorkspace} />
+            <SettingsPage version={APP_VERSION} status={status} onReconnect={() => void refreshAll(true)} onWorkspace={setWorkspace} developerMode={developerMode} onDeveloperModeChange={setDeveloperMode} developerLog={developerLog} onDeveloperLogChange={setDeveloperLog} />
           )}
           {page === 'save' && (
             <SavePage
@@ -774,7 +819,7 @@ function App() {
         />
       </aside>}
       {commandOpen && <CommandPalette query={commandQuery} setQuery={setCommandQuery} tools={tools} assets={library.assets} onClose={() => setCommandOpen(false)} onPage={(next) => { setPage(next); setCommandOpen(false); }} onTool={(tool) => { void runTool(tool); setCommandOpen(false); }} onAsset={(asset) => { void openAsset(asset); setCommandOpen(false); }} />}
-      {bootState !== 'done' && <BootScreen version={APP_VERSION} leaving={bootState === 'leaving'} />}
+      {bootState !== 'done' && <BootScreen leaving={bootState === 'leaving'} />}
     </div>
   );
 }
@@ -788,32 +833,44 @@ interface SectionNavigationProps {
   assetCategory: string;
   setAssetCategory: (category: string) => void;
   library: AssetLibrarySnapshot;
-  connectors: ConnectorSnapshot;
-  activities: ActivityEntry[];
 }
 
 function SectionNavigation(props: SectionNavigationProps) {
-  const titles: Record<Page, [string, string]> = {
-    home: ['Pipeline', ''],
-    assistant: ['Assistant', 'Project-aware guidance and reviewed actions'],
-    learning: ['Learning', 'Review and manage what Kryeo remembers'],
-    connectors: ['Connectors', `${props.connectors.connectors.filter((connector) => connector.installed).length} applications installed`],
-    tools: ['Workflows', 'Run Affinity workflows'],
-    import: ['Import', 'Find and organize components in the active Affinity document'],
-    assets: ['Assets', props.library.message],
-    activity: ['Activity', ''],
-    settings: ['Settings', ''],
-    save: ['Save asset', 'Guided naming and output'],
-    configure: ['Configure tool', 'Run the workflow through Kryeo'],
-    place: ['Place asset', 'Insert a saved version into the active document'],
+  const titles: Record<Page, string> = {
+    home: 'Pipeline',
+    assistant: 'Assistant',
+    learning: 'Learning',
+    connectors: 'Connectors',
+    tools: 'Workflows',
+    import: 'Scan & export',
+    assets: 'Assets',
+    activity: 'Activity',
+    settings: 'Settings',
+    save: 'Save asset',
+    configure: 'Configure tool',
+    place: 'Place asset',
   };
-  const [title, subtitle] = titles[props.page];
+  const descriptions: Record<Page, string> = {
+    home: 'Move visual work from a live Affinity document into production-ready assets.',
+    assistant: 'Keep project decisions and visual context together while you work.',
+    learning: 'Review the visual rules Kryeo remembers for this workspace.',
+    connectors: 'Check the applications that can send work into and out of Kryeo.',
+    tools: 'Run focused operations against the current Affinity document.',
+    import: 'Inspect a document, keep the hierarchy intact, then build reusable assets.',
+    assets: 'Browse, inspect, and place the reusable pieces your project depends on.',
+    activity: 'Follow active jobs and recent work without losing your place.',
+    settings: 'Tune the local workspace, connection, and assistant behavior.',
+    save: 'Name a selected layer once and store a safe, reusable version.',
+    configure: 'Set the workflow inputs before Kryeo changes the source document.',
+    place: 'Choose a library asset and place the right working version in Affinity.',
+  };
+  const title = titles[props.page];
 
   return (
     <div className="section-nav-inner">
       <div className="section-heading">
         <h1>{title}</h1>
-        {subtitle && <p>{subtitle}</p>}
+        <p>{descriptions[props.page]}</p>
       </div>
 
       {props.page === 'tools' && (
@@ -874,7 +931,6 @@ function HomePage(props: HomePageProps) {
       <section className="context-band">
         <div className="context-icon"><Layers3 size={25} /></div>
         <div className="context-copy">
-          <span>Active document</span>
           <strong>{props.document.open ? props.document.title : 'No document detected'}</strong>
           <p>
             {props.document.open
@@ -911,16 +967,15 @@ function HomePage(props: HomePageProps) {
       </section>
 
       <section className="pipeline-actions">
-        <button onClick={() => props.onNavigate('connectors')}><Cable size={17} /><span><b>Manage connectors</b><small>Review installed apps and route readiness.</small></span><ChevronRight size={16} /></button>
-        <button onClick={() => props.onNavigate('assets')}><HardDrive size={17} /><span><b>Open asset library</b><small>Browse versioned production assets.</small></span><ChevronRight size={16} /></button>
-        <button onClick={() => props.onNavigate('tools')}><Blocks size={17} /><span><b>Run a workflow</b><small>Use the active Affinity connector.</small></span><ChevronRight size={16} /></button>
+        <button onClick={() => props.onNavigate('connectors')}><Cable size={17} /><span><b>Manage connectors</b></span><ChevronRight size={16} /></button>
+        <button onClick={() => props.onNavigate('assets')}><HardDrive size={17} /><span><b>Open asset library</b></span><ChevronRight size={16} /></button>
+        <button onClick={() => props.onNavigate('tools')}><Blocks size={17} /><span><b>Run a workflow</b></span><ChevronRight size={16} /></button>
       </section>
 
       <section className="content-section">
         <div className="section-title-row">
           <div>
             <h2>Active connector workflows</h2>
-            <p>Run the current Affinity adapter without leaving Kryeo.</p>
           </div>
           <button className="text-button" onClick={() => props.onNavigate('tools')}>View all <ChevronRight size={15} /></button>
         </div>
@@ -937,7 +992,6 @@ function HomePage(props: HomePageProps) {
         <div className="section-title-row">
           <div>
             <h2>Recent assets</h2>
-            <p>The latest entries in your local asset index.</p>
           </div>
           <button className="text-button" onClick={() => props.onNavigate('assets')}>Browse library <ChevronRight size={15} /></button>
         </div>
@@ -955,9 +1009,9 @@ function ToolCard({ tool, runningTitle, connected, onRun }: {
 }) {
   const isRunning = runningTitle === tool.title;
   const disabled = !connected || Boolean(runningTitle);
-  const configurable = tool.id === 'place-asset' || /asset library\s*-\s*(export|setup|update)|pixel helper\s*-\s*hand shade/i.test(tool.title);
+  const configurable = tool.id === 'place-asset' || /asset library\s*-\s*(export|update)|pixel helper\s*-\s*hand shade/i.test(tool.title);
   return (
-    <article className="tool-card" title={`Affinity workflow v${tool.version}`}>
+    <article className="tool-card">
       <div className="tool-card-top">
         <span className="tool-icon"><ToolIcon tool={tool} /></span>
       </div>
@@ -1006,7 +1060,7 @@ function ToolsPage({ tools, loading, runningTitle, connected, workflowError, onR
         <div className="empty-state"><Blocks size={30} /><h2>No matching tools</h2><p>Try a different search or category.</p></div>
       ) : groups.map((group) => (
         <section className="content-section" key={group.category}>
-          <div className="section-title-row"><div><h2>{group.category}</h2><p>{group.tools.length} available</p></div></div>
+          <div className="section-title-row"><div><h2>{group.category}</h2></div></div>
           <div className="tool-grid">
             {group.tools.map((tool) => <ToolCard key={tool.id} tool={tool} runningTitle={runningTitle} connected={connected} onRun={onRun} />)}
           </div>
@@ -1054,7 +1108,7 @@ function ConnectorsPage({ snapshot, onRefresh }: {
       <section className={`connector-intro ${scanning ? 'is-scanning' : ''}`}>
         <div>
           <h2>Application connectors</h2>
-          <p>{snapshot.connectors.filter((connector) => connector.installed).length} detected on this computer</p>
+          <p>Discover what is ready on this device before you start a workflow.</p>
         </div>
         <button className="secondary-button" onClick={() => void refresh()} disabled={scanning}>
           {scanning ? <LoaderCircle className="spin" size={16} /> : <ScanSearch size={16} />}
@@ -1077,7 +1131,7 @@ function ConnectorGroup({ title, connectors }: {
 }) {
   return (
     <section className="content-section">
-      <div className="section-title-row"><div><h2>{title}</h2></div></div>
+      <div className="section-title-row"><div><h2>{title}</h2><p>{connectors.length} {connectors.length === 1 ? 'application' : 'applications'} available to check</p></div></div>
       <div className="connector-grid">
         {connectors.map((connector) => (
           <article className="connector-card" key={connector.id}>
@@ -1119,7 +1173,6 @@ const SHADE_STYLES = [
 
 function configuredKind(title: string): ConfiguredToolRequest['kind'] {
   if (/export/i.test(title)) return 'export';
-  if (/setup/i.test(title)) return 'setup';
   if (/update/i.test(title)) return 'update';
   return 'shade';
 }
@@ -1149,21 +1202,19 @@ function ConfiguredToolPage({ tool, document, library, connected, running, onRun
   onWorkspace: (workspace: WorkspaceSnapshot) => void;
 }) {
   const kind = configuredKind(tool.title);
-  const home = library.root.replace(/[\\/]Assets[\\/]?$/i, '') || 'C:\\Users\\Public\\Desktop\\Asset Library';
   const [values, setValues] = useState<Record<string, string | number | boolean>>({});
   const [presetName, setPresetName] = useState('');
   const presets = workspace.presets.filter((preset) => preset.kind === kind);
 
   useEffect(() => {
     if (kind === 'export') setValues({ project: library.projects[0] || '', preset: 'PNG (Pixel)', latest: true, stable: true });
-    if (kind === 'setup') setValues({ home, assets: `${home}\\Assets`, exports: `${home}\\Exported Assets`, controlPanel: true, openers: true, overwrite: true });
     if (kind === 'update') setValues({ rebuildBase: true, rebuildRaster: true, defaultVisibility: true, changeNote: '' });
     if (kind === 'shade') setValues({
       light: 0, mode: 0, style: 23, scope: 0, fadeMode: 0, palette: 1, detailScale: 1,
       affect: 0, outlineMode: 1, protectOutlines: false, protectHighlights: false,
       strength: 1, texture: 1, highlightVariation: 1, placement: 0, dither: false,
     });
-  }, [home, kind, library.projects, tool.title]);
+  }, [kind, library.projects, tool.title]);
 
   const setValue = (key: string, value: string | number | boolean) => setValues((current) => ({ ...current, [key]: value }));
   const needsSelection = kind === 'shade';
@@ -1179,7 +1230,6 @@ function ConfiguredToolPage({ tool, document, library, connected, running, onRun
       <section className="save-context-band">
         <div className="context-icon"><ToolIcon tool={tool} size={23} /></div>
         <div>
-          <span>{kind === 'setup' || kind === 'export' ? 'Workflow' : 'Affinity source'}</span>
           <strong>{needsDocument ? (document.open ? document.title : 'No Affinity document detected') : tool.displayName}</strong>
           <p>{tool.description}</p>
           {needsSelection && document.selectionNames.length > 0 && <div className="selected-layer-names">{document.selectionNames.map((name, index) => <span key={`${name}-${index}`}>{name}</span>)}</div>}
@@ -1188,7 +1238,7 @@ function ConfiguredToolPage({ tool, document, library, connected, running, onRun
       </section>
 
       <section className="save-section workflow-fields">
-        <div className="save-section-heading"><span>01</span><div><h2>{tool.displayName}</h2><p>Choose the output, then Kryeo runs the Affinity workflow directly.</p></div></div>
+        <div className="save-section-heading"><div><h2>{tool.displayName}</h2></div></div>
         <div className="preset-bar">
           <label>Preset<select defaultValue="" onChange={(event) => { const preset = presets.find((item) => item.id === event.target.value); if (preset) setValues(preset.values); }}><option value="">Current settings</option>{presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.name}</option>)}</select></label>
           <label>Save as<input value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder="My preset" /></label>
@@ -1203,19 +1253,6 @@ function ConfiguredToolPage({ tool, document, library, connected, running, onRun
           <div className="save-options-grid">
             <CheckField checked={Boolean(values.latest)} onChange={(value) => setValue('latest', value)} title="Latest versions" description="Export each asset's newest saved version." />
             <CheckField checked={Boolean(values.stable)} onChange={(value) => setValue('stable', value)} title="Stable versions" description="Include versions marked stable by the library." />
-          </div>
-        </>}
-
-        {kind === 'setup' && <>
-          <div className="workflow-grid workflow-grid--single">
-            <label>Library home<input value={String(values.home || '')} onChange={(event) => setValue('home', event.target.value)} /></label>
-            <label>Assets folder<input value={String(values.assets || '')} onChange={(event) => setValue('assets', event.target.value)} /></label>
-            <label>Exports folder<input value={String(values.exports || '')} onChange={(event) => setValue('exports', event.target.value)} /></label>
-          </div>
-          <div className="save-options-grid">
-            <CheckField checked={Boolean(values.controlPanel)} onChange={(value) => setValue('controlPanel', value)} title="Control panel" description="Create the library dashboard and helper files." />
-            <CheckField checked={Boolean(values.openers)} onChange={(value) => setValue('openers', value)} title="Folder openers" description="Create shortcuts for the main library folders." />
-            <CheckField checked={Boolean(values.overwrite)} onChange={(value) => setValue('overwrite', value)} title="Refresh existing setup" description="Replace generated support files with the latest versions." />
           </div>
         </>}
 
@@ -1270,11 +1307,11 @@ function PlaceAssetPage({ document, library, connected, placing, onPlace }: {
     <form className="workflow-page enter-page" onSubmit={submit}>
       <section className="save-context-band">
         <div className="context-icon"><MousePointer2 size={23} /></div>
-        <div><span>Place into</span><strong>{document.open ? document.title : 'No Affinity document detected'}</strong><p>The chosen asset version will be inserted as a new layer in this document.</p></div>
+        <div><strong>{document.open ? document.title : 'No Affinity document detected'}</strong></div>
         <div className={`save-readiness ${ready ? 'is-ready' : ''}`}>{ready ? 'Target ready' : 'Document required'}</div>
       </section>
       <section className="save-section workflow-fields">
-        <div className="save-section-heading"><span>01</span><div><h2>Choose asset</h2><p>Select an indexed asset and the exact saved version you need.</p></div></div>
+        <div className="save-section-heading"><div><h2>Choose asset</h2></div></div>
         <div className="workflow-grid workflow-grid--single"><label>Asset<select value={asset?.id || ''} onChange={(event) => setAssetId(event.target.value)}>{library.assets.map((item) => <option value={item.id} key={item.id}>{item.project} / {item.category} / {item.displayName || item.name} v{item.version}</option>)}</select></label></div>
         <div className="version-choice" role="radiogroup" aria-label="Asset version">
           {(['master', 'base', 'raster'] as const).map((kind) => <button type="button" className={layerKind === kind ? 'is-active' : ''} onClick={() => setLayerKind(kind)} key={kind}><b>{kind[0].toUpperCase() + kind.slice(1)}</b><span>{kind === 'master' ? 'Editable source hierarchy' : kind === 'base' ? 'Clean reusable copy' : 'Flattened pixel version'}</span></button>)}
@@ -1343,15 +1380,14 @@ function SavePage({ document, library, connected, saving, onSave }: {
       <section className="save-context-band">
         <div className="context-icon"><Save size={23} /></div>
         <div>
-          <span>{document.selectionCount === 1 ? 'Selected layer' : 'Source selection'}</span>
           <strong>{document.selectionCount === 1 ? document.selectionNames[0] || 'Selected layer' : document.open ? document.title : 'No Affinity document detected'}</strong>
           <p>{document.selectionCount > 0 ? `${document.title || 'Affinity document'} - ${document.selectionCount} selected ${document.selectionCount === 1 ? 'layer' : 'layers'}` : 'Select the layer or group you want to save.'}</p>
         </div>
+        <div className={`save-readiness ${canSave ? 'is-ready' : ''}`}>{canSave ? 'Ready to save' : document.selectionCount > 0 ? 'Complete required fields' : 'Selection required'}</div>
       </section>
 
       <section className="save-section">
         <div className="save-section-heading">
-          <span>01</span>
           <div><h2>Smart name</h2><p>Describe the asset in plain parts. Kryeo builds both names for you.</p></div>
         </div>
         <div className="smart-name-grid">
@@ -1369,7 +1405,6 @@ function SavePage({ document, library, connected, saving, onSave }: {
 
       <section className="save-section">
         <div className="save-section-heading">
-          <span>02</span>
           <div><h2>Library location</h2><p>Type fills Category automatically. Subcategory is always your choice.</p></div>
         </div>
         <div className="location-grid">
@@ -1383,8 +1418,7 @@ function SavePage({ document, library, connected, saving, onSave }: {
 
       <section className="save-section">
         <div className="save-section-heading">
-          <span>03</span>
-          <div><h2>Output</h2><p>The recommended defaults preserve editing and keep Export working.</p></div>
+          <div><h2>Output</h2></div>
         </div>
         <div className="save-options-grid">
           <label className="save-option"><input type="checkbox" checked={update} onChange={(event) => setUpdate(event.target.checked)} /><span><b>Version safely</b><small>Create the next version instead of overwriting.</small></span></label>
@@ -1530,7 +1564,7 @@ function AssistantPage({ document, projects, workspace, onWorkspace, onNavigate 
     <div className="assistant-page">
       <header className="assistant-context-bar">
         <div className="assistant-context-icon"><BrainCircuit size={25} /></div>
-        <div><span>Project intelligence</span><h2>{document.open ? document.title : 'No active Affinity document'}</h2></div>
+        <div><h2>{document.open ? document.title : 'No active Affinity document'}</h2></div>
         <button className={`assistant-vision-control${useVision && document.open ? ' is-active' : ''}`} disabled={!document.open} onClick={() => setUseVision((current) => !current)} title="Include or exclude a rendered preview of the active Affinity context"><ScanSearch size={16} />{document.open ? (useVision ? (document.selectionCount > 0 ? 'Selection included' : 'Document included') : 'Text context only') : 'No document'}</button>
         <label>Project<select value={project} onChange={(event) => { setProject(event.target.value); setActiveSessionId(''); setActions([]); }}><option>General</option>{projects.map((item) => <option key={item}>{item}</option>)}</select></label>
       </header>
@@ -1539,7 +1573,7 @@ function AssistantPage({ document, projects, workspace, onWorkspace, onNavigate 
         <section className="assistant-install animated-dash-box">
           <BrainCircuit size={38} />
           <h2>Kryeo AI is offline</h2>
-          <p>Connect the Kryeo AI server in Settings, or install a smaller local model as an offline fallback.</p>
+          <p>Install an offline assistant from Settings when you want private local help.</p>
           <div className="delivery-buttons">
             <button className="run-button" disabled={installing} onClick={() => void install('portable')}>{installing ? <LoaderCircle className="spin" size={17} /> : <HardDrive size={17} />}{installing ? 'Downloading intelligence pack' : 'Install Portable'}</button>
             {(status?.memoryGB || 0) >= 12 && <button className="secondary-button" disabled={installing} onClick={() => void install('balanced')}><BrainCircuit size={17} />Install Balanced</button>}
@@ -1550,7 +1584,7 @@ function AssistantPage({ document, projects, workspace, onWorkspace, onNavigate 
       ) : (
         <div className="assistant-workspace">
           <aside className="assistant-sessions">
-            <div className="assistant-sessions-head"><div><strong>Conversations</strong><span>{sessions.length} shown</span></div><button title="New conversation" onClick={() => void newSession()}><Plus size={17} /></button></div>
+            <div className="assistant-sessions-head"><div><strong>Conversations</strong></div><button title="New conversation" onClick={() => void newSession()}><Plus size={17} /></button></div>
             <div className="assistant-session-list">
               {sessions.map((session) => <article className={`assistant-session${session.id === activeSessionId ? ' is-active' : ''}`} key={session.id} onClick={() => { setActiveSessionId(session.id); setActions([]); }}>
                 <div>
@@ -1576,21 +1610,20 @@ function AssistantPage({ document, projects, workspace, onWorkspace, onNavigate 
 
           <div className="assistant-layout">
           <section className="assistant-conversation">
-            <div className="assistant-conversation-head"><div><span>{hostedStatus?.available ? hostedStatus.model : status?.model || 'Kryeo AI'}</span><h2>{activeSession?.title || 'New conversation'}</h2></div><b><i />{hostedStatus?.available ? 'Connected' : 'Local fallback'}</b></div>
+            <div className="assistant-conversation-head"><div><span>{hostedStatus?.available ? hostedModelLabel(hostedStatus.model) : status?.model || 'Kryeo AI'}</span><h2>{activeSession?.title || 'New conversation'}</h2></div><b><i />{hostedStatus?.available ? 'Connected' : 'Local fallback'}</b></div>
             <div className="assistant-messages">
               {messages.length === 0 && <div className="assistant-welcome"><MessageSquare size={28} /><h3>Talk through the project</h3><p>Say hello, ask about the active document, teach Kryeo a rule, or plan the next production step.</p><div><button onClick={() => setDraft('Hi, what can you help me with?')}>Meet Kryeo</button><button onClick={() => setDraft('Organize the active document into reusable UI components.')}>Plan document organization</button></div></div>}
               {messages.map((message) => <article className={`assistant-message is-${message.role}`} key={message.id}><span>{message.role === 'user' ? 'You' : 'Kryeo'}{message.visionUsed && <ScanSearch size={12} aria-label="Active document inspected" />}</span><p>{message.text}</p></article>)}
               {busy && <article className="assistant-message is-assistant is-thinking"><span>Kryeo</span><p><LoaderCircle className="spin" size={16} />{useVision && document.open ? 'Inspecting the active document...' : 'Reading project context...'}</p></article>}
               <div ref={conversationEnd} />
             </div>
-            {actions.length > 0 && <div className="assistant-actions"><span>Review next step</span>{actions.map((action) => <button key={action.id} onClick={() => runAction(action)}><div><b>{action.label}</b><small>{action.description}</small></div><ArrowRight size={17} /></button>)}</div>}
+            {actions.length > 0 && <div className="assistant-actions">{actions.map((action) => <button key={action.id} onClick={() => runAction(action)}><div><b>{action.label}</b><small>{action.description}</small></div><ArrowRight size={17} /></button>)}</div>}
             {error && <div className="inline-notice inline-notice--error"><CircleAlert size={17} /><div><b>Assistant stopped</b><span>{error}</span></div></div>}
-            <form className="assistant-composer" onSubmit={(event) => void submit(event)}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Message Kryeo about this project..." rows={3} maxLength={1200} /><button className="run-button" disabled={busy || !draft.trim() || !activeSessionId} type="submit"><Send size={17} />Send</button></form>
+            <form className="assistant-composer" onSubmit={(event) => void submit(event)}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Message Kryeo about this project..." aria-label="Message Kryeo" title="Press Enter to send. Use Shift+Enter for a new line." rows={3} maxLength={1200} /><button className="run-button" disabled={busy || !draft.trim() || !activeSessionId} type="submit"><Send size={17} />Send</button></form>
           </section>
 
           <aside className="assistant-memory">
             <div><span>Project memory</span><strong>{memories.length}</strong></div>
-            <p>Project rules stay here. Global rules follow you into every project.</p>
             {memories.length === 0 ? <div className="assistant-memory-empty">No project instructions yet.</div> : memories.map((memory) => <article key={memory.id}>
               <span>{memory.scope === 'global' ? 'Global' : memory.kind}</span><p>{memory.text}</p>
               <nav><button title={memory.scope === 'global' ? 'Keep this rule in the current project' : 'Use this rule in every project'} onClick={() => void window.kryeo.setAssistantMemoryScope(memory.id, memory.scope === 'global' ? 'project' : 'global', project).then(onWorkspace)}>{memory.scope === 'global' ? <Layers3 size={13} /> : <Pin size={13} />}</button><button title="Forget instruction" onClick={() => void window.kryeo.forgetAssistantMemory(memory.id).then(onWorkspace)}><Trash2 size={14} /></button></nav>
@@ -1607,7 +1640,7 @@ function hierarchySelection(components: ComponentScanResult['components']): Set<
   const byKey = new Map(components.map((component) => [component.hierarchyKey, component]));
   const included = new Set<string>();
   const visit = (component: ComponentScanResult['components'][number], includeSelf: boolean) => {
-    if (includeSelf && !component.keptInsideParent) included.add(component.id);
+    if (includeSelf && !component.keptInsideParent && component.exportTarget !== false) included.add(component.id);
     if (component.diveMode === 'keep-together') return;
     if (component.diveMode === 'children-only') included.delete(component.id);
     for (const childKey of component.childHierarchyKeys) {
@@ -1621,6 +1654,36 @@ function hierarchySelection(components: ComponentScanResult['components']): Set<
   return included;
 }
 
+function componentOverallName(component: ComponentScanResult['components'][number]): string {
+  return component.exportName?.trim() || component.familyName || component.layerLabel?.trim() || '';
+}
+
+// Compatibility helpers for list, hierarchy, and save code. Both resolve to
+// the single canonical asset name; they no longer represent independent labels.
+function componentLayerLabel(component: ComponentScanResult['components'][number]): string {
+  return componentOverallName(component);
+}
+
+function componentExportName(component: ComponentScanResult['components'][number]): string {
+  return componentOverallName(component);
+}
+
+function isStructuralContextOnly(component: ComponentScanResult['components'][number]): boolean {
+  return ['duplicate-representation', 'organizational-parent'].includes(component.assetBoundary || '');
+}
+
+function isConstructionContext(component: ComponentScanResult['components'][number]): boolean {
+  return component.assetBoundary === 'construction-child';
+}
+
+function needsCompleteSemanticDecision(component: ComponentScanResult['components'][number]): boolean {
+  if (isStructuralContextOnly(component)) return false;
+  return component.assetType === 'Unknown'
+    || component.role === 'Unknown'
+    || component.analysisState === 'provisional'
+    || component.analysisState === 'queued';
+}
+
 function initialComponentExpansion(components: ComponentScanResult['components']): Set<string> {
   if (components.length > 120) return new Set();
   return new Set(components
@@ -1628,21 +1691,26 @@ function initialComponentExpansion(components: ComponentScanResult['components']
     .map((component) => component.hierarchyKey));
 }
 
-function reviewPriority(component: ComponentScanResult['components'][number]): 'ready' | 'check' | 'critical' {
-  if (component.reviewPriority) return component.reviewPriority;
-  if (component.semanticConflict || component.analysisState === 'needs-review' || component.analysisState === 'provisional') return 'critical';
+function reviewPriority(component: ComponentScanResult['components'][number]): 'ready' | 'check' {
+  const exportsAsset = component.exportTarget !== false;
+  if (needsCompleteSemanticDecision(component)) return 'check';
+  if (!exportsAsset && (isConstructionContext(component) || isStructuralContextOnly(component))) return 'ready';
+  if (exportsAsset && component.semanticConflict) return 'check';
+  if (component.diveConflict) return 'check';
+  if (component.reviewPriority) return component.reviewPriority === 'ready' ? 'ready' : 'check';
+  if (component.analysisState === 'needs-review') return 'check';
   return component.analysisState === 'approved' || component.analysisState === 'analyzed' ? 'ready' : 'check';
 }
 
 function componentReviewKey(component: ComponentScanResult['components'][number]): string {
-  if (!component.childHierarchyKeys.length) return component.visualHash;
-  return `${component.visualHash}:group:${component.diveStructureSignature || component.hierarchyKey}`;
+  return component.familyFingerprint || `hierarchy:${component.hierarchyKey}`;
 }
 
-function ComponentScanPage({ document, connected, onWorkspace }: {
+function ComponentScanPage({ document, connected, onWorkspace, developerMode }: {
   document: DocumentContext;
   connected: boolean;
   onWorkspace: (workspace: WorkspaceSnapshot) => void;
+  developerMode: boolean;
 }) {
   const [scan, setScan] = useState<ComponentScanResult | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -1651,20 +1719,27 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
   const [scanElapsed, setScanElapsed] = useState(0);
   const [saving, setSaving] = useState(false);
   const [scanScope, setScanScope] = useState<ComponentScanScope>('document');
+  const [scanMode, setScanMode] = useState<ComponentScanMode>('smart');
+  const [ungroupedLayers, setUngroupedLayers] = useState('ask');
+  const [repeatedChildren, setRepeatedChildren] = useState('ask');
+  const [documentPurpose, setDocumentPurpose] = useState('mixed');
+  const [intentCustomized, setIntentCustomized] = useState(false);
+  const [showScanOptions, setShowScanOptions] = useState(false);
   const [localAi, setLocalAi] = useState<LocalAiStatus | null>(null);
   const [hostedAi, setHostedAi] = useState<HostedAiStatus | null>(null);
   const [applying, setApplying] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [included, setIncluded] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [evidenceLoading, setEvidenceLoading] = useState<Set<string>>(new Set());
   const [reviewFilter, setReviewFilter] = useState<'all' | 'ui' | 'construction' | 'background'>('all');
-  const [reviewLane, setReviewLane] = useState<'attention' | 'structure' | 'ready' | 'all'>('attention');
+  const [reviewLane, setReviewLane] = useState<'check' | 'structure' | 'ready' | 'all'>('all');
   const [reviewQuery, setReviewQuery] = useState('');
   const [selectedReviewId, setSelectedReviewId] = useState('');
-  const [reviewedItems, setReviewedItems] = useState<Set<string>>(new Set());
   const [watchSelection, setWatchSelection] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [developerTrace, setDeveloperTrace] = useState<Array<NonNullable<ComponentScanProgress['trace']>>>([]);
   const activeModelRequests = hostedAi?.modelActive ?? (hostedAi?.queueDepth ? 1 : 0);
   const queuedModelRequests = hostedAi?.modelQueued ?? Math.max(0, (hostedAi?.queueDepth || 0) - activeModelRequests);
   const hostedReviewer = hostedModelLabel(hostedAi?.model);
@@ -1676,9 +1751,9 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setScanStartedAt(Date.now());
     setScanElapsed(0);
     setEvidenceLoading(new Set());
-    setReviewedItems(new Set());
+    setDeveloperTrace([]);
     setSelectedReviewId('');
-    setReviewLane('attention');
+    setReviewLane('all');
     setScanProgress({
       phase: 'preparing',
       label: 'Preparing scan',
@@ -1688,10 +1763,52 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setError('');
     setMessage('');
     try {
-      const result = await window.kryeo.scanComponents(scope);
+      const intent = {
+        mode: scanMode,
+        answers: [
+          ...(ungroupedLayers === 'ask' ? [] : [{ id: 'ungrouped-layers' as const, value: ungroupedLayers }]),
+          ...(repeatedChildren === 'ask' ? [] : [{ id: 'repeated-children' as const, value: repeatedChildren }]),
+          { id: 'document-purpose' as const, value: documentPurpose },
+        ],
+      };
+      const result = await window.kryeo.scanComponents({ ...(intentCustomized ? { scope, intent } : { scope }), developerMode });
       setScan(result);
-      setIncluded(hierarchySelection(result.components));
+      const exportTargets = hierarchySelection(result.components);
+      setIncluded(exportTargets);
       setExpanded(initialComponentExpansion(result.components));
+      if (result.scanIntent) {
+        setScanMode(result.scanIntent.mode);
+        onWorkspace(await window.kryeo.saveScanIntentProfile({
+          project: result.sourceName || result.documentTitle,
+          documentTitle: result.documentTitle,
+          structureFingerprint: result.scanIntent.structureFingerprint,
+          mode: result.scanIntent.mode,
+          answers: result.scanIntent.answers,
+        }));
+        if (scope === 'document') {
+          try {
+            onWorkspace(await window.kryeo.saveComponentReview({
+              project: result.sourceName || result.documentTitle,
+              documentTitle: result.documentTitle,
+              documentSessionUuid: result.documentSessionUuid,
+              components: result.components,
+              includedIds: [...exportTargets],
+              scanIntent: result.scanIntent,
+              decisionStatus: 'generated',
+            }));
+            const incomplete = result.components.filter((component) => (
+              component.analysisState === 'provisional'
+              || component.analysisState === 'queued'
+              || component.assetType === 'Unknown'
+            )).length;
+            setMessage(incomplete
+              ? `Scan saved, but ${incomplete} ${incomplete === 1 ? 'family needs' : 'families need'} a complete cloud decision. Rescan before building.`
+              : 'AI decisions cached. Kryeo is ready to build the asset library.');
+          } catch (cacheError) {
+            setError(`The scan finished, but AI decisions could not be cached: ${cacheError instanceof Error ? cacheError.message : String(cacheError)}`);
+          }
+        }
+      }
     } catch (scanError) {
       setScan(null);
       setError(scanError instanceof Error ? scanError.message : String(scanError));
@@ -1701,6 +1818,10 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
   };
 
   useEffect(() => window.kryeo.onComponentScanProgress((progress) => {
+    if (progress.trace) {
+      setDeveloperTrace((entries) => [...entries, progress.trace!].slice(-500));
+      return;
+    }
     setScanProgress(progress);
     if (!progress.partialResult) return;
     setScan(progress.partialResult);
@@ -1735,19 +1856,15 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     return () => window.clearTimeout(timer);
   }, [connected, document.open, document.selectionCount, document.selectionNames.join('|'), watchSelection]);
 
-  const updateFamily = (reviewedComponent: ComponentScanResult['components'][number], patch: Partial<Pick<ComponentScanResult['components'][number], 'role' | 'assetType' | 'familyName'>>) => {
-    const visualHash = reviewedComponent.visualHash;
+  const updateFamily = (reviewedComponent: ComponentScanResult['components'][number], patch: Partial<Pick<ComponentScanResult['components'][number], 'role' | 'assetType' | 'familyName' | 'layerLabel' | 'exportName'>>) => {
     setScan((current) => current ? {
       ...current,
       components: (() => {
-        const target = current.components.find((component) => component.visualHash === visualHash);
+        const target = current.components.find((component) => component.id === reviewedComponent.id);
         return current.components.map((component) => {
-          const changesName = patch.familyName !== undefined;
-          const sameFamily = changesName
-            ? component.visualHash === visualHash
-            : target?.familyFingerprint
-              ? component.familyFingerprint === target.familyFingerprint
-              : component.visualHash === visualHash;
+          const sameFamily = target?.familyFingerprint
+            ? component.familyFingerprint === target.familyFingerprint
+            : component.id === reviewedComponent.id;
           return sameFamily ? { ...component, ...patch } : component;
         });
       })(),
@@ -1759,27 +1876,33 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setScan((current) => {
       if (!current) return current;
       const reviewKey = componentReviewKey(component);
-      const components = current.components.map((candidate) => componentReviewKey(candidate) === reviewKey ? {
+      const updated = current.components.map((candidate) => componentReviewKey(candidate) === reviewKey ? {
         ...candidate,
         diveMode,
+        structuralDiveMode: diveMode,
         diveRemembered: true,
         diveConflict: false,
         diveConflictMessage: undefined,
       } : candidate);
-      setIncluded(hierarchySelection(components));
+      const selection = hierarchySelection(updated);
+      const components = updated.map((candidate) => ({ ...candidate, exportTarget: selection.has(candidate.id) }));
+      setIncluded(selection);
       return { ...current, components };
     });
     setMessage('');
   };
 
-  const toggleReviewed = (component: ComponentScanResult['components'][number]) => {
-    setReviewedItems((current) => {
+  const setComponentExportTarget = (componentId: string, exportTarget: boolean) => {
+    setIncluded((current) => {
       const next = new Set(current);
-      const key = componentReviewKey(component);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      if (exportTarget) next.add(componentId); else next.delete(componentId);
       return next;
     });
+    setScan((current) => current ? {
+      ...current,
+      components: current.components.map((component) => component.id === componentId ? { ...component, exportTarget } : component),
+    } : current);
+    setMessage('');
   };
 
   const loadFamilyEvidence = async (component: ComponentScanResult['components'][number]) => {
@@ -1801,7 +1924,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
       const evidence = await window.kryeo.explainComponentFamily({
         familyFingerprint: component.familyFingerprint,
         visualHash: component.visualHash,
-        familyName: component.familyName,
+        familyName: componentOverallName(component),
         assetType: component.assetType,
         role: component.role,
         sourceName: component.name,
@@ -1819,8 +1942,24 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
           const sameFamily = candidate.familyFingerprint
             ? candidate.familyFingerprint === component.familyFingerprint
             : candidate.visualHash === component.visualHash;
+          const hasCompleteReplacement = evidence.supportsClassification === false
+            && Boolean(evidence.suggestedName)
+            && Boolean(evidence.suggestedType)
+            && Boolean(evidence.suggestedRole);
           return sameFamily ? {
             ...candidate,
+            ...(hasCompleteReplacement ? {
+              familyName: evidence.suggestedName!,
+              layerLabel: evidence.suggestedName!,
+              exportName: evidence.suggestedName!,
+              codeName: evidence.suggestedName!.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
+              assetType: evidence.suggestedType!,
+              role: evidence.suggestedRole!,
+              aiSuggestedName: evidence.suggestedName!,
+              aiSuggestedType: evidence.suggestedType!,
+              aiSuggestedRole: evidence.suggestedRole!,
+              analysisState: 'analyzed' as const,
+            } : {}),
             aiConfidence: evidence.confidence,
             aiEvidence: evidence.evidence,
             aiReason: evidence.reason,
@@ -1832,7 +1971,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             aiEvidenceSuggestedRole: evidence.suggestedRole,
             semanticConflict: Boolean(candidate.semanticConflict || evidence.conflict),
             semanticConflictMessage: evidence.conflictMessage || candidate.semanticConflictMessage,
-            analysisState: evidence.conflict || evidence.confidence < 0.72 ? 'needs-review' : candidate.analysisState,
+            analysisState: hasCompleteReplacement ? 'analyzed' : (evidence.conflict || evidence.confidence < 0.72 ? 'needs-review' : candidate.analysisState),
           } : candidate;
         }),
       } : current);
@@ -1852,12 +1991,19 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setSaving(true);
     setError('');
     try {
+      const corrected = scan.components.some((component) => (
+        (component.aiSuggestedName && componentOverallName(component).trim().toLowerCase() !== component.aiSuggestedName.trim().toLowerCase())
+        || (component.aiSuggestedType && component.assetType !== component.aiSuggestedType)
+        || (component.aiSuggestedRole && component.role !== component.aiSuggestedRole)
+      ));
       onWorkspace(await window.kryeo.saveComponentReview({
         project: scan.sourceName || scan.documentTitle,
         documentTitle: scan.documentTitle,
         documentSessionUuid: scan.documentSessionUuid,
         components: scan.components,
         includedIds: [...included],
+        scanIntent: scan.scanIntent,
+        decisionStatus: corrected ? 'corrected' : 'accepted',
       }));
       setScan({ ...scan, components: scan.components.map((component) => ({ ...component, remembered: true })) });
       const families = new Set(scan.components.map((component) => component.familyFingerprint || component.visualHash)).size;
@@ -1882,7 +2028,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
       const result = await window.kryeo.applyComponentOrganization({
         documentSessionUuid: scan.documentSessionUuid,
         components: components.map((component) => ({
-          name: component.familyName,
+          name: componentExportName(component),
           memberPaths: component.members.map((member) => member.path),
         })),
       });
@@ -1899,14 +2045,20 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
 
   const applyNames = async () => {
     if (!scan || applying || scanScope !== 'document') return;
-    const layers = scan.components
-      .filter((component) => included.has(component.id) && component.members.length > 0)
-      .flatMap((component) => component.members.map((member, index) => ({
-        name: component.members.length === 1 ? component.familyName : `${component.familyName} Part ${index + 1}`,
-        path: member.path,
-      })));
+    const byPath = new Map<string, { name: string; path: number[] }>();
+    for (const component of [...scan.components].sort((left, right) => right.hierarchyDepth - left.hierarchyDepth)) {
+      if (!component.members.length) continue;
+      component.members.forEach((member, index) => {
+        const name = component.members.length === 1
+          ? componentLayerLabel(component)
+          : `${componentLayerLabel(component)} Part ${index + 1}`;
+        const key = member.path.join('.');
+        if (!byPath.has(key) && name !== member.name) byPath.set(key, { name, path: member.path });
+      });
+    }
+    const layers = [...byPath.values()];
     if (!layers.length) {
-      setError('Include at least one layer before applying names.');
+      setMessage('The document already uses the generated layer labels.');
       return;
     }
     setApplying(true);
@@ -1928,7 +2080,60 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     if (!scanning) return;
     await window.kryeo.cancelComponentScan();
     setScanning(false);
-    setError('Component scan cancelled. Partial local and hosted results remain available for review.');
+    setError('Component scan cancelled. Partial local and cloud results remain available to inspect.');
+  };
+
+  const createAssets = async () => {
+    if (!scan || exporting || scanScope !== 'document' || !scan.scanIntent) return;
+    if (!included.size) return;
+    const unresolved = scan.components.filter((component) => component.analysisState === 'provisional' || component.analysisState === 'queued' || component.assetType === 'Unknown');
+    if (unresolved.length) {
+      setError(`Kryeo cannot build this library yet: ${unresolved.length} ${unresolved.length === 1 ? 'family has' : 'families have'} no complete cloud decision. Rescan the document first.`);
+      return;
+    }
+    const layers = [...scan.components]
+      .sort((left, right) => right.hierarchyDepth - left.hierarchyDepth)
+      .flatMap((component) => component.members.map((member, index) => ({
+        name: component.members.length === 1
+          ? componentLayerLabel(component)
+          : `${componentLayerLabel(component)} Part ${index + 1}`,
+        path: member.path,
+      })))
+      .filter((layer, index, all) => all.findIndex((candidate) => candidate.path.join('.') === layer.path.join('.')) === index);
+    setExporting(true);
+    setApplying(true);
+    setError('');
+    try {
+      onWorkspace(await window.kryeo.saveComponentReview({
+        project: scan.sourceName || scan.documentTitle,
+        documentTitle: scan.documentTitle,
+        documentSessionUuid: scan.documentSessionUuid,
+        components: scan.components,
+        includedIds: [...included],
+        scanIntent: scan.scanIntent,
+        decisionStatus: 'generated',
+      }));
+      if (layers.length) {
+        const naming = await window.kryeo.applyLayerNames({ documentSessionUuid: scan.documentSessionUuid, layers });
+        if (!naming.ok) throw new Error(naming.output);
+      }
+      const result = await window.kryeo.createComponentAssets({
+        project: scan.sourceName || scan.documentTitle,
+        documentTitle: scan.documentTitle,
+        documentSessionUuid: scan.documentSessionUuid,
+        components: scan.components,
+        includedIds: [...included],
+        scanIntent: scan.scanIntent,
+        structureFingerprint: scan.scanIntent.structureFingerprint,
+      });
+      if (!result.ok) throw new Error(result.output);
+      setMessage(`AI applied the layer names and built the asset library. ${result.output}`);
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : String(exportError));
+    } finally {
+      setExporting(false);
+      setApplying(false);
+    }
   };
   const componentLocation = (component: ComponentScanResult['components'][number]): string => {
     const irregular: Partial<Record<ComponentAssetType, string>> = {
@@ -1940,12 +2145,13 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     const category = irregular[component.assetType]
       || (component.assetType === 'Unknown' ? 'Uncategorised' : `${component.assetType}s`);
     const parent = scan?.components.find((candidate) => candidate.hierarchyKey === component.parentHierarchyKey);
-    const subcategory = parent && parent.diveMode !== 'keep-together' ? parent.familyName : '';
+    const subcategory = parent && parent.diveMode !== 'keep-together' ? componentExportName(parent) : '';
     return [category, subcategory].filter(Boolean).join(' / ');
   };
   const componentContextLabel = (component: ComponentScanResult['components'][number]): string => {
+    if (component.namingReason) return component.namingReason;
     const parent = scan?.components.find((candidate) => candidate.hierarchyKey === component.parentHierarchyKey);
-    if (parent) return `Parent: ${parent.familyName} / ${componentLocation(component)}`;
+    if (parent) return `Parent: ${componentLayerLabel(parent)} / ${componentLocation(component)}`;
     const source = component.nameSource === 'both'
       ? 'Visual and layer name agree'
       : component.nameSource === 'layer-name'
@@ -1967,17 +2173,19 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     });
   }, [scan]);
   const reviewStats = useMemo(() => {
-    const unresolved = reviewRows.filter((component) => reviewPriority(component) !== 'ready' && !reviewedItems.has(componentReviewKey(component)));
+    const checks = reviewRows.filter((component) => reviewPriority(component) === 'check');
     return {
-      attention: unresolved.length,
-      critical: unresolved.filter((component) => reviewPriority(component) === 'critical').length,
-      check: unresolved.filter((component) => reviewPriority(component) === 'check').length,
+      automated: checks.length,
+      check: checks.length,
       structure: reviewRows.filter((component) => component.childHierarchyKeys.length > 0).length,
       ready: reviewRows.filter((component) => reviewPriority(component) === 'ready').length,
-      reviewed: reviewRows.filter((component) => reviewedItems.has(componentReviewKey(component))).length,
       all: reviewRows.length,
     };
-  }, [reviewRows, reviewedItems]);
+  }, [reviewRows]);
+  const unresolvedComponentCount = useMemo(() => (
+    reviewRows.filter(needsCompleteSemanticDecision).length
+  ), [reviewRows]);
+  const scanStep: 1 | 2 | 3 = !scan ? 1 : 3;
   const visibleComponents = useMemo(() => {
     if (!scan) return [];
     const normalizedQuery = reviewQuery.trim().toLocaleLowerCase();
@@ -2003,12 +2211,13 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
       if (normalizedQuery && ![
         component.name,
         component.familyName,
+        componentLayerLabel(component),
+        componentExportName(component),
         component.assetType,
         component.role,
       ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery))) return false;
       const priority = reviewPriority(component);
-      const reviewed = reviewedItems.has(componentReviewKey(component));
-      if (reviewLane === 'attention' && (priority === 'ready' || reviewed)) return false;
+      if (reviewLane === 'check' && priority !== 'check') return false;
       if (reviewLane === 'structure' && component.childHierarchyKeys.length === 0) return false;
       if (reviewLane === 'ready' && priority !== 'ready') return false;
       if (component.duplicateKind !== 'exact') return true;
@@ -2017,12 +2226,13 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
       seenExact.add(key);
       return true;
     });
-  }, [expanded, reviewFilter, reviewLane, reviewQuery, reviewedItems, scan]);
+  }, [expanded, reviewFilter, reviewLane, reviewQuery, scan]);
 
   const selectedComponent = visibleComponents.find((component) => component.id === selectedReviewId) || visibleComponents[0];
   const selectedIndex = selectedComponent ? visibleComponents.findIndex((component) => component.id === selectedComponent.id) : -1;
   const selectedPriority = selectedComponent ? reviewPriority(selectedComponent) : 'ready';
-  const selectedReviewed = selectedComponent ? reviewedItems.has(componentReviewKey(selectedComponent)) : false;
+  const selectedStructuralContextOnly = selectedComponent ? isStructuralContextOnly(selectedComponent) : false;
+  const selectedConstructionContext = selectedComponent ? isConstructionContext(selectedComponent) : false;
   const selectedFamilyEvidenceKey = selectedComponent ? selectedComponent.familyFingerprint || selectedComponent.visualHash : '';
   const selectedEvidenceAvailable = selectedComponent
     ? Object.values(selectedComponent.aiEvidence || {}).some((score) => Number(score) > 0)
@@ -2049,49 +2259,95 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
     setSelectedReviewId(visibleComponents[nextIndex].id);
   };
 
-  const toggleSelectedReviewed = () => {
-    if (!selectedComponent) return;
-    if (!selectedReviewed) {
-      const nextComponent = visibleComponents[selectedIndex + 1] || visibleComponents[selectedIndex - 1];
-      if (nextComponent) setSelectedReviewId(nextComponent.id);
-    }
-    toggleReviewed(selectedComponent);
-  };
-
-  const acceptRoutineChecks = () => {
-    setReviewedItems((current) => {
-      const next = new Set(current);
-      for (const component of reviewRows) {
-        if (reviewPriority(component) === 'check') next.add(componentReviewKey(component));
-      }
-      return next;
-    });
-  };
-
   return (
     <div className="component-scan-page">
       <section className="component-scan-source">
         <div className="component-scan-source-icon"><ScanSearch size={25} /></div>
         <div>
-          <span>Affinity document</span>
-          <h2>{document.open ? document.title : 'No document detected'}</h2>
-          <p>{document.open ? 'Scan the entire document, including component groups inside containers.' : 'Open a document in Affinity to begin.'}</p>
+          <span className="scan-eyebrow">Component scan · step {scanStep} of 3</span>
+          <h1>{document.open ? document.title : 'Open an Affinity document'}</h1>
+          <p>{document.open
+             ? scan
+               ? 'Kryeo has named and organized the layers automatically. Build the asset library when you are ready.'
+              : 'Kryeo will scan your layers, suggest names, and help you build an asset library.'
+            : 'Open a document in Affinity, then return here to scan its layers.'}</p>
         </div>
         <div className="component-scan-source-actions">
-          <label className={`watch-selection ${watchSelection ? 'is-active' : ''}`} title="Automatically rescan when the Affinity selection changes">
-            <input type="checkbox" checked={watchSelection} onChange={(event) => setWatchSelection(event.target.checked)} />
-            <MousePointer2 size={15} />Watch selection
-          </label>
           <button className="run-button" disabled={!canScanDocument} onClick={() => void runScan('document')}>
             {scanning && scanScope === 'document' ? <LoaderCircle className="spin" size={17} /> : <ScanSearch size={17} />}
-            {scanning && scanScope === 'document' ? 'Scanning document' : 'Scan document'}
+            {scanning && scanScope === 'document' ? 'Scanning document' : scan ? 'Rescan document' : 'Scan document'}
           </button>
           <button className="secondary-button" disabled={!canScanSelection} onClick={() => void runScan('selection')}>
             {scanning && scanScope === 'selection' ? <LoaderCircle className="spin" size={16} /> : <MousePointer2 size={16} />}
-            Scan selection
+            Scan selected layers
           </button>
         </div>
       </section>
+
+      <ol className="scan-flow" aria-label="Asset workflow">
+        {([
+          ['Scan document', 'Find the layers', 1],
+          ['AI prepares', 'Name and group automatically', 2],
+          ['Build asset library', 'Save files to your library', 3],
+        ] as const).map(([label, detail, step]) => (
+          <li className={scanStep === step ? 'is-active' : scanStep > step ? 'is-complete' : ''} key={label as string}>
+            <b>{scanStep > step ? <CircleCheck size={15} /> : step}</b>
+            <span><strong>{label}</strong><small>{detail}</small></span>
+          </li>
+        ))}
+      </ol>
+
+      <details className="scan-options" open={showScanOptions} onToggle={(event) => setShowScanOptions(event.currentTarget.open)}>
+        <summary>
+          <span className="scan-options-icon"><WandSparkles size={16} /></span>
+          <span className="scan-options-copy"><strong>Customize how Kryeo scans this document</strong><small>Optional. Smart defaults work for most documents.</small></span>
+          <span className="scan-options-status">{intentCustomized ? 'Custom choices saved' : 'Using smart defaults'}</span>
+          <ChevronRight size={17} />
+        </summary>
+        <div className="scan-options-body">
+          <label>
+            <span>Scan approach</span>
+            <select value={scanMode} onChange={(event) => { setIntentCustomized(true); setShowScanOptions(true); setScanMode(event.target.value as ComponentScanMode); }}>
+              <option value="smart">Smart: groups first</option>
+              <option value="group-first">Keep construction layers inside groups</option>
+              <option value="layer-inclusive">Include meaningful single layers</option>
+            </select>
+            <small>Choose whether Kryeo should prioritize grouped artwork or individual layers.</small>
+          </label>
+          <label>
+            <span>Single layers</span>
+            <select value={ungroupedLayers} onChange={(event) => { setIntentCustomized(true); setShowScanOptions(true); setUngroupedLayers(event.target.value); }}>
+              <option value="ask">Let Kryeo decide</option>
+              <option value="standalone-assets">Treat them as separate assets</option>
+              <option value="construction-only">Keep them as construction pieces</option>
+            </select>
+            <small>Useful when designers leave standalone artwork outside groups.</small>
+          </label>
+          <label>
+            <span>Repeated layers</span>
+            <select value={repeatedChildren} onChange={(event) => { setIntentCustomized(true); setShowScanOptions(true); setRepeatedChildren(event.target.value); }}>
+              <option value="ask">Let Kryeo decide</option>
+              <option value="separate-assets">Make them reusable assets</option>
+              <option value="keep-with-parent">Keep them with their group</option>
+            </select>
+            <small>Tell Kryeo whether repeated artwork should be reusable on its own.</small>
+          </label>
+          <label>
+            <span>Document type</span>
+            <select value={documentPurpose} onChange={(event) => { setIntentCustomized(true); setShowScanOptions(true); setDocumentPurpose(event.target.value); }}>
+              <option value="mixed">Mixed screen and asset sheet</option>
+              <option value="screen">One UI screen</option>
+              <option value="kit">Reusable component kit</option>
+            </select>
+            <small>Helps Kryeo understand whether the document is a screen or an asset source.</small>
+          </label>
+          <label className={`watch-selection scan-options-watch ${watchSelection ? 'is-active' : ''}`} title="Automatically rescan when the Affinity selection changes">
+            <input type="checkbox" checked={watchSelection} onChange={(event) => setWatchSelection(event.target.checked)} />
+            <MousePointer2 size={15} />
+            <span><strong>Watch the Affinity selection</strong><small>Rescan selected layers automatically when the selection changes.</small></span>
+          </label>
+        </div>
+      </details>
 
       {!connected && <div className="inline-notice"><CircleAlert size={18} /><div><b>Affinity is offline</b><span>Reconnect before scanning components.</span></div></div>}
       {error && <div className="inline-notice inline-notice--error"><CircleAlert size={18} /><div><b>Component Scan stopped</b><span>{error}</span></div></div>}
@@ -2099,18 +2355,18 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
         <section className={`local-ai-strip ${hostedAi?.available || localAi?.available ? 'is-available' : ''}`}>
           <BrainCircuit size={18} />
           <div>
-            <b>{hostedAi?.available ? hostedAi.model : localAi?.available ? `${localAi.model} clustering` : 'Visual analysis unavailable'}</b>
+            <b>{hostedAi?.available ? 'Cloud suggestions are ready' : localAi?.available ? 'Local grouping is ready' : 'Visual analysis unavailable'}</b>
             <span>{hostedAi?.available
               ? scanning
                 ? queuedModelRequests
-                  ? `${hostedReviewer} is active. ${queuedModelRequests} ${queuedModelRequests === 1 ? 'request is' : 'requests are'} waiting in the shared queue.`
+                  ? `${hostedReviewer} is checking the document. ${queuedModelRequests} ${queuedModelRequests === 1 ? 'request is' : 'requests are'} waiting.`
                   : activeModelRequests
-                    ? `${hostedReviewer} is actively analysing this scan.`
-                    : `Preparing visual families for ${hostedReviewer}.`
+                    ? `${hostedReviewer} is checking the layers now.`
+                    : `Kryeo will use ${hostedReviewer} to help name and group your layers.`
                 : activeModelRequests || queuedModelRequests
-                  ? `${hostedReviewer} is processing ${activeModelRequests} active ${activeModelRequests === 1 ? 'request' : 'requests'}${queuedModelRequests ? ` with ${queuedModelRequests} waiting` : ''}.`
-                  : 'Ready for new visual families.'
-              : 'Kryeo can group duplicates locally; semantic classifications remain provisional until the hosted model reconnects.'}</span>
+                  ? `${hostedReviewer} is processing the current scan.`
+                  : `Cloud naming and grouping is ready for the next scan · ${hostedReviewer}.`
+              : hostedAi?.message || 'Kryeo can group obvious duplicates locally; detailed suggestions resume when Cloud Qwen reconnects.'}</span>
           </div>
         </section>
       )}
@@ -2138,30 +2394,34 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             <span>{scanProgress?.completedFamilies !== undefined && scanProgress.totalFamilies
               ? `${scanProgress.completedFamilies} of ${scanProgress.totalFamilies} families · ${scanProgress.cachedFamilies || 0} cached${scanProgress.failedFamilies ? ` · ${scanProgress.failedFamilies} failed` : ''}`
               : `${scanProgress?.progress || 2}%`}</span>
-            <span>{scanProgress?.phase === 'hosted-analysis' ? 'Hosted reviewer response times vary for uncached artwork.' : 'Keep Kryeo and Affinity open.'}</span>
+            <span>{scanProgress?.phase === 'hosted-analysis' ? 'Cloud reviewer response times vary for uncached artwork.' : 'Keep Kryeo and Affinity open.'}</span>
           </div>
         </section>
       )}
 
       {!scan && connected && !scanning && (
         <section className="scan-empty animated-dash-box">
-          <Layers3 size={30} />
-          <h2>Scan the active Affinity document</h2>
-          <p>Kryeo walks every spread and searches nested containers for independently editable visual groups.</p>
+          <div className="scan-empty-icon"><Layers3 size={30} /></div>
+          <span className="scan-empty-kicker">Start here</span>
+          <h2>{document.open ? 'Scan the active document' : 'Open a document in Affinity'}</h2>
+          <p>{document.open
+             ? 'Kryeo will find groups and individual layers, use AI to name and organize them, and build the asset library for you.'
+            : 'Kryeo needs an open Affinity document before it can find layers or create assets.'}</p>
+          <ol className="scan-empty-steps">
+            <li><b>1</b><span><strong>Scan</strong><small>Read the current layer structure.</small></span></li>
+            <li><b>2</b><span><strong>AI prepares</strong><small>Name, classify, and group automatically.</small></span></li>
+            <li><b>3</b><span><strong>Build</strong><small>Export editable files and PNGs.</small></span></li>
+          </ol>
         </section>
       )}
 
       {scan && (
         <>
           <section className="scan-summary">
-            <div><span>Components</span><strong>{scan.components.length}</strong></div>
-            <div><span>Unique visuals</span><strong>{scan.uniqueVisuals}</strong></div>
-            <div><span>Exact duplicate families</span><strong>{scan.duplicateFamilies}</strong></div>
-            <div><span>Uploads avoided</span><strong>{scan.reusedInstances}</strong></div>
-            <div title={`Target $${(scan.hostedTargetUsd ?? 0.01).toFixed(2)} · ceiling $${(scan.hostedBudgetUsd ?? 0.03).toFixed(2)}`}>
-              <span>Cloud spend</span><strong>${(scan.hostedProviderCostUsd || 0).toFixed(4)}</strong>
-            </div>
-            {scan.diagnostics && <div><span>Scan time</span><strong>{formatDuration(scan.diagnostics.totalMs)}</strong></div>}
+            <div><span>Layers found</span><strong>{scan.components.length}</strong></div>
+            <div><span>Possible assets</span><strong>{included.size}</strong></div>
+            <div><span>Needs attention</span><strong>{reviewStats.automated}</strong></div>
+            <div><span>Complete decisions</span><strong>{reviewStats.ready}</strong></div>
           </section>
           {scan.diagnostics && (
             <details className="scan-diagnostics">
@@ -2174,7 +2434,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                 <span>Image preparation <b>{formatDuration(scan.diagnostics.stages.imagePreparationMs)}</b></span>
                 <span>Local analysis <b>{formatDuration(scan.diagnostics.stages.localAnalysisMs)}</b></span>
                 <span>Document context <b>{formatDuration(scan.diagnostics.stages.contextCaptureMs)}</b></span>
-                <span>Hosted analysis <b>{formatDuration(scan.diagnostics.stages.hostedAnalysisMs)}</b></span>
+                <span>Cloud analysis <b>{formatDuration(scan.diagnostics.stages.hostedAnalysisMs)}</b></span>
                 <span>Finalization <b>{formatDuration(scan.diagnostics.stages.finalizationMs)}</b></span>
                 <span>
                   Affinity batches <b>{scan.diagnostics.affinityRequestCount ?? 0}</b>
@@ -2189,11 +2449,23 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
               </div>
             </details>
           )}
+          {developerMode && (scanning || developerTrace.length > 0) && (
+            <details className="scan-diagnostics developer-trace" open={scanning}>
+              <summary>Developer scan trace · {developerTrace.length} events</summary>
+              <div className="developer-trace-actions">
+                <span>Compact scan trace. Open Settings → Developer console for the complete redacted event log.</span>
+                <button className="secondary-button" type="button" disabled={!developerTrace.length} onClick={() => {
+                  void navigator.clipboard.writeText(JSON.stringify(developerTrace, null, 2)).then(() => setMessage('Developer trace copied to clipboard.')).catch(() => setError('Could not copy the developer trace.'));
+                }}>Copy trace</button>
+              </div>
+              <pre>{developerTrace.map((entry) => `${entry.at}  [${entry.stage}] ${entry.message}${entry.data ? ` ${JSON.stringify(entry.data)}` : ''}`).join('\n')}</pre>
+            </details>
+          )}
           {scan.hostedAnalysisError && (
             <div className="inline-notice inline-notice--error">
               <CircleAlert size={18} />
               <div>
-                <b>Hosted analysis could not finish</b>
+                <b>Cloud analysis could not finish</b>
                 <span>{scan.hostedAnalysisError}</span>
               </div>
             </div>
@@ -2202,35 +2474,32 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             <div className={`inline-notice ${scan.reconciliation.issues.length ? 'inline-notice--error' : ''}`}>
               {scan.reconciliation.issues.length ? <CircleAlert size={18} /> : <CircleCheck size={18} />}
               <div>
-                <b>{scan.reconciliation.issues.length ? `${scan.reconciliation.issues.length} families need review` : 'Document consistency checked'}</b>
+                <b>{scan.reconciliation.issues.length ? `${scan.reconciliation.issues.length} families received safe AI fallbacks` : 'Document consistency checked'}</b>
                 <span>{scan.reconciliation.summary}</span>
               </div>
             </div>
           )}
 
-          <section className="component-workbench" aria-label="Layer review workspace">
+          <section className="component-workbench" aria-label="AI decision workspace">
             <header className="component-workbench-header">
               <div className="component-workbench-title">
                 <div>
-                  <span>{scan.documentTitle}</span>
-                  <h2>Review layers</h2>
-                </div>
-                <p>{reviewStats.attention
-                  ? `${reviewStats.attention} ${reviewStats.attention === 1 ? 'decision needs' : 'decisions need'} you. Everything else stays out of the way.`
-                  : 'Kryeo has no unresolved decisions. You can still inspect any layer.'}</p>
-              </div>
-              {reviewStats.check > 0 && (
-                <button className="component-routine-action" type="button" onClick={acceptRoutineChecks}>
-                  <CircleCheck size={15} />Accept {reviewStats.check} routine {reviewStats.check === 1 ? 'check' : 'checks'}
-                </button>
-              )}
-            </header>
+                        <span>Step 2 · AI prepares your library</span>
+                        <h2>{unresolvedComponentCount ? 'Kryeo needs complete decisions' : 'Kryeo handled the decisions'}</h2>
+                      </div>
+                 <p>{unresolvedComponentCount
+                   ? `${unresolvedComponentCount} ${unresolvedComponentCount === 1 ? 'family is' : 'families are'} unresolved because cloud analysis did not return a complete decision. Rescan before building the library.`
+                   : reviewStats.automated
+                   ? `AI made ${reviewStats.automated} conservative choice${reviewStats.automated === 1 ? '' : 's'} automatically. You can inspect them, but nothing needs approval.`
+                   : 'Everything is ready. Inspect any layer if you want, then build your asset library.'}</p>
+               </div>
+             </header>
 
             <nav className="component-workbench-lanes" aria-label="Layer views">
               {([
-                ['attention', 'Needs input', reviewStats.attention],
-                ['structure', 'Groups', reviewStats.structure],
-                ['ready', 'Looks good', reviewStats.ready],
+                 ['check', 'Needs attention', reviewStats.automated],
+                 ['structure', 'Groups', reviewStats.structure],
+                 ['ready', 'Ready', reviewStats.ready],
                 ['all', 'All layers', reviewStats.all],
               ] as const).map(([lane, label, count]) => (
                 <button className={reviewLane === lane ? 'is-active' : ''} key={lane} type="button" onClick={() => setReviewLane(lane)}>
@@ -2260,8 +2529,8 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
             <div className="component-workbench-body">
               <aside className="component-layer-panel" aria-label="Document layers">
                 <div className="component-layer-panel-heading">
-                  <span>Layers</span>
-                  <small>↑ ↓ to move</small>
+                   <span>Layers in this document</span>
+                   <small>Select one to inspect</small>
                 </div>
                 <div
                   className="component-layer-tree"
@@ -2280,29 +2549,24 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                   {visibleComponents.length === 0 && (
                     <div className="component-layer-empty">
                       <CircleCheck size={24} />
-                      <b>{reviewLane === 'attention' ? 'Nothing needs input' : 'No layers match'}</b>
-                      <span>{reviewLane === 'attention' ? 'The scan is ready to apply.' : 'Clear the search or choose another view.'}</span>
-                      {reviewLane === 'attention' && <button type="button" onClick={() => setReviewLane('all')}>Browse all layers</button>}
+                      <b>{reviewLane === 'check' ? 'No incomplete decisions' : 'No layers match'}</b>
+                      <span>{reviewLane === 'check' ? 'Every visible family has a complete decision.' : 'Clear the search or choose another view.'}</span>
+                      {reviewLane === 'check' && <button type="button" onClick={() => setReviewLane('all')}>Browse all layers</button>}
                     </div>
                   )}
                   {visibleComponents.map((component, index) => {
                     const priority = reviewPriority(component);
-                    const reviewed = reviewedItems.has(componentReviewKey(component));
                     const hasChildren = component.childHierarchyKeys.length > 0;
                     return (
                       <div
-                        className={`component-layer-row component-layer-depth-${Math.min(6, component.hierarchyDepth)} is-${priority}${reviewed ? ' is-reviewed' : ''}${included.has(component.id) ? '' : ' is-excluded'}${selectedComponent?.id === component.id ? ' is-selected' : ''}`}
+                        className={`component-layer-row component-layer-depth-${Math.min(6, component.hierarchyDepth)} is-${priority}${included.has(component.id) ? '' : ' is-excluded'}${selectedComponent?.id === component.id ? ' is-selected' : ''}`}
                         key={component.id}
                         role="treeitem"
                         aria-level={component.hierarchyDepth + 1}
                         aria-selected={selectedComponent?.id === component.id}
                       >
-                        <label className="component-layer-include" title="Include this layer when applying changes">
-                          <input type="checkbox" checked={included.has(component.id)} onChange={(event) => setIncluded((current) => {
-                            const next = new Set(current);
-                            if (event.target.checked) next.add(component.id); else next.delete(component.id);
-                            return next;
-                          })} />
+                        <label className="component-layer-include" title="Include this layer in the asset library">
+                          <input type="checkbox" checked={included.has(component.id)} onChange={(event) => setComponentExportTarget(component.id, event.target.checked)} />
                         </label>
                         {hasChildren && reviewLane === 'all'
                           ? <button
@@ -2323,12 +2587,14 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                             {component.previewUrl && <img src={component.previewUrl} alt={`Preview of ${component.name}`} loading="lazy" />}
                           </span>
                           <span className="component-layer-copy">
-                            <b>{component.familyName}</b>
-                            <small>{component.familyName === component.name ? component.affinityType : `${component.name} · ${component.affinityType}`}</small>
+                            <b>{componentLayerLabel(component)}</b>
+                            <small>{included.has(component.id) && componentExportName(component) !== componentLayerLabel(component)
+                              ? `Asset: ${componentExportName(component)}`
+                              : componentLayerLabel(component) === component.name ? component.affinityType : `${component.name} · ${component.affinityType}`}</small>
                           </span>
                           {component.duplicateCount > 1 && <span className="component-layer-instances">×{component.duplicateCount}</span>}
                         </button>
-                        <span className="component-layer-status" title={reviewed ? 'Reviewed' : priority === 'critical' ? 'Needs input' : priority === 'check' ? 'Routine check' : 'Looks good'} />
+                        <span className="component-layer-status" title={priority === 'check' ? 'Needs attention' : isStructuralContextOnly(component) ? 'Structural context only' : isConstructionContext(component) ? 'Context classification complete' : 'Complete decision'} />
                         <span className="component-layer-number">{index + 1}</span>
                       </div>
                     );
@@ -2343,8 +2609,8 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                   <>
                     <header className="component-inspector-header">
                       <div>
-                        <span>{selectedReviewed ? 'Reviewed' : selectedPriority === 'critical' ? 'Needs input' : selectedPriority === 'check' ? 'Quick check' : 'Looks good'}</span>
-                        <h3>{selectedComponent.familyName}</h3>
+                        <span>{selectedPriority === 'check' ? 'Needs attention' : selectedStructuralContextOnly ? 'Structural context only' : selectedConstructionContext ? 'Context classification complete' : 'Complete decision'}</span>
+                        <h3>{componentLayerLabel(selectedComponent)}</h3>
                       </div>
                       <nav aria-label="Move between visible layers">
                         <button type="button" title="Previous layer" disabled={selectedIndex <= 0} onClick={() => moveReviewSelection(-1)}><ArrowLeft size={15} /></button>
@@ -2370,12 +2636,18 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                         </div>
                       </div>
 
-                      {!selectedReviewed && selectedPriority !== 'ready' && (
+                      {selectedPriority !== 'ready' && (
                         <div className={`component-inspector-alert is-${selectedPriority}`}>
-                          <CircleAlert size={17} />
+                          <CircleCheck size={17} />
                           <div>
-                            <b>{selectedPriority === 'critical' ? 'Kryeo needs your decision' : 'This is worth a quick check'}</b>
-                            {(selectedComponent.reviewReasons?.length ? selectedComponent.reviewReasons : ['The scan could not approve this decision automatically.'])
+                            <b>{selectedComponent.analysisState === 'provisional' || selectedComponent.analysisState === 'queued' || selectedComponent.assetType === 'Unknown'
+                              ? 'Kryeo needs a complete AI decision'
+                              : 'Kryeo kept this out of the export queue'}</b>
+                            {(selectedComponent.reviewReasons?.length ? selectedComponent.reviewReasons : [
+                              selectedComponent.analysisState === 'provisional' || selectedComponent.analysisState === 'queued' || selectedComponent.assetType === 'Unknown'
+                                ? 'No complete visual name, type, and Roblox role were returned for this asset.'
+                                : 'The visual evidence needs a complete replacement decision before this asset can be exported.',
+                            ])
                               .slice(0, 3)
                               .map((reason) => <span key={reason}>{reason}</span>)}
                           </div>
@@ -2383,20 +2655,26 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                       )}
 
                       <label className="component-inspector-include">
-                        <input type="checkbox" checked={included.has(selectedComponent.id)} onChange={(event) => setIncluded((current) => {
-                          const next = new Set(current);
-                          if (event.target.checked) next.add(selectedComponent.id); else next.delete(selectedComponent.id);
-                          return next;
-                        })} />
-                        Include when applying changes to Affinity
+                        <input type="checkbox" checked={included.has(selectedComponent.id)} onChange={(event) => setComponentExportTarget(selectedComponent.id, event.target.checked)} />
+                         Include in asset library
                       </label>
 
                       <div className="component-inspector-form">
                         <label className="component-family-field">
-                          Layer name
-                          <input value={selectedComponent.familyName} onChange={(event) => updateFamily(selectedComponent, { familyName: event.target.value })} />
-                          <span>{componentContextLabel(selectedComponent)}</span>
+                          Overall asset name
+                          <input
+                            value={componentOverallName(selectedComponent)}
+                            onChange={(event) => updateFamily(selectedComponent, {
+                              familyName: event.target.value,
+                              layerLabel: event.target.value,
+                              exportName: event.target.value,
+                            })}
+                          />
+                          <span>AI-owned name used for the Affinity layer, editable file, PNG, and manifest.</span>
                         </label>
+                        {included.has(selectedComponent.id) && selectedComponent.codeName && (
+                          <div className="component-code-name"><span>Roblox-safe name</span><code>{selectedComponent.codeName}</code></div>
+                        )}
                         <div className="component-classification-fields">
                           <label className="component-role-field">
                             What is it?
@@ -2412,7 +2690,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                           </label>
                           {selectedComponent.childHierarchyKeys.length > 0 && (
                             <label className="component-dive-field">
-                              Export this group as
+                                 Group this as
                               <select value={selectedComponent.diveMode} onChange={(event) => updateDiveMode(selectedComponent, event.target.value as ComponentDiveMode)}>
                                 <option value="keep-together">One combined asset</option>
                                 <option value="children-only">Child assets only</option>
@@ -2431,6 +2709,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
 
                       {selectedComponent.semanticConflict && <div className="semantic-conflict"><CircleAlert size={13} /><span>{selectedComponent.semanticConflictMessage}</span></div>}
                       {selectedComponent.diveConflict && <div className="semantic-conflict"><CircleAlert size={13} /><span>{selectedComponent.diveConflictMessage}</span></div>}
+                      {Boolean(selectedComponent.automationIssues?.length) && <div className="component-automation-issues"><CircleAlert size={15} /><div><b>Kryeo needs one decision</b>{selectedComponent.automationIssues?.slice(0, 3).map((issue) => <span key={issue}>{issue}</span>)}</div></div>}
                       {selectedComponent.keptInsideParent && <div className="component-inspector-note">This layer stays inside its parent because of a project rule.</div>}
 
                       <details
@@ -2439,7 +2718,7 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                           if (event.currentTarget.open && selectedComponent.aiConfidence !== undefined && !selectedEvidenceAvailable) void loadFamilyEvidence(selectedComponent);
                         }}
                       >
-                        <summary>Why Kryeo chose this</summary>
+                         <summary>Why Kryeo made this decision</summary>
                         <div>
                           <p>{selectedComponent.analysisReason || 'Kryeo combined the artwork, layer name, hierarchy, and learned project choices.'}</p>
                           {selectedComponent.aiConfidence !== undefined && <b>{Math.round(selectedComponent.aiConfidence * 100)}% model confidence</b>}
@@ -2452,8 +2731,19 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                               <span>Memory <b>{Math.round((selectedComponent.aiEvidence?.learned || 0) * 100)}%</b></span>
                             </div>
                           )}
-                          {selectedComponent.aiEvidenceSupportsClassification === false && <span className="component-evidence-warning">This cloud explanation does not support the earlier classification. Kryeo requires a review instead of trusting it.</span>}
-                          {selectedComponent.aiModelSuggestedType && <span>{selectedComponent.aiEvidenceSupportsClassification === false ? 'Cloud proposal (not accepted):' : 'Cloud proposal:'} {selectedComponent.aiModelSuggestedName || selectedComponent.familyName} · {selectedComponent.aiModelSuggestedType}</span>}
+                          {selectedComponent.aiEvidenceSupportsClassification === false && (
+                            <span className="component-evidence-warning">
+                              {selectedComponent.aiEvidenceSuggestedType
+                                ? `An independent review proposes ${selectedComponent.aiEvidenceSuggestedType}; this decision is marked for review until that replacement is applied.`
+                                : 'An independent review found a contradiction but did not provide a replacement; this decision is marked for review.'}
+                            </span>
+                          )}
+                          {Boolean(selectedComponent.analysisAlternatives?.length) && (
+                            <span className="component-evidence-alternative">
+                              Alternative considered: {selectedComponent.analysisAlternatives?.map((alternative) => `${alternative.assetType} — ${alternative.reason}`).join(' · ')}
+                            </span>
+                          )}
+                          {selectedComponent.aiModelSuggestedType && <span>{selectedComponent.aiEvidenceSupportsClassification === false ? 'Original cloud proposal:' : 'Cloud proposal:'} {selectedComponent.aiModelSuggestedName || selectedComponent.familyName} · {selectedComponent.aiModelSuggestedType}</span>}
                           {selectedComponent.aiNormalizationReason && <span>{selectedComponent.aiNormalizationReason}</span>}
                         </div>
                       </details>
@@ -2467,12 +2757,13 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
                     </div>
 
                     <footer className="component-inspector-action">
-                      {selectedPriority === 'ready'
-                        ? <span><CircleCheck size={16} />No decision needed</span>
-                        : <button className={selectedReviewed ? 'secondary-button' : 'run-button'} type="button" onClick={toggleSelectedReviewed}>
-                            {selectedReviewed ? <RefreshCw size={15} /> : <CircleCheck size={15} />}
-                            {selectedReviewed ? 'Reopen decision' : 'Approve and continue'}
-                          </button>}
+                      <span>{selectedPriority === 'check'
+                        ? <><CircleAlert size={16} />Incomplete decision</>
+                        : selectedStructuralContextOnly
+                          ? <><CircleCheck size={16} />Structural context only</>
+                          : selectedConstructionContext
+                            ? <><CircleCheck size={16} />Context classification ready</>
+                            : <><CircleCheck size={16} />AI decision ready</>}</span>
                     </footer>
                   </>
                 )}
@@ -2481,15 +2772,21 @@ function ComponentScanPage({ document, connected, onWorkspace }: {
           </section>
 
           <footer className="scan-actions">
-            <div>{message
+            <div>{unresolvedComponentCount
+              ? <><CircleAlert size={16} />{unresolvedComponentCount} {unresolvedComponentCount === 1 ? 'family needs' : 'families need'} a complete decision before build</>
+              : message
               ? <><CircleCheck size={16} />{message}</>
-              : reviewStats.attention
-                ? <><CircleAlert size={16} />Review {reviewStats.attention} remaining {reviewStats.attention === 1 ? 'exception' : 'exceptions'} before applying</>
-                : <><CircleCheck size={16} />{included.size} of {scan.components.length} components included · review complete</>}</div>
-            <button className="secondary-button" disabled={scanning} onClick={() => void runScan()}><RefreshCw size={16} />Rescan {scanScope}</button>
-            <button className="run-button" disabled={saving || reviewStats.attention > 0} title={reviewStats.attention ? 'Resolve the remaining decisions before saving.' : ''} onClick={() => void rememberChoices()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saving ? 'Saving decisions' : 'Save decisions'}</button>
-            <button className="secondary-button" disabled={applying || scanScope !== 'document' || included.size === 0 || reviewStats.attention > 0} title={reviewStats.attention ? 'Resolve the remaining decisions before renaming layers.' : ''} onClick={() => void applyNames()}>{applying ? <LoaderCircle className="spin" size={16} /> : <FileCode2 size={16} />}{applying ? 'Renaming layers' : 'Rename layers'}</button>
-            <button className="run-button" disabled={applying || scanScope !== 'document' || included.size === 0 || reviewStats.attention > 0} title={reviewStats.attention ? 'Resolve the remaining decisions before organizing the document.' : ''} onClick={() => void applyOrganization()}>{applying ? <LoaderCircle className="spin" size={16} /> : <Layers3 size={16} />}{applying ? 'Organizing layers' : 'Organize layers'}</button>
+              : <><CircleCheck size={16} />{included.size} {included.size === 1 ? 'asset target' : 'asset targets'} selected · AI decisions are ready</>}</div>
+            <button className="text-button" disabled={scanning} onClick={() => void runScan()}><RefreshCw size={15} />Rescan</button>
+            <details className="scan-more-actions">
+              <summary>More actions <ChevronRight size={15} /></summary>
+              <div>
+                <button className="secondary-button" disabled={saving} onClick={() => void rememberChoices()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saving ? 'Saving decisions' : 'Save decisions & teach Kryeo'}</button>
+                <button className="secondary-button" disabled={applying || scanScope !== 'document'} onClick={() => void applyNames()}>{applying ? <LoaderCircle className="spin" size={16} /> : <FileCode2 size={16} />}{applying ? 'Applying names' : 'Reapply AI names'}</button>
+                <button className="secondary-button" disabled={applying || scanScope !== 'document' || included.size === 0} onClick={() => void applyOrganization()}>{applying ? <LoaderCircle className="spin" size={16} /> : <Layers3 size={16} />}{applying ? 'Organizing layers' : 'Organize Affinity layers'}</button>
+              </div>
+            </details>
+            <button className="run-button" disabled={exporting || applying || scanScope !== 'document' || included.size === 0 || unresolvedComponentCount > 0} onClick={() => void createAssets()}>{exporting || applying ? <LoaderCircle className="spin" size={16} /> : <Package size={16} />}{exporting || applying ? 'Building asset library' : unresolvedComponentCount ? 'Rescan required' : 'Build asset library'}</button>
           </footer>
         </>
       )}
@@ -2535,7 +2832,7 @@ function ProjectNotesPanel({ project, workspace, onWorkspace }: {
     <section className={`project-notes ${expanded ? 'is-expanded' : ''}`}>
       <button className="project-notes-heading" type="button" onClick={() => setExpanded((value) => !value)}>
         <MessageSquare size={19} />
-        <span><b>{project} notes</b><small>{knowledge?.notes.length || 0} saved decisions and references</small></span>
+        <span><b>{project} notes</b></span>
         <ChevronRight size={17} />
       </button>
       {expanded && <div className="project-notes-body">
@@ -2561,7 +2858,7 @@ function ProjectNotesPanel({ project, workspace, onWorkspace }: {
   );
 }
 
-function AssetsPage({ library, assets, openingAssetPath, connected, onOpen, onReveal, workspace, project, onWorkspace, onPreference }: {
+function AssetsPage({ library, assets, openingAssetPath, connected, onOpen, onReveal, workspace, project, onWorkspace, onPreference, onNavigate }: {
   library: AssetLibrarySnapshot;
   assets: AssetRecord[];
   openingAssetPath: string;
@@ -2572,6 +2869,7 @@ function AssetsPage({ library, assets, openingAssetPath, connected, onOpen, onRe
   project: string;
   onWorkspace: (workspace: WorkspaceSnapshot) => void;
   onPreference: (assetId: string, favourite: boolean, collections: string[]) => void;
+  onNavigate: (page: Page) => void;
 }) {
   const [selectedId, setSelectedId] = useState('');
   const selected = assets.find((asset) => asset.id === selectedId) || assets[0];
@@ -2583,7 +2881,10 @@ function AssetsPage({ library, assets, openingAssetPath, connected, onOpen, onRe
   }, [assets, selected, selectedId]);
 
   if (!library.available) {
-    return <div className="empty-state enter-page"><LibraryBig size={31} /><h2>Asset library not found</h2><p>{library.message}</p></div>;
+    return <div className="empty-state enter-page"><LibraryBig size={31} /><h2>Preparing your Kryeo library</h2><p>{library.message}</p></div>;
+  }
+  if (library.assets.length === 0) {
+    return <div className="empty-state empty-state--library enter-page"><LibraryBig size={31} /><h2>Your asset library is ready</h2><p>Scan an Affinity document and Kryeo will name, classify, organize, and export the assets automatically.</p><button className="run-button" onClick={() => onNavigate('import')}><ScanSearch size={17} />Scan &amp; export</button></div>;
   }
   return (
     <div className="page-stack enter-page">
@@ -2593,11 +2894,12 @@ function AssetsPage({ library, assets, openingAssetPath, connected, onOpen, onRe
         <div><span>Saved versions</span><strong>{library.totalVersions}</strong></div>
         <div><span>Projects</span><strong>{library.projects.length}</strong></div>
         <div><span>Needs attention</span><strong>{library.unhealthyCount}</strong></div>
+        <div><span>Storage</span><strong>Kryeo</strong></div>
       </section>
       <div className="asset-browser-layout">
         <section className="content-section content-section--flush asset-results">
           <div className="section-title-row">
-            <div><h2>Asset index</h2><p>{assets.length} matching assets</p></div>
+            <div><h2>Kryeo asset library</h2><p>Browse previews, versions, and notes without leaving Kryeo.</p></div>
           </div>
           <AssetTable
             assets={assets}
@@ -2664,6 +2966,10 @@ function AssetTable({ assets, compact = false, selectedId, onSelect, onReveal }:
           className={`asset-row ${selectedId === asset.id ? 'is-selected' : ''} ${onSelect ? 'is-selectable' : ''}`}
           key={asset.id}
           onClick={() => onSelect?.(asset.id)}
+          onKeyDown={(event) => { if (onSelect && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onSelect(asset.id); } }}
+          role={onSelect ? 'button' : undefined}
+          tabIndex={onSelect ? 0 : undefined}
+          aria-pressed={onSelect ? selectedId === asset.id : undefined}
         >
           <span className="asset-name"><i><Box size={16} /></i><b>{asset.displayName || asset.name}</b><small>{asset.codeName}</small></span>
           <span>{asset.project || 'Unsorted'}</span>
@@ -2695,7 +3001,7 @@ function ActivityPage({ activities, jobs, logs, tab, setTab, onCancel, onRetry }
   return (
     <div className="activity-layout enter-page">
       <section className="operation-list">
-        <div className="section-title-row"><div><h2>Operations</h2><p>Actions started from Kryeo</p></div></div>
+        <div className="section-title-row"><div><h2>Operations</h2></div></div>
         {jobs.length === 0 && activities.length === 0 ? (
           <div className="table-empty"><Clock3 size={21} /><span>No Kryeo operations yet.</span></div>
         ) : jobs.length > 0 ? jobs.map((job) => (
@@ -2759,7 +3065,7 @@ function LearningPage({ workspace, onWorkspace }: {
     + workspace.componentDecisions.filter((decision) => decision.scope === 'global').length;
 
   const clearVisuals = async () => {
-    if (!window.confirm('Forget every approved visual family? New scans will ask Kryeo AI to analyse them again.')) return;
+    if (!window.confirm('Forget every learned visual family? New scans will run the AI analysis again.')) return;
     setBusyKey('clear-visual');
     try {
       onWorkspace(await window.kryeo.clearComponentDecisions());
@@ -2780,7 +3086,7 @@ function LearningPage({ workspace, onWorkspace }: {
   return (
     <div className="learning-page enter-page">
       <section className="learning-summary">
-        <div><ScanSearch size={19} /><span>Approved families</span><strong>{workspace.componentDecisions.length}</strong></div>
+        <div><ScanSearch size={19} /><span>Learned families</span><strong>{workspace.componentDecisions.length}</strong></div>
         <div><CircleCheck size={19} /><span>User corrections</span><strong>{corrected}</strong></div>
         <div><MessageSquare size={19} /><span>Written rules</span><strong>{workspace.assistantMemories.length}</strong></div>
         <div><Layers3 size={19} /><span>Global learning</span><strong>{globalLearning}</strong></div>
@@ -2802,7 +3108,7 @@ function LearningPage({ workspace, onWorkspace }: {
             onClick={() => void (view === 'visual' ? clearVisuals() : clearRules())}
           >
             {busyKey.startsWith('clear') ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}
-            Clear {view === 'visual' ? 'approved families' : 'written rules'}
+            Clear {view === 'visual' ? 'learned families' : 'written rules'}
           </button>
         </header>
 
@@ -2817,7 +3123,7 @@ function LearningPage({ workspace, onWorkspace }: {
                 onWorkspace={onWorkspace}
               />
             )) : (
-              <div className="learning-empty"><ScanSearch size={28} /><h2>{query ? 'No matching visual decisions' : 'No learned visuals yet'}</h2><p>{query ? 'Try a different name, type, role, or document.' : 'Confirmed Component Scan reviews will appear here.'}</p></div>
+               <div className="learning-empty"><ScanSearch size={28} /><h2>{query ? 'No matching visual decisions' : 'No learned visuals yet'}</h2><p>{query ? 'Try a different name, type, role, or document.' : 'AI decisions from Component Scan will appear here.'}</p></div>
             )}
           </div>
         ) : (
@@ -2926,12 +3232,12 @@ function LearningDecisionRow({ decision, busy, onBusy, onWorkspace }: {
       <div className="learning-decision-mark"><BrainCircuit size={21} /><span>{decision.correctionCount || 0}</span></div>
       <div className="learning-decision-body">
         <div className="learning-decision-heading">
-          <div><strong>{decision.familyName}</strong><span>{corrected ? 'User corrected' : 'Confirmed as suggested'}</span></div>
+           <div><strong>{decision.familyName}</strong><span>{corrected ? 'User corrected' : 'AI decision saved'}</span></div>
           <small>{decision.documentTitle || 'Source document unavailable'} · {formatDate(decision.updatedAt)}</small>
         </div>
         <div className="learning-origin"><span>Original proposal</span><p>{source}</p></div>
         <div className="learning-influence">
-          <span>{decision.provenance?.source === 'learning-editor' ? 'Edited in Learning' : 'Confirmed in Component Scan'}</span>
+           <span>{decision.provenance?.source === 'learning-editor' ? 'Edited in Learning' : 'Saved from Component Scan'}</span>
           <span>Used in {decision.influenceCount || 0} later {(decision.influenceCount || 0) === 1 ? 'scan' : 'scans'}</span>
           {decision.lastInfluencedAt && <span>Last used {formatDate(decision.lastInfluencedAt)}</span>}
           <span>Calibration {decision.confidenceSamples
@@ -2965,116 +3271,87 @@ function LearningDecisionRow({ decision, busy, onBusy, onWorkspace }: {
   );
 }
 
-function SettingsPage({ version, status, library, connectors, workspace, onReconnect, onWorkspace }: {
+function SettingsPage({ version, status, onReconnect, onWorkspace, developerMode, onDeveloperModeChange, developerLog, onDeveloperLogChange }: {
   version: string;
   status: AffinityStatus;
-  library: AssetLibrarySnapshot;
-  connectors: ConnectorSnapshot;
-  workspace: WorkspaceSnapshot;
   onReconnect: () => void;
   onWorkspace: (workspace: WorkspaceSnapshot) => void;
+  developerMode: boolean;
+  onDeveloperModeChange: (enabled: boolean) => void;
+  developerLog: DeveloperLogSnapshot;
+  onDeveloperLogChange: (snapshot: DeveloperLogSnapshot) => void;
 }) {
   const [assistantStatus, setAssistantStatus] = useState<AssistantStatus | null>(null);
   const [assistantInstalling, setAssistantInstalling] = useState<'portable' | 'balanced' | ''>('');
-  const [hostedStatus, setHostedStatus] = useState<HostedAiStatus | null>(null);
-  const [hostedEndpoint, setHostedEndpoint] = useState(DEFAULT_HOSTED_AI_ENDPOINT);
-  const [hostedToken, setHostedToken] = useState('');
-  const [hostedSaving, setHostedSaving] = useState(false);
-  const projects = library.projects.length ? library.projects : ['Default Project'];
-  const [project, setProject] = useState(projects[0]);
-  const existing = workspace.recipes.find((candidate) => candidate.project === project);
-  const existingSignature = existing
-    ? `${existing.project}|${existing.autoExport}|${existing.outputRoot}|${existing.preset}|${existing.targets.join(',')}`
-    : '';
-  const [recipe, setRecipe] = useState<ProjectRecipe>(existing || { project, autoExport: false, outputRoot: '', preset: 'PNG (Pixel)', source: 'raster', targets: ['folder'] });
-  const [recipeBusy, setRecipeBusy] = useState(false);
-  const [recipeMessage, setRecipeMessage] = useState('');
-  useEffect(() => {
-    if (!projects.includes(project)) setProject(projects[0]);
-  }, [project, projects]);
-  useEffect(() => {
-    setRecipe(existing || { project, autoExport: false, outputRoot: '', preset: 'PNG (Pixel)', source: 'raster', targets: ['folder'] });
-    setRecipeMessage('');
-  }, [existingSignature, project]);
-  useEffect(() => { void window.kryeo.getAssistantStatus().then(setAssistantStatus).catch(() => undefined); }, []);
-  useEffect(() => {
-    void window.kryeo.getHostedAiStatus().then((next) => {
-      setHostedStatus(next);
-      if (next.endpoint) setHostedEndpoint(next.endpoint);
-    }).catch(() => undefined);
-  }, []);
-  const lastExport = workspace.jobs.find((job) => {
-    const payload = job.payload as { project?: string };
-    return job.operation === 'auto-export' && payload.project === project;
+  const [startPage, setStartPage] = useState<SettingsStartPage>(() => {
+    const saved = localStorage.getItem('kryeo.start-page') as SettingsStartPage | null;
+    return saved && SETTINGS_START_PAGES.some((option) => option.id === saved) ? saved : 'home';
   });
-  const saveRecipe = async (): Promise<WorkspaceSnapshot> => {
-    const nextRecipe: ProjectRecipe = {
-      ...recipe,
-      project,
-      source: 'raster',
-      targets: ['folder', ...(recipe.targets.includes('roblox') ? ['roblox' as const] : [])],
-    };
-    const nextWorkspace = await window.kryeo.saveRecipe(nextRecipe);
-    onWorkspace(nextWorkspace);
-    setRecipe(nextRecipe);
-    return nextWorkspace;
-  };
-  const chooseDestination = async () => {
-    const destination = await window.kryeo.chooseExportFolder();
-    if (destination) setRecipe((current) => ({ ...current, outputRoot: destination }));
-  };
-  const runAutoExport = async () => {
-    if (recipeBusy) return;
-    setRecipeBusy(true);
-    setRecipeMessage('Saving the recipe...');
+  const [maintenanceMessage, setMaintenanceMessage] = useState('');
+
+  useEffect(() => { void window.kryeo.getAssistantStatus().then(setAssistantStatus).catch(() => undefined); }, []);
+
+  const cleanTemporaryFiles = async () => {
+    setMaintenanceMessage('Cleaning temporary files...');
     try {
-      await saveRecipe();
-      setRecipeMessage('Exporting the latest Raster assets...');
-      const result = await window.kryeo.runAutoExport(project);
-      setRecipeMessage(result.output);
+      const result = await window.kryeo.cleanupStaging();
+      setMaintenanceMessage(result.ok ? 'Temporary files cleaned.' : 'Temporary files could not be cleaned.');
       onWorkspace(await window.kryeo.getWorkspace());
-    } catch (error) {
-      setRecipeMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setRecipeBusy(false);
+    } catch {
+      setMaintenanceMessage('Temporary files could not be cleaned.');
     }
   };
+
+  const connectionReady = status.state === 'connected';
+  const setDeveloperMode = (enabled: boolean) => {
+    onDeveloperModeChange(enabled);
+    localStorage.setItem('kryeo.developer-mode', String(enabled));
+  };
+  const copyDeveloperLog = () => {
+    void navigator.clipboard.writeText(JSON.stringify(developerLog.entries, null, 2))
+      .then(() => setMaintenanceMessage('Developer log copied to clipboard.'))
+      .catch(() => setMaintenanceMessage('Developer log could not be copied.'));
+  };
+  const clearDeveloperLog = () => {
+    void window.kryeo.clearDeveloperLog()
+      .then(onDeveloperLogChange)
+      .then(() => setMaintenanceMessage('Developer log cleared.'))
+      .catch(() => setMaintenanceMessage('Developer log could not be cleared.'));
+  };
   return (
-    <div className="settings-list enter-page">
-      <section className="settings-section settings-section--auto-export">
-        <div><h2>Auto-Export</h2><p>After Kryeo saves an asset, publish the latest Raster files to your production folder.</p></div>
-        <div className="settings-value recipe-controls auto-export-controls">
-          <div className="auto-export-heading">
-            <div><strong>{project}</strong><span>{recipe.autoExport ? 'Runs after every successful Kryeo Save' : 'Manual exports only'}</span></div>
-            <label className="auto-export-toggle"><input type="checkbox" checked={recipe.autoExport} onChange={(event) => setRecipe({ ...recipe, autoExport: event.target.checked })} /><span>{recipe.autoExport ? 'Enabled' : 'Disabled'}</span></label>
-          </div>
-          <label>Project<select value={project} onChange={(event) => setProject(event.target.value)}>{projects.map((item) => <option key={item}>{item}</option>)}</select></label>
-          <label>Affinity PNG preset<input value={recipe.preset} onChange={(event) => setRecipe({ ...recipe, preset: event.target.value })} /></label>
-          <div className="export-destination">
-            <span>Production folder</span>
-            <code title={recipe.outputRoot || 'Asset Library export folder'}>{recipe.outputRoot || 'Asset Library export folder'}</code>
-            <button className="secondary-button" type="button" onClick={() => void chooseDestination()}><FolderOpen size={15} />Choose</button>
-          </div>
-          <div className="auto-export-flow" aria-label="Auto-Export sequence"><span>Kryeo Save</span><ArrowRight size={15} /><span>Raster PNG</span><ArrowRight size={15} /><span>Production folder</span></div>
-          <label className="inline-check"><input type="checkbox" checked={recipe.targets.includes('roblox')} onChange={(event) => setRecipe({ ...recipe, targets: event.target.checked ? ['folder', 'roblox'] : ['folder'] })} />Refresh the Roblox manifest after export</label>
-          {lastExport && <div className={`auto-export-status auto-export-status--${lastExport.status}`}>
-            {lastExport.status === 'succeeded' ? <CircleCheck size={17} /> : lastExport.status === 'running' || lastExport.status === 'queued' ? <LoaderCircle className="spin" size={17} /> : <CircleAlert size={17} />}
-            <span><b>{lastExport.status === 'succeeded' ? 'Last export completed' : lastExport.stage}</b><small>{lastExport.output || `${lastExport.progress}%`}</small></span>
-          </div>}
-          {recipeMessage && <p className="recipe-message">{recipeMessage}</p>}
-          <div className="delivery-buttons">
-            <button className="secondary-button" disabled={recipeBusy} onClick={() => void saveRecipe().then(() => setRecipeMessage('Auto-Export settings saved.')).catch((error) => setRecipeMessage(error instanceof Error ? error.message : String(error)))}><Save size={15} />Save settings</button>
-            <button className="secondary-button auto-export-run" disabled={recipeBusy || status.state !== 'connected'} onClick={() => void runAutoExport()}>{recipeBusy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}Run now</button>
-            <button className="secondary-button" type="button" onClick={() => void window.kryeo.openExportFolder(project)}><FolderOpen size={15} />Open folder</button>
-          </div>
+    <div className="settings-list settings-list--preferences enter-page">
+      <section className="settings-section settings-section--intro">
+        <div>
+          <h2>Keep Kryeo feeling like yours</h2>
+          <p>Only the choices that change your day-to-day workflow belong here.</p>
         </div>
       </section>
+
       <section className="settings-section">
-        <div><h2>Offline Assistant fallback</h2><p>Keep project chat available when the Kryeo AI server cannot be reached. Component semantics remain provisional while offline.</p></div>
-        <div className="settings-value">
-          <span>{assistantStatus?.installed ? `${assistantStatus.modelPack === 'balanced' ? 'Balanced' : 'Portable'} model active` : 'No multimodal reviewer installed'}</span>
-          <span>{assistantStatus ? `${assistantStatus.memoryGB} GB memory - ${assistantStatus.recommendedProfile} profile` : 'Checking hardware profile'}</span>
-          <code>{assistantStatus?.model || 'LFM2.5-VL 450M'}</code>
+        <div><h2>Startup</h2><p>Choose the workspace Kryeo opens first.</p></div>
+        <div className="settings-value settings-control-stack">
+          <label className="settings-control">
+            <span>Open Kryeo on</span>
+            <select value={startPage} onChange={(event) => {
+              const next = event.target.value as SettingsStartPage;
+              setStartPage(next);
+              localStorage.setItem('kryeo.start-page', next);
+            }}>
+              {SETTINGS_START_PAGES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+            </select>
+          </label>
+          <small className="settings-hint">This choice is saved on this device.</small>
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <div><h2>Assistant</h2><p>Use review help without sending your project to another service.</p></div>
+        <div className="settings-value settings-assistant-value">
+          <div className="settings-status-line">
+            <StatusDot status={{ ...status, state: assistantStatus?.ready ? 'connected' : 'disconnected' }} />
+            <strong>{assistantStatus?.ready ? 'Offline assistant ready' : assistantStatus?.installed ? 'Assistant is preparing' : 'Offline assistant not installed'}</strong>
+          </div>
+          <span className="settings-hint">{assistantStatus?.ready ? 'Available on this device for private project help.' : 'Install an offline pack when you want local assistant help.'}</span>
           <div className="delivery-buttons">
             {assistantStatus?.availableModelPacks?.map((pack) => (
               <button
@@ -3097,61 +3374,66 @@ function SettingsPage({ version, status, library, connectors, workspace, onRecon
           </div>
         </div>
       </section>
+
       <section className="settings-section">
-        <div><h2>Kryeo AI server</h2><p>Use the hosted visual reviewer for family analysis, document reconciliation, and Assistant chat.</p></div>
-        <div className="settings-value recipe-controls">
-          <label>Server address<input value={hostedEndpoint} onChange={(event) => setHostedEndpoint(event.target.value)} placeholder="https://ai.kryeo.app" /></label>
-          <label>Access token<input type="password" value={hostedToken} onChange={(event) => setHostedToken(event.target.value)} placeholder={hostedStatus?.configured ? 'Leave blank to keep the current token' : 'Paste an access token'} /></label>
-          <span><StatusDot status={{ state: hostedStatus?.available ? 'connected' : 'disconnected', serverUrl: hostedEndpoint, message: hostedStatus?.message || '', checkedAt: new Date().toISOString() }} />{hostedStatus?.available ? `${hostedStatus.model} connected` : hostedStatus?.message || 'Not connected'}</span>
-          <button
-            className="secondary-button"
-            disabled={hostedSaving || !hostedEndpoint.trim()}
-            onClick={() => {
-              setHostedSaving(true);
-              void window.kryeo.configureHostedAi({ endpoint: hostedEndpoint.trim(), token: hostedToken })
-                .then((next) => {
-                  setHostedStatus(next);
-                  setHostedToken('');
-                })
-                .finally(() => setHostedSaving(false));
-            }}
-          >
-            {hostedSaving ? <LoaderCircle className="spin" size={15} /> : <BrainCircuit size={15} />}
-            {hostedSaving ? 'Testing connection' : 'Save and test'}
-          </button>
-        </div>
-      </section>
-      <section className="settings-section">
-        <div><h2>Maintenance</h2><p>Remove abandoned staging files left by interrupted Affinity operations.</p></div>
-        <div className="settings-value"><button className="secondary-button" onClick={() => void window.kryeo.cleanupStaging()}><Trash2 size={15} />Clean staging files</button><span>{workspace.links.length} placed asset links recorded</span></div>
-      </section>
-      <section className="settings-section">
-        <div><h2>Affinity connection</h2><p>Kryeo communicates with the local Affinity MCP server.</p></div>
-        <div className="settings-value">
-          <span><StatusDot status={status} />{status.state}</span>
-          <code>{status.serverUrl}</code>
+        <div><h2>Affinity</h2><p>Connect the creative source that powers Kryeo workflows.</p></div>
+        <div className="settings-value settings-connection-value">
+          <div className="settings-status-line"><StatusDot status={status} /><strong>{connectionReady ? 'Connected' : 'Not connected'}</strong></div>
+          <span className="settings-hint">{connectionReady ? 'Workflows and document context are ready.' : 'Open Affinity and enable its Kryeo connection to continue.'}</span>
           <button className="secondary-button" onClick={onReconnect}><RotateCw size={15} />Reconnect</button>
         </div>
       </section>
+
       <section className="settings-section">
-        <div><h2>Asset library</h2><p>Read directly from your existing GlobalIndex.json.</p></div>
-        <div className="settings-value"><code>{library.root || 'Not configured'}</code><span>{library.message}</span></div>
-      </section>
-      <section className="settings-section">
-        <div><h2>Machine setup</h2><p>Local connector detection for creative and production applications.</p></div>
-        <div className="settings-value">
-          <span>{connectors.connectors.filter((connector) => connector.installed).length} applications installed</span>
-          <span>{connectors.connectors.filter((connector) => connector.configured).length} connector ready</span>
-          <code>{connectors.machineName || 'Not scanned'}</code>
+        <div><h2>Local data</h2><p>Kryeo keeps workspace information on this device and clears temporary previews when asked.</p></div>
+        <div className="settings-value settings-maintenance-value">
+          <button className="secondary-button" onClick={() => void cleanTemporaryFiles()}><Trash2 size={15} />Clear temporary files</button>
+          <span className="settings-hint">{maintenanceMessage || 'Only temporary staging files older than 24 hours are removed.'}</span>
         </div>
       </section>
+
       <section className="settings-section">
-        <div><h2>Privacy</h2><p>All script execution and asset indexing stay on this computer.</p></div>
-        <div className="settings-value"><span>No account required</span><span>No analytics configured</span></div>
+        <div><h2>Developer mode</h2><p>Record a complete local event stream for IPC calls, request inputs and results, timings, jobs, scan stages, renderer console messages, and failures.</p></div>
+        <div className="settings-value settings-control-stack">
+          <label className="settings-toggle">
+            <input type="checkbox" checked={developerMode} onChange={(event) => setDeveloperMode(event.target.checked)} />
+            <span><b>{developerMode ? 'Developer logging is on' : 'Developer logging is off'}</b><small>{developerMode ? `${developerLog.entries.length.toLocaleString()} recent events are available below and in the local log file.` : 'Normal operation records no developer event stream.'}</small></span>
+          </label>
+          <small className="settings-hint">API keys, bearer tokens, credentials, and secret query parameters are redacted before the log reaches disk, the UI, or the clipboard. Other sanitized request and result data is intentionally verbose.</small>
+        </div>
       </section>
+
+      {developerMode && (
+        <section className="settings-section developer-log-section">
+          <div>
+            <h2>Developer console</h2>
+            <p>Every event is kept as structured JSONL at the path below. The console shows the newest events first while the file retains the rolling history.</p>
+          </div>
+          <div className="settings-value developer-log-value">
+            <div className="developer-log-meta">
+              <strong>{developerLog.entries.length.toLocaleString()} events loaded</strong>
+              <code>{developerLog.filePath || 'Log path unavailable until the app is ready.'}</code>
+            </div>
+            <pre className="developer-log-console">{developerLog.entries.slice(-400).map((entry: DeveloperLogEntry) => `${entry.at}  [${entry.level}] [${entry.source}/${entry.event}] ${entry.message}${entry.data === undefined ? '' : ` ${JSON.stringify(entry.data)}`}`).join('\n') || 'Waiting for developer events...'}</pre>
+            <div className="developer-log-actions">
+              <button className="secondary-button" type="button" disabled={!developerLog.entries.length} onClick={copyDeveloperLog}><FileCode2 size={15} />Copy JSONL events</button>
+              <button className="secondary-button" type="button" disabled={!developerLog.entries.length} onClick={clearDeveloperLog}><Trash2 size={15} />Clear log</button>
+            </div>
+          </div>
+        </section>
+      )}
+
       <section className="settings-section">
-        <div><h2>About Kryeo</h2><p>The local bridge between creative applications and production environments.</p></div>
-        <div className="settings-value"><span>Version {version}</span><span>Visual-family intelligence</span></div>
+        <div><h2>Privacy</h2><p>Your workspace does not require an account.</p></div>
+        <div className="settings-value settings-fact-list">
+          <span>Workspace data stays on this device.</span>
+          <span>Cloud review is optional and only used for component analysis.</span>
+        </div>
+      </section>
+
+      <section className="settings-section settings-section--about">
+        <div><h2>About Kryeo</h2></div>
+        <div className="settings-value settings-fact-list"><span>Version {version}</span><span>Creative asset workflows with visual intelligence.</span></div>
       </section>
     </div>
   );
@@ -3167,9 +3449,6 @@ function Inspector({ status, document, activities, connectors, jobs }: {
   const detectedTargets = connectors.connectors.filter((connector) => connector.role === 'production-target' && connector.installed);
   return (
     <div className="inspector-inner">
-      <div className="inspector-heading">
-        <span>Pipeline source</span>
-      </div>
       <section className="document-inspector">
         <div className="document-preview"><Layers3 size={28} /></div>
         <strong>{document.open ? document.title : 'No active document'}</strong>
@@ -3210,7 +3489,7 @@ const bootSteps = [
   { label: 'Opening workspace', detail: 'Pipeline ready' },
 ];
 
-function BootScreen({ version, leaving }: { version: string; leaving: boolean }) {
+function BootScreen({ leaving }: { leaving: boolean }) {
   const [phase, setPhase] = useState(0);
   const activeStep = phase >= bootSteps.length
     ? { label: 'Pipeline ready', detail: 'Workspace prepared' }
@@ -3224,23 +3503,14 @@ function BootScreen({ version, leaving }: { version: string; leaving: boolean })
   return (
     <div className={`boot-screen ${leaving ? 'is-leaving' : ''}`} role="status" aria-live="polite" aria-label={`Kryeo is opening. ${activeStep.label}`}>
       <header className="boot-header">
-        <div className="boot-brand"><img src={kryeoMark} alt="" /><span>Kryeo</span><small>v{version}</small></div>
-        <div className="boot-header-state"><i /> Pipeline initialization</div>
+        <div className="boot-brand"><img src={kryeoMark} alt="" /><span>Kryeo</span></div>
       </header>
 
       <main className="boot-stage">
-        <div className="boot-stage-heading">
-          <span>Design input</span>
-          <strong>The bridge is coming online</strong>
-          <span>Production output</span>
-        </div>
-
         <div className={`boot-route boot-route--phase-${phase}`} aria-hidden="true">
           <div className="boot-node boot-node--source">
-            <span>Creative source</span>
             <Palette size={28} />
             <strong>Affinity</strong>
-            <small>Source handshake</small>
           </div>
 
           <div className="boot-link boot-link--inbound"><i /><i /><i /></div>
@@ -3274,7 +3544,6 @@ function BootScreen({ version, leaving }: { version: string; leaving: boolean })
 
         <section className="boot-console">
           <div className="boot-console-lead">
-            <span>Current operation</span>
             <strong>{activeStep.label}</strong>
             <small>{activeStep.detail}</small>
           </div>
@@ -3291,11 +3560,9 @@ function BootScreen({ version, leaving }: { version: string; leaving: boolean })
       </main>
 
       <footer className="boot-footer">
-        <span>Design</span>
         <div className="boot-segments" aria-hidden="true">
           {Array.from({ length: 16 }, (_, index) => <i className={index < Math.min(16, (phase + 1) * 4) ? 'is-filled' : ''} key={index} />)}
         </div>
-        <span>Production</span>
         <b>{Math.min(100, (phase + 1) * 25)}%</b>
       </footer>
     </div>
@@ -3313,11 +3580,11 @@ function CommandPalette({ query, setQuery, tools, assets, onClose, onPage, onToo
   onAsset: (asset: AssetRecord) => void;
 }) {
   const needle = query.trim().toLowerCase();
-  const pages: Array<[Page, string]> = [['home', 'Pipeline'], ['assistant', 'Assistant'], ['learning', 'Learning'], ['connectors', 'Connectors'], ['tools', 'Workflows'], ['import', 'Import'], ['assets', 'Assets'], ['activity', 'Activity'], ['settings', 'Settings']];
+  const pages: Array<[Page, string]> = [['home', 'Pipeline'], ['assistant', 'Assistant'], ['learning', 'Learning'], ['connectors', 'Connectors'], ['tools', 'Workflows'], ['import', 'Scan & export'], ['assets', 'Assets'], ['activity', 'Activity'], ['settings', 'Settings']];
   const visiblePages = pages.filter(([, label]) => !needle || label.toLowerCase().includes(needle));
   const visibleTools = tools.filter((tool) => !needle || `${tool.displayName} ${tool.description}`.toLowerCase().includes(needle)).slice(0, 6);
   const visibleAssets = assets.filter((asset) => !needle || `${asset.displayName} ${asset.codeName} ${asset.project}`.toLowerCase().includes(needle)).slice(0, 6);
-  return <div className="command-overlay" onMouseDown={onClose}><div className="command-dialog" onMouseDown={(event) => event.stopPropagation()}><div className="command-search"><Search size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Go anywhere, run a workflow, open an asset" /><kbd>Esc</kbd></div><div className="command-results">{visiblePages.length > 0 && <section><h3>Navigate</h3>{visiblePages.map(([id, label]) => <button onClick={() => onPage(id)} key={id}><LayoutDashboard size={16} /><span>{label}</span><ChevronRight size={14} /></button>)}</section>}{visibleTools.length > 0 && <section><h3>Workflows</h3>{visibleTools.map((tool) => <button onClick={() => onTool(tool)} key={tool.id}><ToolIcon tool={tool} size={16} /><span>{tool.displayName}</span><small>{tool.category}</small></button>)}</section>}{visibleAssets.length > 0 && <section><h3>Assets</h3>{visibleAssets.map((asset) => <button onClick={() => onAsset(asset)} key={asset.id}><Box size={16} /><span>{asset.displayName || asset.name}</span><small>{asset.project}</small></button>)}</section>}</div></div></div>;
+  return <div className="command-overlay" onMouseDown={onClose}><div className="command-dialog" role="dialog" aria-modal="true" aria-label="Command palette" onMouseDown={(event) => event.stopPropagation()}><div className="command-search"><Search size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Go anywhere, run a workflow, open an asset" aria-label="Search commands, workflows, and assets" /><kbd>Esc</kbd></div><div className="command-results">{visiblePages.length > 0 && <section><h3>Navigate</h3>{visiblePages.map(([id, label]) => <button onClick={() => onPage(id)} key={id}><LayoutDashboard size={16} /><span>{label}</span><ChevronRight size={14} /></button>)}</section>}{visibleTools.length > 0 && <section><h3>Workflows</h3>{visibleTools.map((tool) => <button onClick={() => onTool(tool)} key={tool.id}><ToolIcon tool={tool} size={16} /><span>{tool.displayName}</span><small>{tool.category}</small></button>)}</section>}{visibleAssets.length > 0 && <section><h3>Assets</h3>{visibleAssets.map((asset) => <button onClick={() => onAsset(asset)} key={asset.id}><Box size={16} /><span>{asset.displayName || asset.name}</span><small>{asset.project}</small></button>)}</section>}</div></div></div>;
 }
 
 export default App;

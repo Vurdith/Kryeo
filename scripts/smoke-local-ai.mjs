@@ -130,7 +130,7 @@ assert.equal(status.endpoint, 'embedded');
 const suggestions = await service.analyze([component, { ...component, id: 'duplicate' }]);
 assert.equal(suggestions.length, 1, 'Exact duplicate visuals should only be inferred once.');
 assert.ok(suggestions[0].confidence >= 0.35 && suggestions[0].confidence <= 0.96);
-assert.ok(suggestions[0].name.length > 0);
+assert.equal(suggestions[0].name, '', 'The local classifier must not fabricate a name from its predicted type.');
 assert.equal(suggestions[0].visualHash, component.visualHash);
 
 const learned = await service.analyze([{ ...component, id: 'visually-similar', visualHash: 'b'.repeat(64) }], [{
@@ -153,9 +153,9 @@ assert.ok((learned[0].nearestLearnedSimilarity || 0) >= 0.98);
 const statusBars = await service.analyze([
   {
     ...component,
-    id: 'stagger',
-    name: 'StaggerBar',
-    familyName: 'StaggerBar',
+    id: 'status-bar',
+    name: 'StatusBar',
+    familyName: 'StatusBar',
     bounds: { x: 0, y: 0, width: 394, height: 34 },
     previewUrl: `data:image/png;base64,${statusBarPreview.toString('base64')}`,
     visualHash: 'c'.repeat(64),
@@ -173,8 +173,8 @@ const statusBars = await service.analyze([
   {
     ...component,
     id: 'misleading-bar',
-    name: 'ForestWallpaper',
-    familyName: 'ForestWallpaper',
+    name: 'ReferenceVisual',
+    familyName: 'ReferenceVisual',
     members: [],
     bounds: { x: 0, y: 0, width: 394, height: 34 },
     previewUrl: `data:image/png;base64,${statusBarPreview.toString('base64')}`,
@@ -182,33 +182,33 @@ const statusBars = await service.analyze([
   },
 ]);
 assert.equal(statusBars.length, 3);
-assert.equal(statusBars[0].assetType, 'Bar');
-assert.equal(statusBars[0].source, 'name');
+assert.notEqual(statusBars[0].source, 'name');
 assert.equal(statusBars[0].semanticType, 'Bar');
 assert.equal(statusBars[1].assetType, 'Unknown');
 assert.equal(statusBars[1].source, 'model');
-assert.equal(statusBars[2].assetType, 'Wallpaper');
-assert.equal(statusBars[2].source, 'name');
+assert.notEqual(statusBars[2].assetType, 'Wallpaper', 'A misleading source name must not select the local type.');
+assert.equal(statusBars[2].source, 'model');
 
 const slot = await service.analyze([{
   ...component,
-  id: 'hotbar-slot',
-  name: 'HotbarSlot1',
-  familyName: 'HotbarSlot1',
+  id: 'sample-cell',
+  name: 'SampleSlot1',
+  familyName: 'SampleSlot1',
   members: [],
   bounds: { x: 0, y: 0, width: 96, height: 105 },
   previewUrl: `data:image/png;base64,${slotPreview.toString('base64')}`,
   visualHash: '9'.repeat(64),
 }]);
-assert.equal(slot[0].assetType, 'Slot');
-assert.equal(slot[0].role, 'ImageButton');
+assert.equal(slot[0].source, 'model');
+assert.equal(slot[0].semanticType, 'Slot');
+assert.notEqual(slot[0].source, 'name', 'A source label may trigger cloud review but cannot choose the local type.');
 
 const realRedBackgroundPreview = await readFile(path.resolve('scripts', 'fixtures', 'visual', 'red-background-real.png'));
 const realRedBackground = await service.analyze([{
   ...component,
   id: 'real-red-background',
-  name: 'dwa121',
-  familyName: 'dwa121',
+  name: 'asset-0042',
+  familyName: 'asset-0042',
   affinityType: 'ShapeNode',
   members: [],
   childCount: 0,
@@ -217,7 +217,7 @@ const realRedBackground = await service.analyze([{
   visualHash: '6'.repeat(64),
 }]);
 assert.equal(realRedBackground[0].assetType, 'Unknown');
-assert.equal(realRedBackground[0].name, 'Unlabelled visual');
+assert.equal(realRedBackground[0].name, '');
 
 const border = await service.analyze([{
   ...component,
@@ -247,31 +247,31 @@ assert.equal(sparseCanvasBorder[0].assetType, 'Border');
 const wallpaper = await service.analyze([{
   ...component,
   id: 'wallpaper',
-  name: '10570641.jpg',
+  name: 'asset-0001.png',
   affinityType: 'ImageNode',
   bounds: { x: 0, y: 0, width: 1929, height: 1089 },
-  members: [{ path: [0, 2], name: '10570641.jpg', affinityType: 'ImageNode', bounds: { x: 0, y: 0, width: 1929, height: 1089 } }],
+  members: [{ path: [0, 2], name: 'asset-0001.png', affinityType: 'ImageNode', bounds: { x: 0, y: 0, width: 1929, height: 1089 } }],
   previewUrl: `data:image/png;base64,${filledPreview.toString('base64')}`,
   analysisPreviewUrls: [`data:image/png;base64,${closeIconPreview.toString('base64')}`],
   visualHash: '3'.repeat(64),
 }]);
 assert.equal(wallpaper[0].assetType, 'Wallpaper');
 
-const medievalLibraryPreview = await readFile(path.resolve('scripts', 'fixtures', 'visual', 'medieval-library-wallpaper-real.png'));
-const medievalLibrary = await service.analyze([{
+const referenceWallpaperPreview = filledPreview;
+const referenceWallpaper = await service.analyze([{
   ...component,
-  id: 'medieval-library-wallpaper',
-  name: '10570641.jpg',
-  familyName: '10570641.jpg',
+  id: 'reference-wallpaper',
+  name: 'asset-0001.png',
+  familyName: 'asset-0001.png',
   affinityType: 'ImageNode',
   members: [],
   childCount: 0,
   bounds: { x: 0, y: 0, width: 1929, height: 1089 },
-  previewUrl: `data:image/png;base64,${medievalLibraryPreview.toString('base64')}`,
+  previewUrl: `data:image/png;base64,${referenceWallpaperPreview.toString('base64')}`,
   visualHash: '1'.repeat(64),
 }]);
-assert.equal(medievalLibrary[0].assetType, 'Wallpaper');
-assert.equal(medievalLibrary[0].name, 'Wallpaper');
+assert.equal(referenceWallpaper[0].assetType, 'Wallpaper');
+assert.equal(referenceWallpaper[0].name, '');
 
 const realBorderFixtures = await Promise.all([
   readFile(path.resolve('scripts', 'fixtures', 'visual', 'border-wide-single.png')),
@@ -327,27 +327,27 @@ const closeButton = await service.analyze([{
 }]);
 assert.equal(closeButton[0].assetType, 'Unknown');
 
-const realCloseButtonPreview = await readFile(path.resolve('scripts', 'fixtures', 'visual', 'close-button-red-real.png'));
-const realCloseButton = await service.analyze([{
+const referenceCloseButtonPreview = closeButtonPreview;
+const referenceCloseButton = await service.analyze([{
   ...component,
-  id: 'real-close-button',
+  id: 'reference-close-button',
   name: 'wut',
   familyName: 'wut',
   affinityType: 'GroupNode',
   members: [],
   childCount: 2,
   bounds: { x: 0, y: 0, width: 176, height: 176 },
-  previewUrl: `data:image/png;base64,${realCloseButtonPreview.toString('base64')}`,
+  previewUrl: `data:image/png;base64,${referenceCloseButtonPreview.toString('base64')}`,
   visualHash: '0'.repeat(64),
 }]);
-assert.equal(realCloseButton[0].assetType, 'Unknown');
-assert.equal(realCloseButton[0].name, 'Unlabelled visual');
+assert.equal(referenceCloseButton[0].assetType, 'Unknown');
+assert.equal(referenceCloseButton[0].name, '');
 
 const closeIcon = await service.analyze([{
   ...component,
   id: 'close-icon',
-  name: 'lechickennugget',
-  familyName: 'lechickennugget',
+  name: 'marker',
+  familyName: 'marker',
   affinityType: 'ArtTextNode',
   members: [],
   childCount: 0,
@@ -356,7 +356,7 @@ const closeIcon = await service.analyze([{
   visualHash: '6'.repeat(64),
 }]);
 assert.equal(closeIcon[0].assetType, 'Texture');
-assert.equal(closeIcon[0].name, 'Lechickennugget Texture');
+assert.equal(closeIcon[0].name, 'Marker');
 
 console.log(JSON.stringify({
   status,
@@ -384,6 +384,6 @@ console.log(JSON.stringify({
     classifierType: closeButton[0].classifierType,
     classifierConfidence: closeButton[0].classifierConfidence,
   },
-  realCloseButton: { type: realCloseButton[0].assetType, name: realCloseButton[0].name },
+  referenceCloseButton: { type: referenceCloseButton[0].assetType, name: referenceCloseButton[0].name },
   closeIcon: { type: closeIcon[0].assetType, name: closeIcon[0].name },
 }, null, 2));

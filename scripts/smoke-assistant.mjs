@@ -78,13 +78,13 @@ assert.equal(installed.installed, true);
 assert.equal(installed.ready, true);
 
 const workspace = {
-  jobs: [], recipes: [], presets: [], links: [], preferences: [],
-  componentDecisions: [], componentManifests: [], assistantSessions: [{ id: 'session', project: 'Devil Hunter', title: 'Test', pinned: false, archived: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], assistantMessages: [],
-  assistantMemories: [{ id: 'rule', project: 'Devil Hunter', scope: 'project', kind: 'hierarchy', text: 'Decorative borders stay inside their parent component.', createdAt: new Date().toISOString() }],
+  jobs: [], presets: [], links: [], preferences: [],
+  componentDecisions: [], componentManifests: [], assistantSessions: [{ id: 'session', project: 'Example Project', title: 'Test', pinned: false, archived: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], assistantMessages: [],
+  assistantMemories: [{ id: 'rule', project: 'Example Project', scope: 'project', kind: 'hierarchy', text: 'Decorative borders stay inside their parent component.', createdAt: new Date().toISOString() }],
   updatedAt: new Date().toISOString(),
 };
 const result = await service.chat({
-  project: 'Devil Hunter',
+  project: 'Example Project',
   sessionId: 'session',
   message: 'How should you handle decorative borders when organizing this document?',
   document: { open: true, title: 'HUD', path: '', selectionCount: 0, selectionNames: [], sessionUuid: 'test' },
@@ -94,7 +94,7 @@ assert.match(result.text, /border|inside|parent/i);
 assert.doesNotMatch(result.text, /I (will|have|added|changed)|I'm going to/i);
 
 const greeting = await service.chat({
-  project: 'Devil Hunter',
+  project: 'Example Project',
   sessionId: 'session',
   message: 'Hi, what can you help me with?',
   useVision: true,
@@ -168,16 +168,16 @@ assert.equal(toolCall.actions[0]?.type, 'open-component-scan');
 assert.match(toolCall.text, /Component Scan/i);
 
 const learned = await service.chat({
-  project: 'Devil Hunter',
+  project: 'Example Project',
   sessionId: 'session',
-  message: 'Remember that every SanityBar is a progress bar.',
+  message: 'Remember that every ProgressMeter is a progress bar.',
   document: { open: true, title: 'HUD', path: '', selectionCount: 0, selectionNames: [], sessionUuid: 'test' },
 }, workspace);
 assert.equal(learned.memories.length, 1);
 assert.equal(learned.memories[0].kind, 'classification');
 
 const roleRule = await service.chat({
-  project: 'Devil Hunter',
+  project: 'Example Project',
   sessionId: 'session',
   message: 'ProgressBars are ImageLabels not frames',
   document: { open: true, title: 'HUD', path: '', selectionCount: 0, selectionNames: [], sessionUuid: 'test' },
@@ -186,12 +186,12 @@ assert.match(roleRule.text, /Confirmed project rule:/);
 assert.equal(roleRule.memories.length, 1);
 
 const reviewed = applyAssistantMemoryRules([
-  { name: 'SanityBar', familyName: 'Sanity Bar', assetType: 'Fill', role: 'ImageLabel', parentHierarchyKey: '' },
-  { name: 'OuterBorders', familyName: 'Outer Borders', assetType: 'Frame', role: 'Frame', parentHierarchyKey: 'root' },
+  { name: 'ProgressMeter', familyName: 'Progress Meter', assetType: 'Fill', role: 'ImageLabel', parentHierarchyKey: '' },
+  { name: 'PerimeterAssembly', familyName: 'Perimeter Assembly', assetType: 'Frame', role: 'Frame', parentHierarchyKey: 'root' },
 ], [
   learned.memories[0],
   roleRule.memories[0],
-  { id: 'inside', project: 'Devil Hunter', documentTitle: 'HUD', kind: 'hierarchy', text: 'Decorative borders stay inside their parent component.', createdAt: new Date().toISOString() },
+  { id: 'inside', project: 'Example Project', documentTitle: 'HUD', kind: 'hierarchy', text: 'Decorative borders stay inside their parent component.', createdAt: new Date().toISOString() },
 ], 'HUD');
 assert.equal(reviewed[0].assetType, 'Bar');
 assert.equal(reviewed[0].role, 'ImageLabel');

@@ -51,14 +51,37 @@ function partitionChildrenResult(children) {
   };
 }
 
-async function simulatedExport(totalPartitions, failFirstBatch = false, weights = []) {
+async function simulatedExport(totalPartitions, failFirstBatch = false, weights = [], failViewportSet = false) {
   const service = new AffinityService();
   const ranges = [];
+  let viewportRead = false;
+  let viewportPrepared = false;
+  let viewportRestored = false;
   let shouldFail = failFirstBatch;
   const harness = service;
   harness.connect = async () => undefined;
   harness.callTool = async (_name, args) => {
     const script = String(args.script || '');
+    if (script.includes('KRYEO_SCAN_VIEWPORT_RESTORE:')) {
+      viewportRestored = true;
+      assert.match(script, /DocumentViewApi\.setZoom\(view, 4347\.826086956522\)/, 'the scan should restore the original Affinity zoom');
+      return { content: [] };
+    }
+    if (script.includes('KRYEO_SCAN_VIEWPORT_READ:')) {
+      viewportRead = true;
+      assert.match(script, /DocumentViewApi\.getZoom\(view\)/, 'the scan should capture the original Affinity zoom before mutation');
+      return { content: [{ type: 'text', text: 'KRYEO_SCAN_VIEWPORT_READ:' + JSON.stringify({ zoom: 0.023 }) }] };
+    }
+    if (script.includes('KRYEO_SCAN_VIEWPORT:')) {
+      viewportPrepared = true;
+      assert.match(script, /require\('affinity:timers'\)/, 'the scan should wait for Affinity to settle at the zoom target');
+      assert.match(script, /DocumentViewApi\.setZoom\(view, 0\.001\)/, 'the scan should zoom Affinity in to its maximum practical level');
+      if (failViewportSet) {
+        failViewportSet = false;
+        throw new Error('MCP error -32001: Viewport mutation timed out after changing the zoom');
+      }
+      return { content: [{ type: 'text', text: 'KRYEO_SCAN_VIEWPORT:' + JSON.stringify({ zoom: 0.023 }) }] };
+    }
     const start = Number(/const exportPartitionStart = (\d+);/.exec(script)?.[1] || 0);
     const end = Number(/const exportPartitionEnd = (\d+);/.exec(script)?.[1] || 0);
     if (end === 0) {
@@ -85,7 +108,7 @@ async function simulatedExport(totalPartitions, failFirstBatch = false, weights 
     });
   };
   const result = await service.exportComponentCandidates('C:\\scan', 'document');
-  return { result, ranges };
+  return { result, ranges, viewportRead, viewportPrepared, viewportRestored };
 }
 
 const batched = await simulatedExport(10);
@@ -94,6 +117,9 @@ assert.equal(batched.result.components.length, 10);
 assert.equal(batched.result.totalCandidates, 10);
 assert.equal(batched.result.exportDiagnostics.requestCount, 3);
 assert.equal(batched.result.exportDiagnostics.retryCount, 0);
+assert.equal(batched.viewportRead, true);
+assert.equal(batched.viewportPrepared, true);
+assert.equal(batched.viewportRestored, true);
 assert.deepEqual(batched.result.components.map((item) => item.index), Array.from({ length: 10 }, (_, index) => index));
 
 const recovered = await simulatedExport(6, true);
@@ -107,6 +133,11 @@ assert.deepEqual(recovered.result.components.map((item) => item.index), Array.fr
 const weighted = await simulatedExport(6, false, [24, 1, 1, 1, 1, 1]);
 assert.deepEqual(weighted.ranges, [[0, 1], [1, 6]], 'a dense partition must run alone while light partitions remain batched');
 assert.equal(weighted.result.components.length, 6);
+
+const partialViewportFailure = await simulatedExport(2, false, [], true);
+assert.equal(partialViewportFailure.viewportRead, true);
+assert.equal(partialViewportFailure.viewportPrepared, true);
+assert.equal(partialViewportFailure.viewportRestored, true, 'a failed viewport mutation must still restore the captured zoom');
 
 const adaptiveWeighted = await simulatedExport(10, false, Array.from({ length: 10 }, () => 8));
 assert.deepEqual(
@@ -122,6 +153,15 @@ let shouldSplitOnePartition = true;
 splitService.connect = async () => undefined;
 splitService.callTool = async (_name, args) => {
   const script = String(args.script || '');
+  if (script.includes('KRYEO_SCAN_VIEWPORT_RESTORE:')) {
+    assert.match(script, /DocumentViewApi\.setZoom\(view, 4347\.826086956522\)/, 'the split scan should restore the original Affinity zoom');
+    return { content: [] };
+  }
+  if (script.includes('KRYEO_SCAN_VIEWPORT:')) {
+    assert.match(script, /require\('affinity:timers'\)/, 'the split scan should wait for Affinity to settle at the zoom target');
+    assert.match(script, /DocumentViewApi\.setZoom\(view, 0\.001\)/, 'the split scan should zoom Affinity in to its maximum practical level');
+    return { content: [{ type: 'text', text: 'KRYEO_SCAN_VIEWPORT:' + JSON.stringify({ zoom: 0.023 }) }] };
+  }
   if (script.includes('KRYEO_COMPONENT_PARTITION_CHILDREN:')) {
     assert.match(script, /function estimatedWork\(node\)/, 'the recovery script must define its child work estimator');
     return partitionChildrenResult([{ estimatedWork: 1 }, { estimatedWork: 1 }]);

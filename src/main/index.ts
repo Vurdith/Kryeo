@@ -15,12 +15,21 @@ import { buildComponentScan, removeScanDirectory, resetScanDirectory } from './c
 import { LocalAiService, roleForAssetType } from './local-ai-service';
 import { HostedAiService } from './hosted-ai-service';
 import { applyComponentIntelligence } from './component-intelligence-service';
-import { applyComponentSceneContext } from './component-context-service';
+import { applyComponentSceneContext, componentCategory, componentSubcategory } from './component-context-service';
+import { applyScanIntent, normalizeScanIntent, scanIntentContext, structureFingerprint } from './scan-intent-service';
+import { buildProductionIdentity } from './asset-intelligence-service';
+import { DeveloperLogService } from './developer-log-service';
 import {
   applyApprovedFamilies,
+  applyAssetBoundaries,
   applyHostedFamilyAnalyses,
   buildVisualFamilies,
+  countLocallyHandledFamilies,
+  familyBatchConsistencyIssues,
+  familyDecisionConsistencyIssues,
   planHostedFamilyReview,
+  requiresIndependentFamilyReview,
+  resolveIndependentFamilyAnalysis,
   reviewCategory,
   visualStructureAnchor,
 } from './component-family-service';
@@ -37,6 +46,10 @@ import type {
   AssistantMessage,
   AssetPreference,
   ComponentCandidate,
+  ComponentScanDiagnostics,
+  CreateComponentAssetsRequest,
+  ComponentScanRequest,
+  ComponentScanMode,
   ComponentDecision,
   ComponentVisualFamily,
   ConfiguredToolRequest,
@@ -46,9 +59,9 @@ import type {
   HostedFamilyEvidenceRequest,
   HostedReviewTier,
   PlaceAssetRequest,
-  ProjectRecipe,
   SaveAssetRequest,
   SaveComponentReviewRequest,
+  ScanIntentProfile,
   SaveProjectNoteRequest,
   ScriptRunResult,
   WorkflowPreset,
@@ -60,43 +73,28 @@ function prepareComponentsForReview(components: ComponentCandidate[]): Component
   // user actually sees rather than the pre-context hosted packet.
   const structurallyAssessed = applyComponentIntelligence(components, false);
   applyComponentSceneContext(structurallyAssessed);
-  return applyComponentIntelligence(structurallyAssessed, false);
-}
-
-function readableLayerIdentity(value: string): string {
-  return value
-    .replace(/\.(?:png|jpe?g|webp|gif|tiff?)$/i, '')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function protectedLayerIdentity(value: string): boolean {
-  const source = readableLayerIdentity(value);
-  if (!source || /^\d+$/.test(source) || /^(?:layer|group|object|shape|image|raster)\s*\d*$/i.test(source)) return false;
-  const structuralWords = /^(?:middle|outer|inner|center|centre|base|main|background|foreground|border|borders|fill|frame|layer)(?:\s+(?:middle|outer|inner|center|centre|base|main|background|foreground|border|borders|fill|frame|layer))*$/i;
-  return source.split(/\s+/).length > 1 && !structuralWords.test(source);
-}
-
-function sourceExplicitlyNamesType(sourceName: string, type: string): boolean {
-  const source = readableLayerIdentity(sourceName);
-  const readableType = readableLayerIdentity(type).replace(/\s+/g, '\\s*');
-  return new RegExp(`\\b${readableType}s?\\b`, 'i').test(source);
+  return applyAssetBoundaries(applyComponentIntelligence(structurallyAssessed, false));
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const affinity = new AffinityService();
-const library = new LibraryService();
+const library = new LibraryService(() => app.getPath('userData'));
+const affinity = new AffinityService(() => library.storagePaths());
 const connectors = new ConnectorService();
 const workspace = new WorkspaceService(() => app.getPath('userData'));
 const localAi = new LocalAiService();
 const assistant = new AssistantService(() => app.getPath('userData'));
 const hostedAi = new HostedAiService(() => app.getPath('userData'));
+const developerLogger = new DeveloperLogService(() => app.getPath('logs'));
 const execFileAsync = promisify(execFile);
 const LOCAL_CONTEXT_MAX_VISUALS = Math.max(0, Number(process.env.KRYEO_LOCAL_CONTEXT_MAX_VISUALS || 160));
-let autoExportQueue: Promise<void> = Promise.resolve();
 const activeComponentScans = new Map<number, AbortController>();
+
+process.on('unhandledRejection', (reason) => {
+  developerLogger.record('error', 'process', 'unhandled-rejection', 'Unhandled promise rejection.', { reason });
+});
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  developerLogger.record('error', 'process', 'uncaught-exception', 'Uncaught exception observed.', { error, origin });
+});
 
 interface HostedScanCandidate {
   family: ComponentVisualFamily;
@@ -108,6 +106,7 @@ interface HostedScanCandidate {
 interface HostedScanSelection {
   candidates: HostedScanCandidate[];
   selected: HostedScanCandidate[];
+  /** Families resolved without a cloud request in the current availability path. */
   localCount: number;
   budgetLimitedCount: number;
   estimatedCostUsd: number;
@@ -140,7 +139,7 @@ function selectHostedFamilies(
       const plan = planHostedFamilyReview(family);
       return { family, ...plan };
     });
-  // The hosted model is the final classifier for every unresolved family.
+  // Cloud Qwen is the final classifier for every unresolved family.
   // Clear local plans still use Lite so the local pass remains a cheap source
   // of grouping/context signals rather than silently becoming the final AI.
   const candidates: HostedScanCandidate[] = plans.map((plan) => ({
@@ -148,7 +147,7 @@ function selectHostedFamilies(
     tier: plan.tier === 'local' ? 'lite' : plan.tier,
     riskScore: plan.riskScore,
     reasons: plan.tier === 'local'
-      ? [...plan.reasons, 'Hosted review is enabled for every unresolved family; Lite is used for this locally clear candidate.']
+      ? [...plan.reasons, 'Cloud review is enabled for every unresolved family; Lite is used for this locally clear candidate.']
       : plan.reasons,
   }));
   const maxEscalations = Math.max(0, Number(status.maxEscalationFamiliesPerScan ?? 1));
@@ -189,10 +188,24 @@ function selectHostedFamilies(
   return {
     candidates,
     selected,
-    localCount: families.filter((family) => family.approvedDecision).length,
+    localCount: countLocallyHandledFamilies(families, true),
     budgetLimitedCount: 0,
     estimatedCostUsd,
   };
+}
+
+function safeHostedFailureMessage(value: unknown): string {
+  const raw = value instanceof Error ? value.message : String(value || 'Cloud analysis failed.');
+  if (/429|rate.?limit|insufficient_quota|provider.*busy/i.test(raw)) {
+    return 'The cloud visual provider is temporarily busy; affected families remain unresolved and can be rescanned.';
+  }
+  if (/timed? out|did not answer within|safety limit|abort/i.test(raw)) {
+    return 'A cloud visual batch did not finish in time; affected families remain unresolved and can be rescanned.';
+  }
+  if (/schema|json|complete decision|incomplete/i.test(raw)) {
+    return 'The cloud response was incomplete, so Kryeo left the affected families unresolved instead of applying a partial decision.';
+  }
+  return 'Cloud analysis could not finish for the affected families; Kryeo left them unresolved rather than guessing.';
 }
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -254,70 +267,6 @@ async function buildAssistantVisualImages(rawPath: string, directory: string, pr
     }
   }
   return images;
-}
-
-function queueAutoExport(project: string, trigger: 'save' | 'manual'): Promise<ScriptRunResult> {
-  const startedAt = new Date().toISOString();
-  let resolveResult: (result: ScriptRunResult) => void = () => undefined;
-  const resultPromise = new Promise<ScriptRunResult>((resolve) => { resolveResult = resolve; });
-  autoExportQueue = autoExportQueue.then(async () => {
-    const result = await workspace.runJob(
-      'auto-export',
-      `Auto-export ${project}`,
-      { project, trigger },
-      async (update, cancelled) => {
-        const recipe = await workspace.recipe(project);
-        if (!recipe) throw new Error(`Save an Auto-Export recipe for ${project} first.`);
-        if (trigger === 'save' && !recipe.autoExport) {
-          throw new Error(`Auto-Export is disabled for ${project}.`);
-        }
-        await update(14, 'Finding the Affinity export workflow');
-        const exportTool = (await affinity.listTools()).find((tool) => /^Asset Library - Export\s+v/i.test(tool.title));
-        if (!exportTool) throw new Error('Affinity did not report an Asset Library Export workflow.');
-        if (cancelled()) throw new Error('Auto-Export cancelled before Affinity started.');
-        await update(34, 'Rendering the latest Raster assets');
-        const exportResult = await affinity.runConfiguredTool({
-          kind: 'export',
-          title: exportTool.title,
-          values: {
-            project,
-            preset: recipe.preset || 'PNG (Pixel)',
-            latest: true,
-            stable: true,
-          },
-        });
-        if (!exportResult.ok) return exportResult;
-        if (cancelled()) throw new Error('Auto-Export cancelled before publishing files.');
-        await update(76, 'Publishing stable production files');
-        const published = await library.publishProjectExports(project, recipe.outputRoot);
-        if (recipe.targets.includes('roblox')) {
-          await update(90, 'Refreshing the Roblox delivery manifest');
-          const delivery = await library.deliverProject(project, 'roblox');
-          if (!delivery.ok) throw new Error(delivery.message);
-        }
-        const skipped = published.skipped.length
-          ? ` ${published.skipped.length} asset(s) had no Raster PNG and were skipped.`
-          : '';
-        return {
-          ok: true,
-          title: `Auto-export ${project}`,
-          output: `Published ${published.files.length} asset(s) to ${published.destination}.${skipped}`,
-          startedAt,
-          completedAt: new Date().toISOString(),
-        };
-      },
-    );
-    resolveResult(result);
-  }).catch((error) => {
-    resolveResult({
-      ok: false,
-      title: `Auto-export ${project}`,
-      output: error instanceof Error ? error.message : String(error),
-      startedAt,
-      completedAt: new Date().toISOString(),
-    });
-  });
-  return resultPromise;
 }
 
 async function sendAffinityKeys(keys: string, settleMilliseconds = 350): Promise<void> {
@@ -435,6 +384,25 @@ function createWindow(): void {
 
   window.once('ready-to-show', () => window.show());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    developerLogger.record('debug', 'renderer', 'console-message', 'Renderer console message.', {
+      level,
+      message,
+      line,
+      sourceId,
+    });
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    developerLogger.record('error', 'renderer', 'process-gone', 'Renderer process exited unexpectedly.', details);
+  });
+  window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    developerLogger.record('error', 'renderer', 'load-failed', 'Renderer navigation failed.', {
+      errorCode,
+      errorDescription,
+      validatedURL,
+      isMainFrame,
+    });
+  });
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -442,6 +410,57 @@ function createWindow(): void {
     void window.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 }
+
+function summarizeDeveloperHandlerResult(channel: string, result: unknown): unknown {
+  if (!['kryeo:set-developer-mode', 'kryeo:get-developer-log', 'kryeo:clear-developer-log'].includes(channel)) return result;
+  if (!result || typeof result !== 'object') return result;
+  const snapshot = result as { enabled?: unknown; entries?: unknown[]; filePath?: unknown };
+  return {
+    enabled: snapshot.enabled === true,
+    entryCount: Array.isArray(snapshot.entries) ? snapshot.entries.length : 0,
+    filePath: typeof snapshot.filePath === 'string' ? snapshot.filePath : '',
+  };
+}
+
+const nativeIpcHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = ((channel: string, listener: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => any) => nativeIpcHandle(
+  channel,
+  async (event, ...args) => {
+    const startedAt = Date.now();
+    const captureRequest = channel !== 'kryeo:clear-developer-log';
+    const captureResult = channel !== 'kryeo:get-developer-log' && channel !== 'kryeo:clear-developer-log';
+    if (captureRequest) {
+      developerLogger.record('debug', 'ipc', 'request', `IPC request: ${channel}`, { channel, args });
+    }
+    try {
+      const result = await listener(event, ...args);
+      if (captureResult) {
+        developerLogger.record('debug', 'ipc', 'response', `IPC response: ${channel}`, {
+          channel,
+          durationMs: Date.now() - startedAt,
+          result: summarizeDeveloperHandlerResult(channel, result),
+        });
+      }
+      return result;
+    } catch (error) {
+      if (captureResult) {
+        developerLogger.record('error', 'ipc', 'failure', `IPC failure: ${channel}`, {
+          channel,
+          durationMs: Date.now() - startedAt,
+          error,
+        });
+      }
+      throw error;
+    }
+  },
+)) as typeof ipcMain.handle;
+
+ipcMain.handle('kryeo:set-developer-mode', async (_event, enabled: unknown) => {
+  if (typeof enabled !== 'boolean') throw new Error('Invalid developer mode setting.');
+  return developerLogger.setEnabled(enabled);
+});
+ipcMain.handle('kryeo:get-developer-log', () => developerLogger.snapshot());
+ipcMain.handle('kryeo:clear-developer-log', () => developerLogger.clear());
 
 ipcMain.handle('kryeo:get-status', () => affinity.getStatus());
 ipcMain.handle('kryeo:reconnect', () => affinity.reconnect());
@@ -504,7 +523,14 @@ ipcMain.handle('kryeo:clear-component-decisions', () => workspace.clearComponent
 ipcMain.handle('kryeo:save-component-review', (_event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid component review.');
   const request = input as SaveComponentReviewRequest;
-  if (typeof request.documentTitle !== 'string' || request.documentTitle.length > 180 || typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.components) || !Array.isArray(request.includedIds)) {
+  if (
+    typeof request.documentTitle !== 'string'
+    || request.documentTitle.length > 180
+    || typeof request.documentSessionUuid !== 'string'
+    || !Array.isArray(request.components)
+    || !Array.isArray(request.includedIds)
+    || (request.decisionStatus !== undefined && !['generated', 'accepted', 'corrected'].includes(request.decisionStatus))
+  ) {
     throw new Error('Invalid component review.');
   }
   for (const component of request.components) {
@@ -513,6 +539,107 @@ ipcMain.handle('kryeo:save-component-review', (_event, input: unknown) => {
     }
   }
   return workspace.saveComponentReview(request);
+});
+ipcMain.handle('kryeo:save-scan-intent-profile', (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid scan intent profile.');
+  const profile = input as Partial<ScanIntentProfile>;
+  if (
+    typeof profile.project !== 'string'
+    || typeof profile.documentTitle !== 'string'
+    || typeof profile.structureFingerprint !== 'string'
+    || !['smart', 'group-first', 'layer-inclusive'].includes(String(profile.mode))
+    || !Array.isArray(profile.answers)
+  ) throw new Error('Invalid scan intent profile.');
+  return workspace.saveScanIntentProfile({
+    id: typeof profile.id === 'string' ? profile.id : undefined,
+    project: profile.project,
+    documentTitle: profile.documentTitle,
+    structureFingerprint: profile.structureFingerprint,
+    mode: profile.mode as ComponentScanMode,
+    answers: profile.answers,
+  });
+});
+ipcMain.handle('kryeo:create-component-assets', (_event, input: unknown) => {
+  if (!input || typeof input !== 'object') throw new Error('Invalid component asset request.');
+  const request = input as CreateComponentAssetsRequest;
+  if (!request.documentSessionUuid || !request.documentTitle || !request.project || !Array.isArray(request.components) || !Array.isArray(request.includedIds) || !request.structureFingerprint) {
+    throw new Error('Invalid component asset request.');
+  }
+  const project = request.project;
+  const documentTitle = request.documentTitle;
+  const documentSessionUuid = request.documentSessionUuid;
+  const structureFingerprint = request.structureFingerprint;
+  const requestedAssets = request.components
+    .filter((component) => request.includedIds.includes(component.id) && component.members.length)
+    .map((component) => {
+      const identity = buildProductionIdentity(component);
+      return {
+        ...component,
+        exportName: identity.displayName,
+        codeName: identity.codeName,
+        role: identity.robloxClass,
+        robloxClassReason: identity.robloxClassReason,
+        namingIssues: identity.issues,
+        automationIssues: identity.issues,
+        automationState: identity.issues.length ? 'exception' as const : 'ready' as const,
+      };
+    });
+  const selected = requestedAssets.filter((component) => component.automationState !== 'exception' && !(component.automationIssues?.length));
+  const exceptionCount = requestedAssets.length - selected.length;
+  if (!selected.length) throw new Error(exceptionCount
+    ? `Kryeo isolated ${exceptionCount} unresolved asset${exceptionCount === 1 ? '' : 's'}. Resolve the exceptions before building.`
+    : 'Select at least one export target before creating assets.');
+  return workspace.runJob('save', `Create ${selected.length} scanned asset${selected.length === 1 ? '' : 's'}`, { project, documentTitle }, async (update, cancelled) => {
+    await update(12, 'Planning editable component files');
+    const planned = await library.componentAssetDestinations(project, documentTitle, selected.map((component) => ({
+      id: component.id,
+      name: component.exportName || component.familyName,
+      codeName: component.codeName || (component.exportName || component.familyName).replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase(),
+      category: componentCategory(component.assetType),
+      subcategory: componentSubcategory(component, request.components),
+      sourcePaths: component.members.map((member) => member.path),
+    })));
+    let committed = false;
+    let commitAttempted = false;
+    try {
+      if (cancelled()) throw new Error('Asset creation cancelled before Affinity started.');
+      await update(35, 'Creating staged Affinity component files');
+      const exported = await affinity.exportConfirmedComponentAssets(documentSessionUuid, planned.map((asset) => ({
+        id: asset.id, name: asset.name, sourcePath: asset.stagedSourcePath, rasterPath: asset.stagedRasterPath,
+        sourcePaths: selected.find((component) => component.id === asset.id)?.members.map((member) => member.path) || [],
+      })));
+      if (cancelled()) throw new Error('Asset creation cancelled safely before the staged files were committed.');
+      const exportedIds = new Set(exported.map((asset) => asset.id));
+      if (exportedIds.size !== planned.length || planned.some((asset) => !exportedIds.has(asset.id))) {
+        throw new Error(`Affinity returned ${exportedIds.size} of ${planned.length} staged assets. Kryeo left the existing library unchanged.`);
+      }
+      await update(82, 'Validating and committing the complete asset batch');
+      commitAttempted = true;
+      const manifest = await library.recordComponentAssets({
+        project, documentTitle, documentSessionUuid,
+        structureFingerprint,
+        assets: planned.filter((asset) => exportedIds.has(asset.id)).map((asset) => {
+          const component = selected.find((candidate) => candidate.id === asset.id)!;
+          return { ...asset, role: component.role, bounds: component.bounds, sourcePaths: component.members.map((member) => member.path) };
+        }),
+      });
+      committed = true;
+      const acceptedComponents = selected.filter((component) => exportedIds.has(component.id));
+      await workspace.saveComponentReview({
+        project,
+        documentTitle,
+        documentSessionUuid,
+        components: acceptedComponents,
+        includedIds: acceptedComponents.map((component) => component.id),
+        scanIntent: request.scanIntent,
+        decisionStatus: 'accepted',
+      });
+      const now = new Date().toISOString();
+      return { ok: true, title: 'Create scanned assets', output: `Created ${manifest.assetCount} editable asset${manifest.assetCount === 1 ? '' : 's'}${exceptionCount ? `; isolated ${exceptionCount} unresolved exception${exceptionCount === 1 ? '' : 's'}` : ''} and regenerated the complete Roblox project manifest at ${manifest.manifestPath}.`, startedAt: now, completedAt: now };
+    } finally {
+      if (!committed && !commitAttempted) await library.discardComponentAssetTransaction(planned);
+    }
+  });
 });
 ipcMain.handle('kryeo:save-component-decisions', (_event, input: unknown) => {
   if (!Array.isArray(input)) throw new Error('Invalid Component Scan review.');
@@ -529,15 +656,20 @@ ipcMain.handle('kryeo:save-component-decisions', (_event, input: unknown) => {
       || !allowedRoles.includes(candidate.role)
       || typeof candidate.familyName !== 'string'
       || candidate.familyName.length > 120
+      || (candidate.layerLabel !== undefined && (typeof candidate.layerLabel !== 'string' || candidate.layerLabel.length > 120))
+      || (candidate.exportName !== undefined && (typeof candidate.exportName !== 'string' || candidate.exportName.length > 120))
       || (candidate.assetType !== undefined && !allowedTypes.includes(candidate.assetType))
       || (candidate.suggestedType !== undefined && !allowedTypes.includes(candidate.suggestedType))
       || (candidate.suggestedRole !== undefined && !allowedRoles.includes(candidate.suggestedRole))
       || (candidate.diveMode !== undefined && !allowedDiveModes.includes(candidate.diveMode))
       || (candidate.embedding !== undefined && (typeof candidate.embedding !== 'string' || candidate.embedding.length > 1200))
     ) throw new Error('Invalid component decision.');
+    const canonicalName = (candidate.exportName || candidate.familyName || candidate.layerLabel || '').trim().slice(0, 120);
     return {
       ...candidate,
-      familyName: candidate.familyName.trim().slice(0, 120),
+      familyName: canonicalName,
+      layerLabel: canonicalName,
+      exportName: canonicalName,
       semanticHint: candidate.semanticHint?.slice(0, 160),
       suggestedName: candidate.suggestedName?.slice(0, 120),
       correctionCount: Number.isFinite(candidate.correctionCount) ? Math.max(0, Math.floor(candidate.correctionCount || 0)) : 0,
@@ -624,12 +756,6 @@ ipcMain.handle('kryeo:save-asset', async (_event, input: unknown) => {
     await update(28, 'Building Master, Base, and Raster');
     const result = await affinity.saveAsset(request);
     if (!result.ok) return result;
-    const recipe = await workspace.recipe(request.project);
-    if (recipe?.autoExport && !cancelled()) {
-      await update(72, 'Queuing Auto-Export');
-      const exportResult = await queueAutoExport(request.project, 'save');
-      result.output = `${result.output}\n${exportResult.ok ? exportResult.output : `Auto-Export needs attention: ${exportResult.output}`}`;
-    }
     await update(94, 'Updating the library index');
     return result;
   });
@@ -639,7 +765,6 @@ ipcMain.handle('kryeo:run-configured-tool', async (_event, input: unknown) => {
   const request = input as ConfiguredToolRequest;
   const titlePatterns = {
     export: /^Asset Library - Export\s+v/i,
-    setup: /^Asset Library - Setup\s+v/i,
     update: /^Asset Library - Update\s+v/i,
     shade: /^Pixel Helper - Hand Shade\s+v/i,
   };
@@ -651,9 +776,6 @@ ipcMain.handle('kryeo:run-configured-tool', async (_event, input: unknown) => {
       throw new Error('Invalid workflow value.');
     }
   }
-  if (request.kind === 'setup') {
-    await library.prepareSetupPaths(String(request.values.home || ''), String(request.values.assets || ''), String(request.values.exports || ''));
-  }
   return workspace.runJob('configured', request.title, request, async (update, cancelled) => {
     await update(22, 'Applying workflow settings');
     if (cancelled()) throw new Error('Workflow cancelled before Affinity started.');
@@ -664,45 +786,9 @@ ipcMain.handle('kryeo:cancel-job', (_event, id: unknown) => {
   if (typeof id !== 'string' || id.length > 180) return false;
   return workspace.cancelJob(id);
 });
-ipcMain.handle('kryeo:save-recipe', async (_event, input: unknown) => {
-  const recipe = input as ProjectRecipe;
-  if (!recipe || typeof recipe.project !== 'string' || !recipe.project.trim() || typeof recipe.autoExport !== 'boolean' || !['master', 'base', 'raster'].includes(String(recipe.source)) || !Array.isArray(recipe.targets)) {
-    throw new Error('Invalid project recipe.');
-  }
-  if (recipe.targets.some((target) => !['folder', 'roblox'].includes(String(target)))) throw new Error('Invalid recipe target.');
-  const outputRoot = String(recipe.outputRoot || '').trim().slice(0, 500);
-  await library.exportDestination(outputRoot);
-  const targets: ProjectRecipe['targets'] = ['folder'];
-  if (recipe.targets.includes('roblox')) targets.push('roblox');
-  return workspace.saveRecipe({
-    project: recipe.project.trim(),
-    autoExport: recipe.autoExport,
-    outputRoot,
-    preset: String(recipe.preset || 'PNG (Pixel)').slice(0, 180),
-    source: 'raster',
-    targets,
-  });
-});
-ipcMain.handle('kryeo:choose-export-folder', async () => {
-  const parent = BrowserWindow.getFocusedWindow();
-  const options: OpenDialogOptions = { title: 'Choose Auto-Export destination', properties: ['openDirectory', 'createDirectory'] };
-  const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
-  return result.canceled ? '' : result.filePaths[0] || '';
-});
-ipcMain.handle('kryeo:run-auto-export', (_event, project: unknown) => {
-  if (typeof project !== 'string' || !project.trim() || project.length > 180) throw new Error('Invalid Auto-Export project.');
-  return queueAutoExport(project.trim(), 'manual');
-});
-ipcMain.handle('kryeo:open-export-folder', async (_event, project: unknown) => {
-  if (typeof project !== 'string' || !project.trim() || project.length > 180) return false;
-  const recipe = await workspace.recipe(project.trim());
-  if (!recipe) return false;
-  const destination = await library.exportDestination(recipe.outputRoot);
-  return !(await shell.openPath(destination));
-});
 ipcMain.handle('kryeo:save-preset', (_event, input: unknown) => {
   const preset = input as WorkflowPreset;
-  if (!preset || !['export', 'setup', 'update', 'shade'].includes(String(preset.kind)) || typeof preset.name !== 'string' || !preset.name.trim() || !preset.values || typeof preset.values !== 'object') {
+  if (!preset || !['export', 'update', 'shade'].includes(String(preset.kind)) || typeof preset.name !== 'string' || !preset.name.trim() || !preset.values || typeof preset.values !== 'object') {
     throw new Error('Invalid workflow preset.');
   }
   return workspace.savePreset({ id: typeof preset.id === 'string' ? preset.id : undefined, kind: preset.kind, name: preset.name.trim().slice(0, 100), values: preset.values });
@@ -730,7 +816,7 @@ ipcMain.handle('kryeo:cleanup-staging', () => workspace.runJob('cleanup', 'Clean
   await update(30, 'Inspecting old staging files');
   const result = await library.cleanupStaging();
   const now = new Date().toISOString();
-  return { ok: true, title: 'Clean staging files', output: `Removed ${result.removed} old staging file(s) from ${result.path}.`, startedAt: now, completedAt: now };
+  return { ok: true, title: 'Clean staging files', output: `Removed ${result.removed} old temporary item(s).`, startedAt: now, completedAt: now };
 }));
 ipcMain.handle('kryeo:reveal-path', async (_event, candidate: unknown) => {
   if (typeof candidate !== 'string' || !await library.isAllowedPath(candidate)) return false;
@@ -808,7 +894,9 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
   activeComponentScans.get(event.sender.id)?.abort();
   const scanController = new AbortController();
   activeComponentScans.set(event.sender.id, scanController);
-  const scope = input === 'selection' ? 'selection' : 'document';
+  const requested = typeof input === 'object' && input !== null ? input as ComponentScanRequest : undefined;
+  const scope = input === 'selection' || requested?.scope === 'selection' ? 'selection' : 'document';
+  const developerMode = requested?.developerMode === true;
   const directory = path.join(app.getPath('desktop'), 'Kryeo', 'ComponentScanStaging', randomUUID());
   const scanStartedAt = Date.now();
   const stageTimings = {
@@ -832,15 +920,25 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
   let diagnosticsFailedFamilies = 0;
   let diagnosticsBudgetLimitedFamilies = 0;
   let diagnosticsFailureMessages: string[] = [];
+  const traceEntries: NonNullable<ComponentScanDiagnostics['trace']> = [];
+  const trace = (stage: string, message: string, data?: Record<string, string | number | boolean>) => {
+    if (!developerMode) return;
+    const entry = { at: new Date().toISOString(), stage, message, ...(data ? { data } : {}) };
+    traceEntries.push(entry);
+    if (traceEntries.length > 500) traceEntries.shift();
+    developerLogger.record('debug', 'component-scan', stage, message, data);
+    if (!event.sender.isDestroyed()) event.sender.send('kryeo:scan-progress', { phase: 'preparing', label: 'Developer trace', detail: message, progress: 0, trace: entry });
+  };
   const progress = (phase: string, label: string, detail: string, value: number) => {
+    trace(phase, `${label}: ${detail}`, { progress: value });
     if (!event.sender.isDestroyed()) {
       event.sender.send('kryeo:scan-progress', { phase, label, detail, progress: value });
     }
   };
+  trace('scan', 'Scan requested.', { scope, developerMode });
   progress('preparing', 'Preparing scan', `Creating a clean workspace for the ${scope}.`, 4);
   await resetScanDirectory(directory);
   try {
-    let documentPreviewUrl = '';
     progress('discovering-layers', 'Finding component layers', 'Walking spreads, nested groups, and independently editable visual layers.', 22);
     const affinityExportStartedAt = Date.now();
     const batch = await affinity.exportComponentCandidates(directory, scope, ({ completedPartitions, totalPartitions }) => {
@@ -857,11 +955,33 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     diagnosticsAffinityRetries = batch.exportDiagnostics?.retryCount || 0;
     diagnosticsAffinitySplits = batch.exportDiagnostics?.splitCount || 0;
     diagnosticsAffinitySlowestRequestMs = batch.exportDiagnostics?.slowestRequestMs || 0;
+    trace('affinity-export', 'Affinity candidate export completed.', {
+      components: batch.components.length,
+      requests: diagnosticsAffinityRequests,
+      retries: diagnosticsAffinityRetries,
+      splits: diagnosticsAffinitySplits,
+      elapsedMs: stageTimings.affinityExportMs,
+    });
     if (batch.components.length === 0) throw new Error(`No component layers were found in the ${scope}.`);
     const snapshot = await workspace.snapshot();
-    progress('local-analysis', 'Preparing visual families', `Preparing ${batch.components.length} candidates once for grouping and hosted review.`, 43);
+    progress('local-analysis', 'Preparing visual families', `Preparing ${batch.components.length} candidates once for grouping and cloud review.`, 43);
     const imagePreparationStartedAt = Date.now();
     const scan = await buildComponentScan(batch, snapshot.componentDecisions, scanController.signal);
+    trace('local-analysis', 'Local hierarchy and visual families prepared.', {
+      components: scan.components.length,
+      uniqueVisuals: scan.uniqueVisuals,
+      duplicateFamilies: scan.duplicateFamilies,
+      elapsedMs: stageTimings.imagePreparationMs,
+    });
+    const project = batch.sourceName || scan.documentTitle || 'General';
+    const intentFingerprint = structureFingerprint(scan.components);
+    const cachedIntent = snapshot.scanIntentProfiles.find((profile) => (
+      profile.project === project
+      && profile.documentTitle === scan.documentTitle
+      && profile.structureFingerprint === intentFingerprint
+    ));
+    const scanIntent = normalizeScanIntent(requested?.intent || cachedIntent);
+    scan.components = applyScanIntent(scan.components, scanIntent);
     stageTimings.imagePreparationMs = Date.now() - imagePreparationStartedAt;
     // Local visual analysis already returns a reusable embedding. Running a
     // separate embed pass first made every new visual pay for MobileCLIP twice
@@ -872,10 +992,10 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       try {
         localSuggestions = await localAi.analyze(scan.components);
       } catch (error) {
-        scanNotes.push(`Hosted review continued without optional embedded classifier context: ${error instanceof Error ? error.message : String(error)}`);
+        scanNotes.push(`Cloud review continued without optional embedded classifier context: ${error instanceof Error ? error.message : String(error)}`);
       }
     } else {
-      scanNotes.push(`Skipped optional embedded classifier context for ${scan.uniqueVisuals} unique visuals to keep this large scan responsive; every unresolved family still received hosted review.`);
+        scanNotes.push(`Skipped optional embedded classifier context for ${scan.uniqueVisuals} unique visuals to keep this large scan responsive; every unresolved family still received cloud review.`);
     }
     stageTimings.localAnalysisMs = Date.now() - localAnalysisStartedAt;
     if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
@@ -915,8 +1035,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         recommendedDiveMode: suggestion.learnedDiveMode || component.recommendedDiveMode,
       };
     });
-    const clustered = applyComponentIntelligence(locallyClassified);
-    const project = batch.sourceName || scan.documentTitle || 'General';
+    const clustered = applyAssetBoundaries(applyComponentIntelligence(locallyClassified));
     const families = buildVisualFamilies(clustered, snapshot.componentDecisions, project, scan.documentTitle);
     await workspace.recordComponentInfluences(
       families.filter((family) => family.approvedDecision).map((family) => family.fingerprint),
@@ -939,37 +1058,21 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         : {
             candidates: [],
             selected: [],
-            localCount: unresolvedFamilies,
+            localCount: countLocallyHandledFamilies(families, false),
             budgetLimitedCount: 0,
             estimatedCostUsd: 0,
           } satisfies HostedScanSelection;
       const hostedScanId = randomUUID();
       const hostedFamilies = selection.selected;
       const hostedTotal = hostedFamilies.length;
+      trace('hosted-selection', 'Cloud review plan selected.', {
+        visualFamilies: families.length,
+        selectedFamilies: hostedTotal,
+        localFamilies: selection.localCount,
+        budgetLimited: selection.budgetLimitedCount,
+      });
       diagnosticsHostedFamilies = hostedTotal;
       const provisionalBudgetFamilies = selection.budgetLimitedCount;
-      const needsDocumentContext = scope === 'document'
-        && hostedStatus.available
-        && hostedFamilies.some((candidate) => candidate.tier === 'escalation');
-      if (needsDocumentContext) {
-        progress('capturing-context', 'Capturing escalation context', 'Rendering one compact document overview for the highest-risk visual family.', 58);
-        const contextCaptureStartedAt = Date.now();
-        try {
-          const previewPath = path.join(directory, 'document-context.png');
-          await affinity.exportAssistantPreview(previewPath, 'document');
-          if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
-          const preview = await sharp(previewPath)
-            .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
-            .png({ compressionLevel: 8 })
-            .toBuffer();
-          documentPreviewUrl = `data:image/png;base64,${preview.toString('base64')}`;
-        } catch (error) {
-          if (scanController.signal.aborted) throw error;
-          scanWarnings.push(`Escalation document context was unavailable; family previews were still reviewed: ${error instanceof Error ? error.message : String(error)}`);
-        } finally {
-          stageTimings.contextCaptureMs = Date.now() - contextCaptureStartedAt;
-        }
-      }
       const scanTargetUsd = hostedStatus.scanTargetUsd ?? 0.01;
       const scanBudgetUsd = hostedStatus.scanBudgetUsd ?? 0.03;
       const budgetDescription = hostedStatus.scanBudgetEnforced
@@ -979,11 +1082,11 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         'hosted-analysis',
         'Analysing new visual families',
         !hostedStatus.available && unresolvedFamilies
-          ? `The hosted reviewer is unavailable. The local pass kept ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family' : 'families'} provisional.`
+          ? `The cloud reviewer is unavailable. The local pass kept ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family' : 'families'} provisional.`
           : hostedTotal
-            ? `The local pass prepared context for ${unresolvedFamilies} unresolved ${unresolvedFamilies === 1 ? 'family' : 'families'}. The hosted reviewer is classifying ${hostedTotal} ${hostedTotal === 1 ? 'family' : 'families'} ${budgetDescription}${provisionalBudgetFamilies ? `; ${provisionalBudgetFamilies} remain provisional` : ''}.`
+            ? `The local pass prepared context for ${unresolvedFamilies} unresolved ${unresolvedFamilies === 1 ? 'family' : 'families'}. The cloud reviewer is classifying ${hostedTotal} ${hostedTotal === 1 ? 'family' : 'families'} ${budgetDescription}${provisionalBudgetFamilies ? `; ${provisionalBudgetFamilies} remain provisional` : ''}.`
             : unresolvedFamilies
-              ? `The local pass handled the clear families; ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family remains' : 'families remain'} provisional within the hosted budget.`
+              ? `The local pass handled the clear families; ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family remains' : 'families remain'} provisional within the cloud budget.`
               : 'All visual families are already known; applying learned decisions.',
         62,
       );
@@ -991,10 +1094,10 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         project,
         documentTitle: scan.documentTitle,
         documentSessionUuid: scan.documentSessionUuid,
-        documentPreviewUrl,
         instructions: snapshot.assistantMemories
           .filter((memory) => memory.scope === 'global' || memory.project === project)
-          .map((memory) => memory.text),
+          .map((memory) => memory.text)
+          .concat(scanIntentContext(scanIntent)),
         projectKnowledge: snapshot.projectKnowledge.find((knowledge) => knowledge.project === project),
       };
       const hostedAnalyses: Awaited<ReturnType<typeof hostedAi.analyzeFamilies>>['analyses'] = [];
@@ -1007,20 +1110,19 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       let partialResultSent = false;
       const tierResponses: Awaited<ReturnType<typeof hostedAi.analyzeFamilies>>[] = [];
       hostedAnalysisStartedAt = Date.now();
-      for (const tier of ['escalation', 'lite'] as HostedReviewTier[]) {
+      for (const tier of ['lite', 'escalation'] as HostedReviewTier[]) {
         const tierFamilies = hostedFamilies.filter((candidate) => candidate.tier === tier).map((candidate) => candidate.family);
         if (!tierFamilies.length) continue;
         const response = await hostedAi.analyzeFamiliesProgressively({
           ...requestBase,
           families: tierFamilies,
           reviewTier: tier,
-          // Both tiers use one representative family preview. Escalation also
-          // receives the document composite, giving it context without sending
-          // every family image again.
+          // Every primary decision sees its own direct target PNG. Hierarchy
+          // metadata supplies local context; a whole-document image would
+          // allow adjacent artwork to leak into the asset's identity.
           maxMemberImages: 1,
-          includeDocumentContext: tier === 'escalation' && Boolean(documentPreviewUrl),
+          includeDocumentContext: false,
           hostedScanId,
-          documentPreviewUrl: tier === 'escalation' ? documentPreviewUrl : undefined,
         }, (completed, total, partial) => {
           diagnosticsHostedRequests += 1;
           diagnosticsProviderRequests = Math.max(diagnosticsProviderRequests, partial.scanProviderRequests || 0);
@@ -1032,7 +1134,15 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
           diagnosticsFailedFamilies = failedFamilies;
           diagnosticsBudgetLimitedFamilies = budgetLimitedFamilies;
           const globalCompleted = Math.min(completedHostedFamilies + completed, hostedTotal);
-          const detail = `The hosted reviewer completed ${globalCompleted} of ${hostedTotal} selected ${hostedTotal === 1 ? 'family' : 'families'}${budgetLimitedFamilies ? `; ${budgetLimitedFamilies} remain local within budget` : ''}.`;
+          trace('hosted-batch', 'Gateway batch completed.', {
+            completed: globalCompleted,
+            total: hostedTotal,
+            analyses: partial.analyses.length,
+            cached: partial.cached,
+            failed: partial.failures.reduce((total, failure) => total + failure.familyIds.length, 0),
+            providerRequests: partial.scanProviderRequests || 0,
+          });
+          const detail = `The cloud reviewer completed ${globalCompleted} of ${hostedTotal} selected ${hostedTotal === 1 ? 'family' : 'families'}${budgetLimitedFamilies ? `; ${budgetLimitedFamilies} remain local within budget` : ''}.`;
           if (!event.sender.isDestroyed()) {
             const now = Date.now();
             const isFinalHostedUpdate = globalCompleted >= hostedTotal;
@@ -1083,27 +1193,106 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         completedHostedFamilies += tierFamilies.length;
       }
       stageTimings.hostedAnalysisMs = Date.now() - hostedAnalysisStartedAt;
-      const responseAnalyses = tierResponses.flatMap((response) => response.analyses);
+      let responseAnalyses = tierResponses.flatMap((response) => response.analyses);
+      const familyById = new Map(families.map((family) => [family.id, family]));
+      const batchConsistency = familyBatchConsistencyIssues(responseAnalyses, families);
+      const challenges = responseAnalyses.filter((analysis) => (
+        requiresIndependentFamilyReview(analysis, familyById.get(analysis.familyId))
+        || batchConsistency.has(analysis.familyId)
+      ));
       hostedProviderCostUsd = Math.max(0, ...tierResponses.map((response) => response.scanProviderCostUsd || 0));
       diagnosticsProviderRequests = Math.max(
         diagnosticsProviderRequests,
         ...tierResponses.map((response) => response.scanProviderRequests || 0),
       );
+      if (challenges.length) {
+        trace('review', 'Independent visual review required.', { challengedFamilies: challenges.length, inconsistentScopes: batchConsistency.size });
+        progress('reconciliation', 'Resolving visual disagreements', `Independently checking ${challenges.length} uncertain ${challenges.length === 1 ? 'family' : 'families'} before applying one final decision.`, 82);
+        const scopes = new Map<string, typeof challenges>();
+        for (const analysis of challenges) {
+          const family = familyById.get(analysis.familyId);
+          const key = family?.namingScopeKey || analysis.familyId;
+          const scopeAnalyses = scopes.get(key) || [];
+          scopeAnalyses.push(analysis);
+          scopes.set(key, scopeAnalyses);
+        }
+        const reviewBatches: Array<typeof challenges> = [];
+        let pendingBatch: typeof challenges = [];
+        for (const scopeAnalyses of scopes.values()) {
+          for (let offset = 0; offset < scopeAnalyses.length; offset += 8) {
+            const unit = scopeAnalyses.slice(offset, offset + 8);
+            if (pendingBatch.length && pendingBatch.length + unit.length > 8) {
+              reviewBatches.push(pendingBatch);
+              pendingBatch = [];
+            }
+            pendingBatch.push(...unit);
+            if (pendingBatch.length === 8) {
+              reviewBatches.push(pendingBatch);
+              pendingBatch = [];
+            }
+          }
+        }
+        if (pendingBatch.length) reviewBatches.push(pendingBatch);
+        const reviewedById = new Map<string, (typeof challenges)[number]>();
+        for (const batch of reviewBatches) {
+          const batchFamilies = batch.flatMap((analysis) => {
+            const family = familyById.get(analysis.familyId);
+            return family ? [family] : [];
+          });
+          const challengeReasons = Object.fromEntries(batch.map((analysis) => {
+            const family = familyById.get(analysis.familyId);
+            return [analysis.familyId, [
+              ...familyDecisionConsistencyIssues(analysis, family),
+              ...(batchConsistency.get(analysis.familyId) || []),
+            ]];
+          }));
+          try {
+            diagnosticsHostedRequests += 1;
+            const response = await hostedAi.reviewFamilies({
+              ...requestBase,
+              families: batchFamilies,
+              reviewTier: 'escalation',
+              hostedScanId,
+              currentAnalyses: batch,
+              challengeReasons,
+            }, scanController.signal);
+            response.analyses.forEach((analysis) => reviewedById.set(analysis.familyId, analysis));
+            hostedProviderCostUsd = Math.max(hostedProviderCostUsd, response.scanProviderCostUsd || 0);
+            diagnosticsProviderRequests = Math.max(diagnosticsProviderRequests, response.scanProviderRequests || 0);
+            diagnosticsFailureMessages.push(...response.failures.map((failure) => safeHostedFailureMessage(failure.message)));
+            trace('review', 'Independent review batch completed.', { families: batchFamilies.length, analyses: response.analyses.length, failures: response.failures.length });
+          } catch (error) {
+            diagnosticsFailureMessages.push(safeHostedFailureMessage(error));
+            trace('review', 'Independent review batch failed.', { families: batchFamilies.length, error: safeHostedFailureMessage(error) });
+          }
+        }
+        const resolvedById = new Map(challenges.map((analysis) => [
+          analysis.familyId,
+          resolveIndependentFamilyAnalysis(analysis, reviewedById.get(analysis.familyId)),
+        ]));
+        responseAnalyses = responseAnalyses.map((analysis) => resolvedById.get(analysis.familyId) || analysis);
+      }
       reviewed = calibrateComponentConfidence(
         applyHostedFamilyAnalyses(reviewed, families, responseAnalyses),
         snapshot.componentDecisions,
       );
       hostedAnalysisAvailable = responseAnalyses.length > 0;
+      trace('resolver', 'Atomic decisions resolved.', {
+        analyses: responseAnalyses.length,
+        challenged: challenges.length,
+        unresolved: responseAnalyses.filter((analysis) => analysis.reviewNeeded || analysis.assetType === 'Unknown' || analysis.role === 'Unknown').length,
+      });
       const failures = tierResponses.flatMap((response) => response.failures);
       const skippedHostedFamilies = [...new Set(tierResponses.flatMap((response) => response.skippedFamilyIds || []))];
       diagnosticsCachedFamilies = cachedFamilies;
       diagnosticsFailedFamilies = failures.reduce((total, failure) => total + failure.familyIds.length, 0);
       diagnosticsBudgetLimitedFamilies = skippedHostedFamilies.length;
-      diagnosticsFailureMessages = [...new Set(failures.map((failure) => (
-        `${failure.familyIds.length} ${failure.familyIds.length === 1 ? 'family' : 'families'}: ${failure.message}`
-      )))].slice(0, 6);
+      diagnosticsFailureMessages = [...new Set([
+        ...diagnosticsFailureMessages,
+        ...failures.map((failure) => `${failure.familyIds.length} ${failure.familyIds.length === 1 ? 'family' : 'families'}: ${safeHostedFailureMessage(failure.message)}`),
+      ])].slice(0, 6);
       if (!hostedAnalysisAvailable && failures.length) {
-        hostedAnalysisError = failures[0].message;
+        hostedAnalysisError = safeHostedFailureMessage(failures[0].message);
       } else if (skippedHostedFamilies.length) {
         hostedAnalysisError = `The $${scanBudgetUsd.toFixed(3)} cloud safety ceiling was reached before ${skippedHostedFamilies.length} ${skippedHostedFamilies.length === 1 ? 'family' : 'families'} could be classified.`;
       } else if (!hostedStatus.available && unresolvedFamilies) {
@@ -1113,7 +1302,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         'hosted-analysis',
         'Analysing new visual families',
         hostedStatus.available
-           ? `No hosted families were queued under the active policy, so ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family remains' : 'families remain'} provisional.`
+           ? `No cloud families were queued under the active policy, so ${unresolvedFamilies} ${unresolvedFamilies === 1 ? 'family remains' : 'families remain'} provisional.`
           : hostedStatus.message,
         80,
       );
@@ -1132,15 +1321,22 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       };
     } catch (error) {
       if (hostedAnalysisStartedAt) stageTimings.hostedAnalysisMs = Date.now() - hostedAnalysisStartedAt;
-      hostedAnalysisError = error instanceof Error ? error.message : String(error);
+      hostedAnalysisError = safeHostedFailureMessage(error);
       diagnosticsFailureMessages = [hostedAnalysisError];
       reviewed = applyHostedFamilyAnalyses(reviewed, families, []);
+      trace('hosted-analysis', 'Cloud analysis failed; affected families remain unresolved.', { error: hostedAnalysisError });
     }
-    progress('finalizing', 'Preparing review', 'Applying hierarchy context and arranging the final component list.', 94);
+    progress('finalizing', 'Preparing automatic build', 'Applying hierarchy context and arranging the AI decisions.', 94);
     const finalizationStartedAt = Date.now();
     reviewed = prepareComponentsForReview(reviewed);
     stageTimings.finalizationMs = Date.now() - finalizationStartedAt;
-    progress('complete', 'Scan complete', `${reviewed.length} proposed components are ready to review.`, 100);
+    trace('finalization', 'Scan finalization completed.', {
+      components: reviewed.length,
+      exportTargets: reviewed.filter((component) => component.exportTarget).length,
+      unresolved: reviewed.filter((component) => component.assetType === 'Unknown' || component.analysisState === 'needs-review' || component.analysisState === 'provisional').length,
+      elapsedMs: stageTimings.finalizationMs,
+    });
+    progress('complete', 'Scan complete', `${reviewed.length} components are ready for automatic asset creation.`, 100);
     return {
       ...scan,
       components: reviewed,
@@ -1150,6 +1346,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       hostedProviderCostUsd,
       hostedTargetUsd,
       hostedBudgetUsd,
+      scanIntent: { ...scanIntent, structureFingerprint: intentFingerprint },
       diagnostics: {
         totalMs: Date.now() - scanStartedAt,
         stages: stageTimings,
@@ -1167,6 +1364,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         failureMessages: diagnosticsFailureMessages,
         notes: scanNotes,
         warnings: scanWarnings,
+        ...(developerMode ? { trace: traceEntries } : {}),
       },
     };
   } catch (error) {
