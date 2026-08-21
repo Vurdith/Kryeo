@@ -82,6 +82,8 @@ import kryeoMark from './assets/kryeo-mark.png';
 declare const __KRYEO_VERSION__: string;
 
 const APP_VERSION = __KRYEO_VERSION__;
+const MAX_DEVELOPER_CONSOLE_ENTRIES = 750;
+const DEVELOPER_LOG_UI_FLUSH_MS = 200;
 
 type Page = 'home' | 'assistant' | 'learning' | 'connectors' | 'tools' | 'import' | 'assets' | 'activity' | 'settings' | 'save' | 'configure' | 'place';
 type SettingsStartPage = Extract<Page, 'home' | 'assistant' | 'learning' | 'connectors' | 'tools' | 'import' | 'assets' | 'activity'>;
@@ -138,6 +140,7 @@ const EMPTY_WORKSPACE: WorkspaceSnapshot = {
 const EMPTY_DEVELOPER_LOG: DeveloperLogSnapshot = {
   enabled: false,
   entries: [],
+  totalEntries: 0,
   filePath: '',
 };
 
@@ -323,6 +326,8 @@ function App() {
   const [developerMode, setDeveloperMode] = useState(() => localStorage.getItem('kryeo.developer-mode') === 'true');
   const [developerLog, setDeveloperLog] = useState<DeveloperLogSnapshot>(EMPTY_DEVELOPER_LOG);
   const developerModeSync = useRef(developerMode);
+  const developerLogBuffer = useRef<DeveloperLogEntry[]>([]);
+  const developerLogFlushTimer = useRef<number | undefined>(undefined);
 
   const refreshDocument = useCallback(async () => {
     try {
@@ -389,22 +394,66 @@ function App() {
     }
   }, [refreshDocument]);
 
-  useEffect(() => {
-    const unsubscribe = window.kryeo.onDeveloperLog((entry) => {
-      setDeveloperLog((current) => ({
-        ...current,
-        entries: [...current.entries, entry].slice(-5000),
-      }));
-    });
-    return unsubscribe;
+  const clearDeveloperLogBuffer = useCallback(() => {
+    if (developerLogFlushTimer.current !== undefined) {
+      window.clearTimeout(developerLogFlushTimer.current);
+      developerLogFlushTimer.current = undefined;
+    }
+    developerLogBuffer.current = [];
   }, []);
+
+  const applyDeveloperLogSnapshot = useCallback((snapshot: DeveloperLogSnapshot) => {
+    clearDeveloperLogBuffer();
+    setDeveloperLog(snapshot);
+  }, [clearDeveloperLogBuffer]);
+
+  useEffect(() => {
+    if (page !== 'settings') {
+      clearDeveloperLogBuffer();
+      window.kryeo.setDeveloperLogStreaming(false);
+      return undefined;
+    }
+    let active = true;
+    const flush = () => {
+      developerLogFlushTimer.current = undefined;
+      const entries = developerLogBuffer.current.splice(0);
+      if (!entries.length || !active) return;
+      setDeveloperLog((current) => {
+        const knownIds = new Set(current.entries.map((entry) => entry.id));
+        const additions = entries.filter((entry) => !knownIds.has(entry.id));
+        if (!additions.length) return current;
+        const nextEntries = [...current.entries, ...additions].slice(-MAX_DEVELOPER_CONSOLE_ENTRIES);
+        return {
+          ...current,
+          entries: nextEntries,
+          totalEntries: Math.min(5_000, Math.max(nextEntries.length, current.totalEntries + additions.length)),
+        };
+      });
+    };
+    window.kryeo.setDeveloperLogStreaming(true);
+    const unsubscribe = window.kryeo.onDeveloperLog((entries) => {
+      developerLogBuffer.current.push(...entries);
+      if (developerLogFlushTimer.current === undefined) {
+        developerLogFlushTimer.current = window.setTimeout(flush, DEVELOPER_LOG_UI_FLUSH_MS);
+      }
+    });
+    void window.kryeo.getDeveloperLog().then((snapshot) => {
+      if (active) applyDeveloperLogSnapshot(snapshot);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      unsubscribe();
+      window.kryeo.setDeveloperLogStreaming(false);
+      clearDeveloperLogBuffer();
+    };
+  }, [applyDeveloperLogSnapshot, clearDeveloperLogBuffer, page]);
 
   useEffect(() => {
     let active = true;
     let exitTimer = 0;
     void (async () => {
       try {
-        setDeveloperLog(await window.kryeo.setDeveloperMode(developerMode));
+        applyDeveloperLogSnapshot(await window.kryeo.setDeveloperMode(developerMode));
       } catch {
         // Developer logging is optional and must not hold up the boot flow.
       }
@@ -422,15 +471,15 @@ function App() {
       active = false;
       window.clearTimeout(exitTimer);
     };
-  }, [refreshAll]);
+  }, [applyDeveloperLogSnapshot, refreshAll]);
 
   useEffect(() => {
     if (developerModeSync.current === developerMode) return;
     developerModeSync.current = developerMode;
     void window.kryeo.setDeveloperMode(developerMode)
-      .then(setDeveloperLog)
+      .then(applyDeveloperLogSnapshot)
       .catch(() => undefined);
-  }, [developerMode]);
+  }, [applyDeveloperLogSnapshot, developerMode]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -774,7 +823,7 @@ function App() {
             />
           )}
           {page === 'settings' && (
-            <SettingsPage version={APP_VERSION} status={status} onReconnect={() => void refreshAll(true)} onWorkspace={setWorkspace} developerMode={developerMode} onDeveloperModeChange={setDeveloperMode} developerLog={developerLog} onDeveloperLogChange={setDeveloperLog} />
+            <SettingsPage version={APP_VERSION} status={status} onReconnect={() => void refreshAll(true)} onWorkspace={setWorkspace} developerMode={developerMode} onDeveloperModeChange={setDeveloperMode} developerLog={developerLog} onDeveloperLogChange={applyDeveloperLogSnapshot} />
           )}
           {page === 'save' && (
             <SavePage
@@ -1427,7 +1476,7 @@ function SavePage({ document, library, connected, saving, onSave }: {
           <label className={`save-option ${document.selectionCount < 2 ? 'is-disabled' : ''}`}><input type="checkbox" checked={batch} disabled={document.selectionCount < 2} onChange={(event) => setBatch(event.target.checked)} /><span><b>Save separately</b><small>Make one asset for each selected root layer.</small></span></label>
         </div>
         <div className="metadata-grid">
-          <label>Tags<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="inventory, ornate, blue" /></label>
+          <label>Tags<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="hud, metal, blue" /></label>
           <label>Notes<input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Optional context for future you" /></label>
         </div>
       </section>
@@ -1680,6 +1729,8 @@ function needsCompleteSemanticDecision(component: ComponentScanResult['component
   if (isStructuralContextOnly(component)) return false;
   return component.assetType === 'Unknown'
     || component.role === 'Unknown'
+    || component.semanticConflict === true
+    || component.analysisState === 'needs-review'
     || component.analysisState === 'provisional'
     || component.analysisState === 'queued';
 }
@@ -1796,11 +1847,7 @@ function ComponentScanPage({ document, connected, onWorkspace, developerMode }: 
               scanIntent: result.scanIntent,
               decisionStatus: 'generated',
             }));
-            const incomplete = result.components.filter((component) => (
-              component.analysisState === 'provisional'
-              || component.analysisState === 'queued'
-              || component.assetType === 'Unknown'
-            )).length;
+            const incomplete = result.components.filter(needsCompleteSemanticDecision).length;
             setMessage(incomplete
               ? `Scan saved, but ${incomplete} ${incomplete === 1 ? 'family needs' : 'families need'} a complete cloud decision. Rescan before building.`
               : 'AI decisions cached. Kryeo is ready to build the asset library.');
@@ -2086,7 +2133,7 @@ function ComponentScanPage({ document, connected, onWorkspace, developerMode }: 
   const createAssets = async () => {
     if (!scan || exporting || scanScope !== 'document' || !scan.scanIntent) return;
     if (!included.size) return;
-    const unresolved = scan.components.filter((component) => component.analysisState === 'provisional' || component.analysisState === 'queued' || component.assetType === 'Unknown');
+    const unresolved = scan.components.filter(needsCompleteSemanticDecision);
     if (unresolved.length) {
       setError(`Kryeo cannot build this library yet: ${unresolved.length} ${unresolved.length === 1 ? 'family has' : 'families have'} no complete cloud decision. Rescan the document first.`);
       return;
@@ -3288,6 +3335,7 @@ function SettingsPage({ version, status, onReconnect, onWorkspace, developerMode
     return saved && SETTINGS_START_PAGES.some((option) => option.id === saved) ? saved : 'home';
   });
   const [maintenanceMessage, setMaintenanceMessage] = useState('');
+  const [developerLogQuery, setDeveloperLogQuery] = useState('');
 
   useEffect(() => { void window.kryeo.getAssistantStatus().then(setAssistantStatus).catch(() => undefined); }, []);
 
@@ -3318,6 +3366,17 @@ function SettingsPage({ version, status, onReconnect, onWorkspace, developerMode
       .then(() => setMaintenanceMessage('Developer log cleared.'))
       .catch(() => setMaintenanceMessage('Developer log could not be cleared.'));
   };
+  const renderedDeveloperLog = useMemo(() => {
+    const query = developerLogQuery.trim().toLowerCase();
+    const entries = developerLog.entries.filter((entry: DeveloperLogEntry) => {
+      if (!query) return true;
+      const haystack = `${entry.level} ${entry.source} ${entry.event} ${entry.message} ${entry.correlationId || ''} ${entry.data === undefined ? '' : JSON.stringify(entry.data)}`.toLowerCase();
+      return haystack.includes(query);
+    }).slice(-300);
+    return entries.map((entry: DeveloperLogEntry) => (
+      `${entry.at}  [${entry.level}] [${entry.source}/${entry.event}]${entry.correlationId ? ` [${entry.correlationId}]` : ''} ${entry.message}${entry.data === undefined ? '' : ` ${JSON.stringify(entry.data)}`}`
+    )).join('\n') || 'No matching developer events.';
+  }, [developerLog.entries, developerLogQuery]);
   return (
     <div className="settings-list settings-list--preferences enter-page">
       <section className="settings-section settings-section--intro">
@@ -3397,7 +3456,7 @@ function SettingsPage({ version, status, onReconnect, onWorkspace, developerMode
         <div className="settings-value settings-control-stack">
           <label className="settings-toggle">
             <input type="checkbox" checked={developerMode} onChange={(event) => setDeveloperMode(event.target.checked)} />
-            <span><b>{developerMode ? 'Developer logging is on' : 'Developer logging is off'}</b><small>{developerMode ? `${developerLog.entries.length.toLocaleString()} recent events are available below and in the local log file.` : 'Normal operation records no developer event stream.'}</small></span>
+            <span><b>{developerMode ? 'Developer logging is on' : 'Developer logging is off'}</b><small>{developerMode ? `${developerLog.totalEntries.toLocaleString()} recent events are retained locally; Settings buffers the latest ${MAX_DEVELOPER_CONSOLE_ENTRIES.toLocaleString()} without slowing the app.` : 'Normal operation records no developer event stream.'}</small></span>
           </label>
           <small className="settings-hint">API keys, bearer tokens, credentials, and secret query parameters are redacted before the log reaches disk, the UI, or the clipboard. Other sanitized request and result data is intentionally verbose.</small>
         </div>
@@ -3407,16 +3466,17 @@ function SettingsPage({ version, status, onReconnect, onWorkspace, developerMode
         <section className="settings-section developer-log-section">
           <div>
             <h2>Developer console</h2>
-            <p>Every event is kept as structured JSONL at the path below. The console shows the newest events first while the file retains the rolling history.</p>
+            <p>Every event is kept as structured JSONL at the path below. Correlation IDs connect one operation across IPC, scan stages, gateway batches, and export. This view updates in small batches and keeps only the newest events in memory so the rest of Kryeo stays responsive.</p>
           </div>
           <div className="settings-value developer-log-value">
             <div className="developer-log-meta">
-              <strong>{developerLog.entries.length.toLocaleString()} events loaded</strong>
+              <strong>{developerLog.entries.length.toLocaleString()} events buffered · {developerLog.totalEntries.toLocaleString()} retained · {Math.round((developerLog.fileBytes || 0) / 1024)} KB on disk</strong>
               <code>{developerLog.filePath || 'Log path unavailable until the app is ready.'}</code>
             </div>
-            <pre className="developer-log-console">{developerLog.entries.slice(-400).map((entry: DeveloperLogEntry) => `${entry.at}  [${entry.level}] [${entry.source}/${entry.event}] ${entry.message}${entry.data === undefined ? '' : ` ${JSON.stringify(entry.data)}`}`).join('\n') || 'Waiting for developer events...'}</pre>
+            <label className="settings-control developer-log-filter"><span>Filter events</span><input value={developerLogQuery} onChange={(event) => setDeveloperLogQuery(event.target.value)} placeholder="stage, error, correlation ID…" /></label>
+            <pre className="developer-log-console">{renderedDeveloperLog}</pre>
             <div className="developer-log-actions">
-              <button className="secondary-button" type="button" disabled={!developerLog.entries.length} onClick={copyDeveloperLog}><FileCode2 size={15} />Copy JSONL events</button>
+              <button className="secondary-button" type="button" disabled={!developerLog.entries.length} onClick={copyDeveloperLog}><FileCode2 size={15} />Copy buffered events</button>
               <button className="secondary-button" type="button" disabled={!developerLog.entries.length} onClick={clearDeveloperLog}><Trash2 size={15} />Clear log</button>
             </div>
           </div>

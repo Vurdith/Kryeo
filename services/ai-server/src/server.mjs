@@ -380,7 +380,12 @@ async function readJson(request) {
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw Object.assign(new Error('Request body is too large.'), { statusCode: 413 });
+    if (size > MAX_BODY_BYTES) {
+      throw Object.assign(
+        new Error(`Request body exceeded the ${Math.round(MAX_BODY_BYTES / (1024 * 1024))} MB gateway limit.`),
+        { statusCode: 413 },
+      );
+    }
     chunks.push(chunk);
   }
   if (!chunks.length) return {};
@@ -661,6 +666,24 @@ async function executeModelCall(messages, maxTokens, reasoningEffort, externalSi
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), MODEL_TIMEOUT_MS);
+    const startedAt = Date.now();
+    let attempts = 0;
+    let requestBytes = 0;
+    let responseBytes = 0;
+    let providerRequestId = '';
+    const httpStatuses = [];
+    const providerTelemetry = (parsed = false, error = '') => ({
+      requestId: providerRequestId || undefined,
+      model,
+      transport: MODEL_TRANSPORT,
+      attempts,
+      httpStatuses,
+      requestBytes,
+      responseBytes,
+      durationMs: Date.now() - startedAt,
+      parsed,
+      ...(error ? { error: String(error).slice(0, 500) } : {}),
+    });
     const abort = () => controller.abort(externalSignal?.reason);
     externalSignal?.addEventListener('abort', abort, { once: true });
     if (externalSignal?.aborted) controller.abort(externalSignal.reason);
@@ -706,6 +729,8 @@ async function executeModelCall(messages, maxTokens, reasoningEffort, externalSi
           }
         : chatCompletionRequest;
       const requestCompletion = async (body) => {
+        attempts += 1;
+        requestBytes += Buffer.byteLength(JSON.stringify(body), 'utf8');
         const response = await fetch(`${MODEL_BASE_URL}/${MODEL_TRANSPORT === 'responses' ? 'responses' : 'chat/completions'}`, {
           method: 'POST',
           signal: controller.signal,
@@ -722,7 +747,10 @@ async function executeModelCall(messages, maxTokens, reasoningEffort, externalSi
           },
           body: JSON.stringify(body),
         });
-        return { response, text: await response.text() };
+        const text = await response.text();
+        httpStatuses.push(response.status);
+        responseBytes += Buffer.byteLength(text, 'utf8');
+        return { response, text };
       };
       let completion = await requestCompletion(modelRequest);
       if (
@@ -741,6 +769,7 @@ async function executeModelCall(messages, maxTokens, reasoningEffort, externalSi
       }
       const body = completion.text;
       const parsed = JSON.parse(body);
+      providerRequestId = String(parsed?.id || parsed?.response_id || '');
       const usage = recordModelUsage(parsed, model);
       try {
         return {
@@ -748,13 +777,20 @@ async function executeModelCall(messages, maxTokens, reasoningEffort, externalSi
             ? responseOutputText(parsed)
             : parsed.choices?.[0]?.message?.content),
           usage,
+          telemetry: providerTelemetry(true),
         };
       } catch (error) {
         error.modelUsage = usage;
+        error.providerTelemetry = providerTelemetry(false, error);
         throw error;
       }
     } catch (error) {
-      if (error?.name === 'AbortError') throw new Error(`The model did not answer within ${Math.round(MODEL_TIMEOUT_MS / 1000)} seconds.`);
+      if (error && typeof error === 'object') error.providerTelemetry = providerTelemetry(false, error);
+      if (error?.name === 'AbortError') {
+        const timeoutError = new Error(`The model did not answer within ${Math.round(MODEL_TIMEOUT_MS / 1000)} seconds.`);
+        timeoutError.providerTelemetry = providerTelemetry(false, timeoutError);
+        throw timeoutError;
+      }
       throw error;
     } finally {
       clearTimeout(timer);
@@ -1166,6 +1202,8 @@ function compactFamilyPrompt(families, context) {
       'Sibling ordinal/count records document order only. Use an ordinal in a name only when visually equivalent siblings truly share one root; never use it to copy a neighbour\'s identity.',
       'plannedGrouping is fixed structural ownership. Copy it into d exactly (0=keep-together, 1=children-only, 2=parent-and-children); if it appears ambiguous, set rv=true instead of changing it.',
       'A GroupNode, child count, or Frame field is structural metadata, not a request to call the asset Container, Group, or Frame. A transparent decorative perimeter with a sparse centre is Border/ImageLabel, not Frame, unless it visibly acts as structural chrome for external UI content.',
+      'Names must follow <descriptive visual identity> <final asset type>; include at least one grounded descriptor before the final type. Never return a bare taxonomy word such as Background, Wallpaper, Slot, Frame, Border, Texture, Badge, or Overlay, even with a number. Do not copy source, parent, ancestor, or sibling labels into a target name.',
+      'When reviewing a current packet, return a complete replacement row whenever the visual supports a decision. Do not return criticism alone, and do not mark a defensible visual Unknown merely because the current name is weak.',
       'Return JSON only in the compact shape {"f":[["f1",0,"assetType","complete name",0,0,"role"]]}. Each row is [alias,ignored,type,name,uncertain(0|1),plannedGrouping(0|1|2),role]. Return every requested alias exactly once; never return prose, markdown, or an incomplete row.',
       `F=${JSON.stringify(families.map(compactLiteFamilyMetadata))}`,
       `Neutral observations=${JSON.stringify(context.descriptions || []).slice(0, 1600)}. These describe visible facts only. Do not introduce any noun or adjective absent from them or the preview.`,
@@ -1174,6 +1212,20 @@ function compactFamilyPrompt(families, context) {
         : []),
       ...(context.projectKnowledge
         ? [`Project context=${JSON.stringify(context.projectKnowledge).slice(0, 260)}`]
+        : []),
+      ...(Array.isArray(context.reviewContext) && context.reviewContext.length
+        ? [`Independent review context=${JSON.stringify(context.reviewContext.map((item) => ({
+            familyId: item.familyId,
+            currentDecision: item.currentDecision
+              ? {
+                  familyName: item.currentDecision.familyName,
+                  assetType: item.currentDecision.assetType,
+                  role: item.currentDecision.role,
+                  grouping: item.currentDecision.diveMode,
+                }
+              : null,
+            challengeReasons: Array.isArray(item.challengeReasons) ? item.challengeReasons.slice(0, 4) : [],
+          }))).slice(0, 3600)}. Return a complete replacement row when the current decision is unsupported; never return criticism without a row.`]
         : []),
     ].join('\n'),
   }];
@@ -1439,9 +1491,11 @@ async function classifyFamilyBatch(families, context, descriptions, signal, mode
       { role: 'user', content: familyPrompt(families, { ...context, descriptions, compactResponse }) },
     ], maxOutputTokens, 'none', signal, model, context.sessionId, context.serviceTier);
   } catch (error) {
+    if (error?.providerTelemetry && Array.isArray(context.providerCalls)) context.providerCalls.push(error.providerTelemetry);
     settleScanBudget(context.hostedScanId, error?.modelUsage);
     throw error;
   }
+  if (completion.telemetry && Array.isArray(context.providerCalls)) context.providerCalls.push(completion.telemetry);
   settleScanBudget(context.hostedScanId, completion.usage);
   const output = completion.output;
   const rawFamilies = compactResponse ? decodeCompactPacket(output) : [];
@@ -1752,6 +1806,8 @@ async function analyzeFamilies(payload, signal) {
       : OPENROUTER_SERVICE_TIER,
     maxMemberImages: budgetSelection.maxMemberImages,
     includeDocumentContext: budgetSelection.includeDocumentContext,
+    correlationId: String(payload.correlationId || payload.hostedScanId || ''),
+    providerCalls: [],
     documentFamilies: families.map((family, familyIndex) => ({
       familyId: family.id,
       order: familyIndex + 1,
@@ -1856,6 +1912,18 @@ async function analyzeFamilies(payload, signal) {
     scanProviderRequests: finalBudget.providerRequests,
     recovery,
     usage: usageReport(),
+    diagnostics: {
+      correlationId: String(payload.correlationId || payload.hostedScanId || ''),
+      requestId,
+      route: '/v1/families/analyze',
+      reviewTier,
+      requestedFamilies: families.length,
+      cachedFamilies: cached,
+      analyzedFamilies: analyses.length,
+      incompleteFamilies: failures.flatMap((failure) => failure.familyIds),
+      providerCalls: analysisContext.providerCalls,
+      recovery: Object.fromEntries(Object.entries(recovery).map(([key, value]) => [key, Number(value) || 0])),
+    },
   };
 }
 
@@ -2084,6 +2152,7 @@ async function reviewFamilies(payload, signal) {
     }
   }
   const failures = [];
+  const providerCalls = [];
   if (unresolved.length) {
     const context = {
       instructions: [],
@@ -2092,11 +2161,16 @@ async function reviewFamilies(payload, signal) {
       sessionId: `kryeo-review-${createHash('sha256').update(String(payload.hostedScanId || randomUUID())).digest('hex').slice(0, 24)}`,
       hostedScanId: String(payload.hostedScanId || randomUUID()),
       reviewTier: 'escalation',
+      // Keep the escalation model, but use the compact atomic packet so one
+      // bounded response can contain a complete replacement for every family.
+      compactResponse: true,
       serviceTier: ['default', 'flex', 'priority', 'scale'].includes(String(payload.serviceTier || '').toLowerCase())
         ? String(payload.serviceTier).toLowerCase()
         : OPENROUTER_SERVICE_TIER,
       maxMemberImages: 1,
       includeDocumentContext: false,
+      correlationId: String(payload.correlationId || payload.hostedScanId || ''),
+      providerCalls,
       reviewContext: unresolved.map((family) => ({
         familyId: family.id,
         currentDecision: currentAnalyses.find((analysis) => analysis.familyId === family.id) || null,
@@ -2166,6 +2240,16 @@ async function reviewFamilies(payload, signal) {
     scanCommittedCostUsd: Math.max(budget.providerUsd, budget.estimatedUsd),
     scanProviderRequests: budget.providerRequests,
     usage: usageReport(),
+    diagnostics: {
+      correlationId: String(payload.correlationId || payload.hostedScanId || ''),
+      route: '/v1/families/review',
+      reviewTier: 'escalation',
+      requestedFamilies: families.length,
+      cachedFamilies: families.length - unresolved.length,
+      analyzedFamilies: analyses.length,
+      incompleteFamilies: failures.flatMap((failure) => failure.familyIds),
+      providerCalls,
+    },
   };
 }
 
@@ -2329,6 +2413,9 @@ async function clearFamilyCache() {
 }
 
 const server = http.createServer(async (request, response) => {
+  const gatewayRequestId = randomUUID();
+  const correlationId = String(request.headers['x-kryeo-correlation-id'] || '').slice(0, 120);
+  const route = String(request.url || '').split('?')[0];
   try {
     if (!authenticated(request)) return json(response, 401, { error: 'Invalid Kryeo AI token.' });
 
@@ -2411,7 +2498,16 @@ const server = http.createServer(async (request, response) => {
     }
   } catch (error) {
     const status = Number(error?.statusCode || 500);
-    return json(response, status, { error: error instanceof Error ? error.message : String(error) });
+    return json(response, status, {
+      error: error instanceof Error ? error.message : String(error),
+      requestId: gatewayRequestId,
+      diagnostics: {
+        correlationId,
+        requestId: gatewayRequestId,
+        route,
+        providerCalls: [],
+      },
+    });
   }
 });
 

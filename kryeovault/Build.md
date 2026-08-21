@@ -4,12 +4,12 @@
 
 ## Recorded package state
 
-- Source checkout version: `0.15.91`
-- Installer: `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.91.exe`
-- Installer bytes: `272229232`
-- Installer SHA-256: `7FF778595F8909DF5F898FDD472E08581512D226977F15DD95C95C8F3239CF3C`
-- Packaged app.asar bytes: `202591651`
-- Packaged app.asar SHA-256: `7F6C86B80EB0B68826B336CAC696A2F158233CF2EE725F8D1B219EE72E8B8E95`
+- Source checkout version: `0.15.98`
+- Installer: `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.98.exe`
+- Installer bytes: `272235125`
+- Installer SHA-256: `B20854EC5DCA2EB14B833BAF94419651E04F8BC258943CF5E7725DB06BA1A46C`
+- Packaged app.asar bytes: `202621430`
+- Packaged app.asar SHA-256: `998C5FDA57E20AD1A82A95F263A04BDEDD2F6F5ABE33E1DF146033DB8E6D6666`
 - Installed executable: `C:\Users\reece\AppData\Local\Programs\Kryeo\Kryeo.exe`
 - Installed product version before installing this release: `0.15.78.0`
 - Installed package: `C:\Users\reece\AppData\Local\Programs\Kryeo\resources\app.asar`

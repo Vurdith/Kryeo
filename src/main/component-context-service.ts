@@ -8,7 +8,16 @@ function cleanLabel(value: string): string {
 function canonicalName(component: ComponentCandidate): string {
   const remembered = component.remembered ? cleanLabel(component.exportName || '') : '';
   if (remembered) return remembered;
-  const aiName = cleanLabel(component.aiSuggestedName || component.aiModelSuggestedName || component.familyName || '');
+  // `aiModelSuggestedName` is the raw proposal, not an accepted decision.
+  // The hosted resolver deliberately clears the production fields when a
+  // packet is incomplete or challenged without a complete replacement. Never
+  // resurrect that stale proposal during the later context pass.
+  const unresolved = component.analysisSource === 'local-provisional'
+    || component.analysisSource === 'unavailable'
+    || ['provisional', 'queued'].includes(component.analysisState || '');
+  const aiName = unresolved
+    ? ''
+    : cleanLabel(component.aiSuggestedName || component.familyName || '');
   if (aiName) return aiName;
   return '';
 }
@@ -75,14 +84,27 @@ export function applyComponentSceneContext(
         ? 'Using the AI semantic identity for this visual family.'
         : 'No trustworthy AI semantic name was available; Kryeo did not invent one.';
 
-    const identity = buildProductionIdentity(component);
+    // Build from the selected semantic name, not from a persisted Affinity
+    // label or raw model proposal that may still be present on the candidate.
+    const identity = buildProductionIdentity({ ...component, exportName: selectedName });
     component.familyName = identity.displayName;
     component.layerLabel = identity.displayName;
     component.exportName = identity.displayName;
     component.codeName = identity.codeName;
     component.namingIssues = identity.issues;
     component.robloxClassReason = identity.robloxClassReason;
-    component.automationIssues = component.exportTarget === false ? [] : [...identity.issues];
+    const semanticIssues = [
+      component.semanticConflict
+        ? (component.semanticConflictMessage || 'Visual and semantic evidence disagree; one complete decision is required.')
+        : '',
+      component.assetType === 'Unknown' || component.role === 'Unknown'
+        ? 'The AI did not provide one complete asset type and Roblox role decision.'
+        : '',
+      ['needs-review', 'provisional', 'queued'].includes(component.analysisState || '')
+        ? 'This visual family does not have one complete accepted decision.'
+        : '',
+    ].filter(Boolean);
+    component.automationIssues = [...new Set([...identity.issues, ...semanticIssues])];
     component.automationState = component.automationIssues.length ? 'exception' : 'ready';
   }
   return components;

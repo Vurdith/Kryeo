@@ -432,6 +432,8 @@ export interface HostedFamilyAnalysisRequest {
   includeDocumentContext?: boolean;
   maxMemberImages?: number;
   hostedScanId?: string;
+  /** Stable desktop-to-gateway correlation for one scan or evidence request. */
+  correlationId?: string;
   serviceTier?: 'default' | 'flex' | 'priority' | 'scale';
 }
 
@@ -442,6 +444,7 @@ export interface HostedFamilyBatchReviewRequest extends HostedFamilyAnalysisRequ
 
 export interface HostedFamilyEvidenceRequest {
   hostedScanId?: string;
+  correlationId?: string;
   challengeReasons?: string[];
   peerDecisionNames?: string[];
   siblingOrdinal?: number;
@@ -514,6 +517,33 @@ export interface HostedFamilyAnalysisResponse {
   scanCommittedCostUsd?: number;
   scanProviderRequests?: number;
   usage?: HostedAiUsage;
+  diagnostics?: HostedAnalysisDiagnostics;
+}
+
+export interface HostedProviderCallDiagnostic {
+  requestId?: string;
+  model?: string;
+  transport?: string;
+  attempts: number;
+  httpStatuses: number[];
+  requestBytes?: number;
+  responseBytes?: number;
+  durationMs?: number;
+  parsed?: boolean;
+  error?: string;
+}
+
+export interface HostedAnalysisDiagnostics {
+  correlationId?: string;
+  requestId?: string;
+  route?: string;
+  reviewTier?: HostedReviewTier;
+  requestedFamilies?: number;
+  cachedFamilies?: number;
+  analyzedFamilies?: number;
+  incompleteFamilies?: string[];
+  providerCalls?: HostedProviderCallDiagnostic[];
+  recovery?: Record<string, number>;
 }
 
 export interface DocumentReconciliationIssue {
@@ -603,7 +633,7 @@ export interface ComponentScanTraceEntry {
   at: string;
   stage: string;
   message: string;
-  data?: Record<string, string | number | boolean>;
+  data?: Record<string, unknown>;
 }
 
 export type DeveloperLogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -615,13 +645,17 @@ export interface DeveloperLogEntry {
   source: string;
   event: string;
   message: string;
+  correlationId?: string;
   data?: unknown;
 }
 
 export interface DeveloperLogSnapshot {
   enabled: boolean;
   entries: DeveloperLogEntry[];
+  totalEntries: number;
   filePath: string;
+  fileBytes?: number;
+  maxFileBytes?: number;
 }
 
 export interface ScanIntentAnswer {
@@ -712,6 +746,7 @@ export interface ApplyLayerNamesRequest {
 }
 
 export interface ComponentScanDiagnostics {
+  correlationId?: string;
   totalMs: number;
   stages: {
     contextCaptureMs: number;
@@ -1021,7 +1056,8 @@ export interface KryeoApi {
   setDeveloperMode(enabled: boolean): Promise<DeveloperLogSnapshot>;
   getDeveloperLog(): Promise<DeveloperLogSnapshot>;
   clearDeveloperLog(): Promise<DeveloperLogSnapshot>;
-  onDeveloperLog(listener: (entry: DeveloperLogEntry) => void): () => void;
+  setDeveloperLogStreaming(enabled: boolean): void;
+  onDeveloperLog(listener: (entries: DeveloperLogEntry[]) => void): () => void;
   cancelJob(id: string): Promise<boolean>;
   savePreset(preset: Omit<WorkflowPreset, 'id' | 'updatedAt'> & { id?: string }): Promise<WorkspaceSnapshot>;
   deletePreset(id: string): Promise<WorkspaceSnapshot>;

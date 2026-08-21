@@ -15,8 +15,9 @@ const api: KryeoApi = {
   setDeveloperMode: (enabled) => ipcRenderer.invoke('kryeo:set-developer-mode', enabled),
   getDeveloperLog: () => ipcRenderer.invoke('kryeo:get-developer-log'),
   clearDeveloperLog: () => ipcRenderer.invoke('kryeo:clear-developer-log'),
+  setDeveloperLogStreaming: (enabled) => ipcRenderer.send('kryeo:set-developer-log-streaming', enabled),
   onDeveloperLog: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, entry: Parameters<typeof listener>[0]) => listener(entry);
+    const handler = (_event: Electron.IpcRendererEvent, entries: Parameters<typeof listener>[0]) => listener(entries);
     ipcRenderer.on('kryeo:developer-log', handler);
     return () => ipcRenderer.removeListener('kryeo:developer-log', handler);
   },

@@ -11,7 +11,11 @@ import type {
   HostedFamilyEvidenceResult,
 } from '../shared/types';
 import { isMeaninglessName } from './name-quality.ts';
-import { componentAssetTypes, normalizeAiName, strictProductionName } from './asset-intelligence-service.ts';
+import {
+  componentAssetTypes,
+  normalizeAiName,
+  strictProductionName,
+} from './asset-intelligence-service.ts';
 
 function isOpaqueModelName(value: string): boolean {
   const compact = value.replace(/\s+/g, '');
@@ -894,8 +898,12 @@ export function resolveChallengedFamilyAnalysis(
     visualDescription: challenge.visualDescription,
     confidence: challenge.confidence,
     evidence: challenge.evidence,
-    conflict: true,
-    conflictMessage: challenge.conflictMessage || `Independent visual review replaced the primary ${primary.assetType} decision.`,
+    // The reviewer has supplied a complete replacement, so the resolver has
+    // chosen it. Keep the replacement accepted; retaining `conflict: true`
+    // here used to turn every valid reviewer correction into an unresolved
+    // export exception even though name, type, role, and members were atomic.
+    conflict: false,
+    conflictMessage: '',
     reviewNeeded: false,
     alternatives: challenge.alternatives,
     modelFamilyName: primary.modelFamilyName || primary.familyName,
@@ -908,13 +916,30 @@ export function resolveIndependentFamilyAnalysis(
   primary: HostedFamilyAnalysis,
   reviewer: HostedFamilyAnalysis | undefined,
 ): HostedFamilyAnalysis {
+  const primaryComplete = primary.assetType !== 'Unknown'
+    && primary.role !== 'Unknown'
+    && strictProductionName(primary.familyName || '', primary.assetType).issues.length === 0;
   const complete = Boolean(reviewer)
     && reviewer!.assetType !== 'Unknown'
     && reviewer!.role !== 'Unknown'
-    && !reviewer!.reviewNeeded
     && !reviewer!.conflict
     && strictProductionName(reviewer!.familyName || '', reviewer!.assetType).issues.length === 0;
   if (!complete || !reviewer) {
+    if (primaryComplete) {
+      // The resolver must choose one whole decision. A reviewer that returns
+      // criticism, an invalid row, or no row cannot partially erase a usable
+      // primary packet; retain that original atomically and record the failed
+      // challenge in the reason/normalization metadata for developer review.
+      return {
+        ...primary,
+        conflict: false,
+        conflictMessage: '',
+        reviewNeeded: false,
+        alternatives: reviewer?.alternatives?.length ? reviewer.alternatives : primary.alternatives,
+        reason: `${primary.reason} The independent visual review did not return a complete replacement, so Kryeo retained the complete primary decision atomically.`,
+        normalizationReason: 'The reviewer response was incomplete; the complete primary name, type, role, grouping, and member names were retained together.',
+      };
+    }
     return {
       ...primary,
       conflict: true,
@@ -930,11 +955,17 @@ export function resolveIndependentFamilyAnalysis(
     ...reviewer,
     familyId: primary.familyId,
     fingerprint: primary.fingerprint,
-    conflict: changed,
-    conflictMessage: changed
-      ? `Independent visual review replaced the primary ${primary.assetType} decision.`
-      : '',
+    // A complete reviewer packet is the deterministic resolver's selected
+    // decision, whether it confirms or replaces the primary. A replacement
+    // is recorded in normalizationReason, not left marked as a live conflict.
+    conflict: false,
+    conflictMessage: '',
+    // A reviewer may mark a genuinely close visual reading as uncertain while
+    // still returning a complete best decision. The uncertainty remains
+    // visible through confidence/alternatives, but it must not block the
+    // atomic replacement or leave every challenged family unresolved.
     reviewNeeded: false,
+    alternatives: reviewer.alternatives?.length ? reviewer.alternatives : primary.alternatives,
     modelFamilyName: primary.modelFamilyName || primary.familyName,
     modelAssetType: primary.modelAssetType || primary.assetType,
     normalizationReason: changed

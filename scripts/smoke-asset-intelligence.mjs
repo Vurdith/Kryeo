@@ -33,6 +33,11 @@ assert.ok(strictProductionName('Slot Sample 1', 'Slot').issues.some((issue) => /
 assert.deepEqual(strictProductionName('Sample Slot 1', 'Slot').issues, []);
 assert.deepEqual(strictProductionName('Close Button Hover', 'Button').issues, []);
 assert.ok(strictProductionName('Border 1', 'Border').issues.some((issue) => /descriptive identity/i.test(issue)));
+assert.deepEqual(strictProductionName('ParentBorder Top', 'Border').issues, []);
+assert.deepEqual(strictProductionName('ParentBorder Side', 'Border').issues, []);
+assert.deepEqual(strictProductionName('ParentBorder Frame', 'Frame').issues, []);
+assert.deepEqual(strictProductionName('PanelBackground Texture', 'Texture').issues, []);
+assert.deepEqual(strictProductionName('Decorative Ornament Center', 'Ornament').issues, []);
 
 assert.ok(strictProductionName('Layer 12', 'Unknown').issues.length > 0);
 assert.ok(strictProductionName('Pixel Art', 'Unknown').issues.length > 0);

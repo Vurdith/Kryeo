@@ -35,6 +35,32 @@ const hostedUsageSchema = z.object({
   providerCostUsd: z.number().nonnegative().optional(),
 }).passthrough();
 
+const hostedProviderCallDiagnosticSchema = z.object({
+  requestId: z.string().optional(),
+  model: z.string().optional(),
+  transport: z.string().optional(),
+  attempts: z.number().int().nonnegative(),
+  httpStatuses: z.array(z.number().int().nonnegative()),
+  requestBytes: z.number().int().nonnegative().optional(),
+  responseBytes: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  parsed: z.boolean().optional(),
+  error: z.string().optional(),
+}).passthrough();
+
+const hostedDiagnosticsSchema = z.object({
+  correlationId: z.string().optional(),
+  requestId: z.string().optional(),
+  route: z.string().optional(),
+  reviewTier: z.enum(['lite', 'escalation']).optional(),
+  requestedFamilies: z.number().int().nonnegative().optional(),
+  cachedFamilies: z.number().int().nonnegative().optional(),
+  analyzedFamilies: z.number().int().nonnegative().optional(),
+  incompleteFamilies: z.array(z.string()).optional(),
+  providerCalls: z.array(hostedProviderCallDiagnosticSchema).optional(),
+  recovery: z.record(z.string(), z.number().int().nonnegative()).optional(),
+}).passthrough();
+
 const familyAnalysisSchema = z.object({
   requestId: z.string(),
   cached: z.number().int().nonnegative(),
@@ -79,6 +105,7 @@ const familyAnalysisSchema = z.object({
   scanCommittedCostUsd: z.number().nonnegative().optional(),
   scanProviderRequests: z.number().int().nonnegative().optional(),
   usage: hostedUsageSchema.optional(),
+  diagnostics: hostedDiagnosticsSchema.optional(),
 });
 
 const familyEvidenceSchema = z.object({
@@ -140,6 +167,35 @@ const DETAILED_FAMILY_BATCH_SIZE = 2;
 const SIMPLE_FAMILY_BATCH_SIZE = 8;
 const PROGRESSIVE_FAMILY_CONCURRENCY = 2;
 
+function compactGatewayMember(
+  member: ComponentVisualFamily['members'][number],
+  preferDetailedPreview: boolean,
+): ComponentVisualFamily['members'][number] {
+  // The gateway only needs one labelled target image per member. Keeping both
+  // the UI thumbnail and the hosted thumbnail in every request made large
+  // documents hit the gateway body limit late in a scan, after earlier batches
+  // had already succeeded.
+  const previewUrl = preferDetailedPreview
+    ? (member.previewUrl || member.hostedPreviewUrl || '')
+    : (member.hostedPreviewUrl || member.previewUrl || '');
+  return {
+    ...member,
+    previewUrl,
+    hostedPreviewUrl: undefined,
+    analysisPreviewUrls: [],
+  };
+}
+
+function compactGatewayContextMember(member: NonNullable<ComponentVisualFamily['contextMembers']>[number]): Omit<typeof member, 'previewUrl' | 'hostedPreviewUrl' | 'analysisPreviewUrls'> {
+  const {
+    previewUrl: _previewUrl,
+    hostedPreviewUrl: _hostedPreviewUrl,
+    analysisPreviewUrls: _analysisPreviewUrls,
+    ...metadata
+  } = member;
+  return metadata;
+}
+
 function mergeFamilyAnalysisResponse(
   target: HostedFamilyAnalysisResponse,
   response: HostedFamilyAnalysisResponse,
@@ -163,6 +219,22 @@ function mergeFamilyAnalysisResponse(
   }
   if (typeof response.scanProviderRequests === 'number') {
     target.scanProviderRequests = Math.max(target.scanProviderRequests || 0, response.scanProviderRequests);
+  }
+  if (response.diagnostics) {
+    target.diagnostics = {
+      ...target.diagnostics,
+      ...response.diagnostics,
+      providerCalls: [
+        ...(target.diagnostics?.providerCalls || []),
+        ...(response.diagnostics.providerCalls || []),
+      ],
+      incompleteFamilies: [
+        ...new Set([
+          ...(target.diagnostics?.incompleteFamilies || []),
+          ...(response.diagnostics.incompleteFamilies || []),
+        ]),
+      ],
+    };
   }
 }
 
@@ -253,7 +325,7 @@ export class HostedAiService {
     return this.status();
   }
 
-  private async request<T>(route: string, init: RequestInit, timeoutMs = 120_000, externalSignal?: AbortSignal): Promise<T> {
+  private async request<T>(route: string, init: RequestInit, timeoutMs = 120_000, externalSignal?: AbortSignal, correlationId = ''): Promise<T> {
     const configuration = await this.loadConfiguration();
     const controller = new AbortController();
     let timedOut = false;
@@ -270,6 +342,7 @@ export class HostedAiService {
         headers: {
           'content-type': 'application/json',
           'ngrok-skip-browser-warning': 'true',
+          ...(correlationId ? { 'x-kryeo-correlation-id': correlationId } : {}),
           ...(configuration.token ? { authorization: `Bearer ${configuration.token}` } : {}),
           ...init.headers,
         },
@@ -346,18 +419,8 @@ export class HostedAiService {
       ...family,
       members: [...new Map(family.members.map((member) => [member.visualHash, member])).values()]
         .slice(0, 6)
-        .map((member) => ({
-          ...member,
-          analysisPreviewUrls: request.reviewTier === 'escalation' && (
-            member.bounds.width > 640 || member.bounds.height > 640
-          )
-            ? member.analysisPreviewUrls.slice(0, 2)
-            : [],
-        })),
-      contextMembers: (family.contextMembers || []).slice(0, 4).map((member) => ({
-        ...member,
-        analysisPreviewUrls: [],
-      })),
+        .map((member) => compactGatewayMember(member, family.assetBoundary === 'composed-parent')),
+      contextMembers: (family.contextMembers || []).slice(0, 4).map(compactGatewayContextMember),
     }));
     // The gateway owns bounded provider recovery. Retrying the complete desktop
     // request here can repurchase a successful cloud call when the response was
@@ -365,7 +428,7 @@ export class HostedAiService {
     const result = await this.request<unknown>('/v1/families/analyze', {
       method: 'POST',
       body: JSON.stringify({ ...request, families: compactFamilies }),
-    }, 50_000, signal);
+    }, 50_000, signal, request.correlationId || request.hostedScanId || '');
     return familyAnalysisSchema.parse(result) as HostedFamilyAnalysisResponse;
   }
 
@@ -402,7 +465,7 @@ export class HostedAiService {
     const result = await this.request<unknown>('/v1/families/explain', {
       method: 'POST',
       body: JSON.stringify(request),
-    }, 75_000, signal);
+    }, 75_000, signal, request.correlationId || request.hostedScanId || '');
     return familyEvidenceSchema.parse(result) as HostedFamilyEvidenceResult;
   }
 
@@ -414,16 +477,13 @@ export class HostedAiService {
       ...family,
       members: [...new Map(family.members.map((member) => [member.visualHash, member])).values()]
         .slice(0, 1)
-        .map((member) => ({ ...member, analysisPreviewUrls: [] })),
-      contextMembers: (family.contextMembers || []).slice(0, 4).map((member) => ({
-        ...member,
-        analysisPreviewUrls: [],
-      })),
+        .map((member) => compactGatewayMember(member, family.assetBoundary === 'composed-parent')),
+      contextMembers: (family.contextMembers || []).slice(0, 4).map(compactGatewayContextMember),
     }));
     const result = await this.request<unknown>('/v1/families/review', {
       method: 'POST',
       body: JSON.stringify({ ...request, families: compactFamilies, reviewTier: 'escalation' }),
-    }, 50_000, signal);
+    }, 50_000, signal, request.correlationId || request.hostedScanId || '');
     return familyAnalysisSchema.parse(result) as HostedFamilyAnalysisResponse;
   }
 

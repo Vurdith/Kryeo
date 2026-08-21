@@ -12,12 +12,12 @@ import { LibraryService } from './library-service';
 import { ConnectorService } from './connector-service';
 import { WorkspaceService } from './workspace-service';
 import { buildComponentScan, removeScanDirectory, resetScanDirectory } from './component-scan-service';
-import { LocalAiService, roleForAssetType } from './local-ai-service';
+import { LocalAiService } from './local-ai-service';
 import { HostedAiService } from './hosted-ai-service';
 import { applyComponentIntelligence } from './component-intelligence-service';
 import { applyComponentSceneContext, componentCategory, componentSubcategory } from './component-context-service';
 import { applyScanIntent, normalizeScanIntent, scanIntentContext, structureFingerprint } from './scan-intent-service';
-import { buildProductionIdentity } from './asset-intelligence-service';
+import { buildProductionIdentity, strictProductionName } from './asset-intelligence-service';
 import { DeveloperLogService } from './developer-log-service';
 import {
   applyApprovedFamilies,
@@ -55,6 +55,7 @@ import type {
   ConfiguredToolRequest,
   HostedAiConfiguration,
   HostedAiStatus,
+  HostedFamilyAnalysis,
   HostedFamilyAnalysisRequest,
   HostedFamilyEvidenceRequest,
   HostedReviewTier,
@@ -76,6 +77,20 @@ function prepareComponentsForReview(components: ComponentCandidate[]): Component
   return applyAssetBoundaries(applyComponentIntelligence(structurallyAssessed, false));
 }
 
+function hasCompleteHostedDiagnosticPacket(analysis: HostedFamilyAnalysis | undefined): boolean {
+  return Boolean(
+    analysis
+    && typeof analysis.familyName === 'string'
+    && analysis.familyName.trim().length > 0
+    && analysis.assetType !== 'Unknown'
+    && analysis.role !== 'Unknown'
+    && strictProductionName(analysis.familyName, analysis.assetType).issues.length === 0
+    && Array.isArray(analysis.memberNames)
+    && typeof analysis.reason === 'string'
+    && analysis.reason.trim().length > 0,
+  );
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const library = new LibraryService(() => app.getPath('userData'));
 const affinity = new AffinityService(() => library.storagePaths());
@@ -88,6 +103,17 @@ const developerLogger = new DeveloperLogService(() => app.getPath('logs'));
 const execFileAsync = promisify(execFile);
 const LOCAL_CONTEXT_MAX_VISUALS = Math.max(0, Number(process.env.KRYEO_LOCAL_CONTEXT_MAX_VISUALS || 160));
 const activeComponentScans = new Map<number, AbortController>();
+const activeIpcCorrelations = new Map<number, string>();
+
+function recordWorkflowDiagnostic(
+  senderId: number,
+  event: string,
+  message: string,
+  data?: Record<string, unknown>,
+): void {
+  const correlationId = activeIpcCorrelations.get(senderId);
+  developerLogger.record('info', 'workflow', event, message, data, correlationId);
+}
 
 process.on('unhandledRejection', (reason) => {
   developerLogger.record('error', 'process', 'unhandled-rejection', 'Unhandled promise rejection.', { reason });
@@ -196,10 +222,13 @@ function selectHostedFamilies(
 
 function safeHostedFailureMessage(value: unknown): string {
   const raw = value instanceof Error ? value.message : String(value || 'Cloud analysis failed.');
+  if (/413|request body|payload too large|entity too large/i.test(raw)) {
+    return 'The visual batch was too large for the gateway; Kryeo will retry the affected families with a compact recovery request.';
+  }
   if (/429|rate.?limit|insufficient_quota|provider.*busy/i.test(raw)) {
     return 'The cloud visual provider is temporarily busy; affected families remain unresolved and can be rescanned.';
   }
-  if (/timed? out|did not answer within|safety limit|abort/i.test(raw)) {
+  if (/timed? out|did not answer within|did not complete.*in time|safety limit|abort/i.test(raw)) {
     return 'A cloud visual batch did not finish in time; affected families remain unresolved and can be rescanned.';
   }
   if (/schema|json|complete decision|incomplete/i.test(raw)) {
@@ -427,30 +456,38 @@ ipcMain.handle = ((channel: string, listener: (event: Electron.IpcMainInvokeEven
   channel,
   async (event, ...args) => {
     const startedAt = Date.now();
+    const correlationId = randomUUID();
+    activeIpcCorrelations.set(event.sender.id, correlationId);
     const captureRequest = channel !== 'kryeo:clear-developer-log';
     const captureResult = channel !== 'kryeo:get-developer-log' && channel !== 'kryeo:clear-developer-log';
     if (captureRequest) {
-      developerLogger.record('debug', 'ipc', 'request', `IPC request: ${channel}`, { channel, args });
+      developerLogger.record('debug', 'ipc', 'request', `IPC request: ${channel}`, { channel, args, correlationId }, correlationId);
     }
     try {
       const result = await listener(event, ...args);
       if (captureResult) {
         developerLogger.record('debug', 'ipc', 'response', `IPC response: ${channel}`, {
           channel,
+          correlationId,
           durationMs: Date.now() - startedAt,
           result: summarizeDeveloperHandlerResult(channel, result),
-        });
+        }, correlationId);
       }
       return result;
     } catch (error) {
       if (captureResult) {
         developerLogger.record('error', 'ipc', 'failure', `IPC failure: ${channel}`, {
           channel,
+          correlationId,
           durationMs: Date.now() - startedAt,
           error,
-        });
+        }, correlationId);
       }
       throw error;
+    } finally {
+      if (activeIpcCorrelations.get(event.sender.id) === correlationId) {
+        activeIpcCorrelations.delete(event.sender.id);
+      }
     }
   },
 )) as typeof ipcMain.handle;
@@ -461,6 +498,9 @@ ipcMain.handle('kryeo:set-developer-mode', async (_event, enabled: unknown) => {
 });
 ipcMain.handle('kryeo:get-developer-log', () => developerLogger.snapshot());
 ipcMain.handle('kryeo:clear-developer-log', () => developerLogger.clear());
+ipcMain.on('kryeo:set-developer-log-streaming', (event, enabled: unknown) => {
+  if (typeof enabled === 'boolean') developerLogger.setRendererStreaming(event.sender.id, enabled);
+});
 
 ipcMain.handle('kryeo:get-status', () => affinity.getStatus());
 ipcMain.handle('kryeo:reconnect', () => affinity.reconnect());
@@ -475,7 +515,7 @@ ipcMain.handle('kryeo:analyze-components', (_event, input: unknown) => {
   if (!Array.isArray(input)) throw new Error('Invalid local vision review.');
   return localAi.analyze(input as ComponentCandidate[]);
 });
-ipcMain.handle('kryeo:apply-component-organization', async (_event, input: unknown) => {
+ipcMain.handle('kryeo:apply-component-organization', async (event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid component organization request.');
   const request = input as ApplyComponentOrganizationRequest;
   if (typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.components)) {
@@ -493,9 +533,15 @@ ipcMain.handle('kryeo:apply-component-organization', async (_event, input: unkno
     });
     return { name: component.name.trim() || 'UI Component', memberPaths };
   });
-  return affinity.applyComponentOrganization({ documentSessionUuid: request.documentSessionUuid, components });
+  const result = await affinity.applyComponentOrganization({ documentSessionUuid: request.documentSessionUuid, components });
+  recordWorkflowDiagnostic(event.sender.id, 'organization-applied', 'Affinity component organization completed.', {
+    componentCount: components.length,
+    memberPathCount: components.reduce((total, component) => total + component.memberPaths.length, 0),
+    ok: result?.ok !== false,
+  });
+  return result;
 });
-ipcMain.handle('kryeo:apply-layer-names', async (_event, input: unknown) => {
+ipcMain.handle('kryeo:apply-layer-names', async (event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid layer naming request.');
   const request = input as ApplyLayerNamesRequest;
   if (typeof request.documentSessionUuid !== 'string' || !Array.isArray(request.layers)) {
@@ -507,7 +553,12 @@ ipcMain.handle('kryeo:apply-layer-names', async (_event, input: unknown) => {
     }
     return { name: layer.name.trim(), path: layer.path };
   });
-  return affinity.applyLayerNames({ documentSessionUuid: request.documentSessionUuid, layers });
+  const result = await affinity.applyLayerNames({ documentSessionUuid: request.documentSessionUuid, layers });
+  recordWorkflowDiagnostic(event.sender.id, 'layer-names-applied', 'Affinity layer naming completed.', {
+    layerCount: layers.length,
+    ok: result?.ok !== false,
+  });
+  return result;
 });
 ipcMain.handle('kryeo:forget-component-decision', (_event, visualHash: unknown) => {
   if (typeof visualHash !== 'string' || !/^[a-f0-9]{64}$/i.test(visualHash)) throw new Error('Invalid learned visual.');
@@ -520,7 +571,7 @@ ipcMain.handle('kryeo:set-component-decision-scope', (_event, visualHash: unknow
   return workspace.setComponentDecisionScope(visualHash, scope as 'project' | 'global');
 });
 ipcMain.handle('kryeo:clear-component-decisions', () => workspace.clearComponentDecisions());
-ipcMain.handle('kryeo:save-component-review', (_event, input: unknown) => {
+ipcMain.handle('kryeo:save-component-review', (event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid component review.');
   const request = input as SaveComponentReviewRequest;
   if (
@@ -538,7 +589,13 @@ ipcMain.handle('kryeo:save-component-review', (_event, input: unknown) => {
       throw new Error('Invalid component review entry.');
     }
   }
-  return workspace.saveComponentReview(request);
+  const result = workspace.saveComponentReview(request);
+  recordWorkflowDiagnostic(event.sender.id, 'component-review-saved', 'Component review state persisted.', {
+    componentCount: request.components.length,
+    includedCount: request.includedIds.length,
+    decisionStatus: request.decisionStatus || 'generated',
+  });
+  return result;
 });
 ipcMain.handle('kryeo:save-scan-intent-profile', (_event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid scan intent profile.');
@@ -559,7 +616,7 @@ ipcMain.handle('kryeo:save-scan-intent-profile', (_event, input: unknown) => {
     answers: profile.answers,
   });
 });
-ipcMain.handle('kryeo:create-component-assets', (_event, input: unknown) => {
+ipcMain.handle('kryeo:create-component-assets', (event, input: unknown) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid component asset request.');
   const request = input as CreateComponentAssetsRequest;
   if (!request.documentSessionUuid || !request.documentTitle || !request.project || !Array.isArray(request.components) || !Array.isArray(request.includedIds) || !request.structureFingerprint) {
@@ -586,6 +643,13 @@ ipcMain.handle('kryeo:create-component-assets', (_event, input: unknown) => {
     });
   const selected = requestedAssets.filter((component) => component.automationState !== 'exception' && !(component.automationIssues?.length));
   const exceptionCount = requestedAssets.length - selected.length;
+  recordWorkflowDiagnostic(event.sender.id, 'asset-build-requested', 'Automatic component asset creation requested.', {
+    requestedCount: requestedAssets.length,
+    selectedCount: selected.length,
+    exceptionCount,
+    project,
+    documentTitle,
+  });
   if (!selected.length) throw new Error(exceptionCount
     ? `Kryeo isolated ${exceptionCount} unresolved asset${exceptionCount === 1 ? '' : 's'}. Resolve the exceptions before building.`
     : 'Select at least one export target before creating assets.');
@@ -610,6 +674,11 @@ ipcMain.handle('kryeo:create-component-assets', (_event, input: unknown) => {
       })));
       if (cancelled()) throw new Error('Asset creation cancelled safely before the staged files were committed.');
       const exportedIds = new Set(exported.map((asset) => asset.id));
+      recordWorkflowDiagnostic(event.sender.id, 'asset-build-affinity-exported', 'Affinity returned staged component assets.', {
+        plannedCount: planned.length,
+        exportedCount: exportedIds.size,
+        exportedIds: [...exportedIds],
+      });
       if (exportedIds.size !== planned.length || planned.some((asset) => !exportedIds.has(asset.id))) {
         throw new Error(`Affinity returned ${exportedIds.size} of ${planned.length} staged assets. Kryeo left the existing library unchanged.`);
       }
@@ -624,6 +693,11 @@ ipcMain.handle('kryeo:create-component-assets', (_event, input: unknown) => {
         }),
       });
       committed = true;
+      recordWorkflowDiagnostic(event.sender.id, 'asset-build-committed', 'Component asset batch committed to the library.', {
+        assetCount: manifest.assetCount,
+        manifestPath: manifest.manifestPath,
+        exceptionCount,
+      });
       const acceptedComponents = selected.filter((component) => exportedIds.has(component.id));
       await workspace.saveComponentReview({
         project,
@@ -637,7 +711,10 @@ ipcMain.handle('kryeo:create-component-assets', (_event, input: unknown) => {
       const now = new Date().toISOString();
       return { ok: true, title: 'Create scanned assets', output: `Created ${manifest.assetCount} editable asset${manifest.assetCount === 1 ? '' : 's'}${exceptionCount ? `; isolated ${exceptionCount} unresolved exception${exceptionCount === 1 ? '' : 's'}` : ''} and regenerated the complete Roblox project manifest at ${manifest.manifestPath}.`, startedAt: now, completedAt: now };
     } finally {
-      if (!committed && !commitAttempted) await library.discardComponentAssetTransaction(planned);
+      if (!committed && !commitAttempted) {
+        recordWorkflowDiagnostic(event.sender.id, 'asset-build-rolled-back', 'Staged component assets were discarded before commit.', { plannedCount: planned.length });
+        await library.discardComponentAssetTransaction(planned);
+      }
     }
   });
 });
@@ -897,6 +974,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
   const requested = typeof input === 'object' && input !== null ? input as ComponentScanRequest : undefined;
   const scope = input === 'selection' || requested?.scope === 'selection' ? 'selection' : 'document';
   const developerMode = requested?.developerMode === true;
+  const scanId = activeIpcCorrelations.get(event.sender.id) || randomUUID();
   const directory = path.join(app.getPath('desktop'), 'Kryeo', 'ComponentScanStaging', randomUUID());
   const scanStartedAt = Date.now();
   const stageTimings = {
@@ -921,12 +999,12 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
   let diagnosticsBudgetLimitedFamilies = 0;
   let diagnosticsFailureMessages: string[] = [];
   const traceEntries: NonNullable<ComponentScanDiagnostics['trace']> = [];
-  const trace = (stage: string, message: string, data?: Record<string, string | number | boolean>) => {
+  const trace = (stage: string, message: string, data?: Record<string, unknown>) => {
     if (!developerMode) return;
     const entry = { at: new Date().toISOString(), stage, message, ...(data ? { data } : {}) };
     traceEntries.push(entry);
     if (traceEntries.length > 500) traceEntries.shift();
-    developerLogger.record('debug', 'component-scan', stage, message, data);
+    developerLogger.record('debug', 'component-scan', stage, message, { correlationId: scanId, ...data }, scanId);
     if (!event.sender.isDestroyed()) event.sender.send('kryeo:scan-progress', { phase: 'preparing', label: 'Developer trace', detail: message, progress: 0, trace: entry });
   };
   const progress = (phase: string, label: string, detail: string, value: number) => {
@@ -935,7 +1013,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       event.sender.send('kryeo:scan-progress', { phase, label, detail, progress: value });
     }
   };
-  trace('scan', 'Scan requested.', { scope, developerMode });
+  trace('scan', 'Scan requested.', { scope, developerMode, correlationId: scanId });
   progress('preparing', 'Preparing scan', `Creating a clean workspace for the ${scope}.`, 4);
   await resetScanDirectory(directory);
   try {
@@ -967,12 +1045,6 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     progress('local-analysis', 'Preparing visual families', `Preparing ${batch.components.length} candidates once for grouping and cloud review.`, 43);
     const imagePreparationStartedAt = Date.now();
     const scan = await buildComponentScan(batch, snapshot.componentDecisions, scanController.signal);
-    trace('local-analysis', 'Local hierarchy and visual families prepared.', {
-      components: scan.components.length,
-      uniqueVisuals: scan.uniqueVisuals,
-      duplicateFamilies: scan.duplicateFamilies,
-      elapsedMs: stageTimings.imagePreparationMs,
-    });
     const project = batch.sourceName || scan.documentTitle || 'General';
     const intentFingerprint = structureFingerprint(scan.components);
     const cachedIntent = snapshot.scanIntentProfiles.find((profile) => (
@@ -983,6 +1055,13 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     const scanIntent = normalizeScanIntent(requested?.intent || cachedIntent);
     scan.components = applyScanIntent(scan.components, scanIntent);
     stageTimings.imagePreparationMs = Date.now() - imagePreparationStartedAt;
+    trace('local-analysis', 'Local hierarchy and visual families prepared.', {
+      components: scan.components.length,
+      uniqueVisuals: scan.uniqueVisuals,
+      duplicateFamilies: scan.duplicateFamilies,
+      elapsedMs: stageTimings.imagePreparationMs,
+      rememberedComponents: scan.components.filter((component) => component.remembered).length,
+    });
     // Local visual analysis already returns a reusable embedding. Running a
     // separate embed pass first made every new visual pay for MobileCLIP twice
     // before the first hosted request could begin.
@@ -992,10 +1071,14 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       try {
         localSuggestions = await localAi.analyze(scan.components);
       } catch (error) {
-        scanNotes.push(`Cloud review continued without optional embedded classifier context: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        scanNotes.push(`Cloud review continued without optional embedded classifier context: ${message}`);
+        trace('local-analysis', 'Optional embedded classifier failed; cloud review continued.', { error: message });
       }
     } else {
-        scanNotes.push(`Skipped optional embedded classifier context for ${scan.uniqueVisuals} unique visuals to keep this large scan responsive; every unresolved family still received cloud review.`);
+      const message = `Skipped optional embedded classifier context for ${scan.uniqueVisuals} unique visuals to keep this large scan responsive; every unresolved family still received cloud review.`;
+      scanNotes.push(message);
+      trace('local-analysis', 'Optional embedded classifier skipped for scan size.', { uniqueVisuals: scan.uniqueVisuals, limit: LOCAL_CONTEXT_MAX_VISUALS });
     }
     stageTimings.localAnalysisMs = Date.now() - localAnalysisStartedAt;
     if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
@@ -1062,7 +1145,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
             budgetLimitedCount: 0,
             estimatedCostUsd: 0,
           } satisfies HostedScanSelection;
-      const hostedScanId = randomUUID();
+      const hostedScanId = scanId;
       const hostedFamilies = selection.selected;
       const hostedTotal = hostedFamilies.length;
       trace('hosted-selection', 'Cloud review plan selected.', {
@@ -1070,6 +1153,13 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         selectedFamilies: hostedTotal,
         localFamilies: selection.localCount,
         budgetLimited: selection.budgetLimitedCount,
+        available: hostedStatus.available,
+        model: hostedStatus.model || '',
+        analysisVersion: hostedStatus.analysisVersion || '',
+        queueDepth: hostedStatus.queueDepth || 0,
+        maxModelRetries: hostedStatus.maxModelRetries ?? 0,
+        scanTargetUsd: hostedStatus.scanTargetUsd ?? 0.01,
+        scanBudgetUsd: hostedStatus.scanBudgetUsd ?? 0.03,
       });
       diagnosticsHostedFamilies = hostedTotal;
       const provisionalBudgetFamilies = selection.budgetLimitedCount;
@@ -1094,6 +1184,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         project,
         documentTitle: scan.documentTitle,
         documentSessionUuid: scan.documentSessionUuid,
+        correlationId: scanId,
         instructions: snapshot.assistantMemories
           .filter((memory) => memory.scope === 'global' || memory.project === project)
           .map((memory) => memory.text)
@@ -1135,12 +1226,19 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
           diagnosticsBudgetLimitedFamilies = budgetLimitedFamilies;
           const globalCompleted = Math.min(completedHostedFamilies + completed, hostedTotal);
           trace('hosted-batch', 'Gateway batch completed.', {
+            reviewTier: tier,
             completed: globalCompleted,
             total: hostedTotal,
             analyses: partial.analyses.length,
             cached: partial.cached,
             failed: partial.failures.reduce((total, failure) => total + failure.familyIds.length, 0),
+            failedFamilyIds: partial.failures.map((failure) => failure.familyIds.join(',')).filter(Boolean).join(';'),
+            failureMessages: partial.failures.map((failure) => safeHostedFailureMessage(failure.message)).filter(Boolean).join(' | '),
+            skippedFamilyIds: (partial.skippedFamilyIds || []).join(','),
+            budgetLimited: Boolean(partial.budgetLimited),
             providerRequests: partial.scanProviderRequests || 0,
+            requestId: partial.requestId || '',
+            providerDiagnostics: partial.diagnostics || null,
           });
           const detail = `The cloud reviewer completed ${globalCompleted} of ${hostedTotal} selected ${hostedTotal === 1 ? 'family' : 'families'}${budgetLimitedFamilies ? `; ${budgetLimitedFamilies} remain local within budget` : ''}.`;
           if (!event.sender.isDestroyed()) {
@@ -1195,10 +1293,114 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       stageTimings.hostedAnalysisMs = Date.now() - hostedAnalysisStartedAt;
       let responseAnalyses = tierResponses.flatMap((response) => response.analyses);
       const familyById = new Map(families.map((family) => [family.id, family]));
+      const hostedFamilyObjects = hostedFamilies.map((candidate) => candidate.family);
+      const primarySkippedIds = new Set(tierResponses.flatMap((response) => response.skippedFamilyIds || []));
+      const primaryFailureMessages = new Map<string, string>();
+      for (const response of tierResponses) {
+        for (const failure of response.failures) {
+          for (const familyId of failure.familyIds) primaryFailureMessages.set(familyId, safeHostedFailureMessage(failure.message));
+        }
+      }
+      const missingPrimaryFamilies = hostedFamilyObjects.filter((family) => (
+        !primarySkippedIds.has(family.id)
+        && !responseAnalyses.some((analysis) => analysis.familyId === family.id)
+      ));
+      const recoveredPrimaryIds = new Set<string>();
+      const recoveryPrimaries: HostedFamilyAnalysis[] = missingPrimaryFamilies.map((family) => ({
+        familyId: family.id,
+        fingerprint: family.fingerprint,
+        familyName: '',
+        assetType: 'Unknown',
+        role: 'Unknown',
+        memberNames: [],
+        diveMode: family.structuralDiveMode || 'keep-together',
+        reason: 'The primary visual batch did not return a complete packet; an independent visual recovery is required.',
+        visualDescription: '',
+        confidence: 0,
+        conflict: true,
+        conflictMessage: primaryFailureMessages.get(family.id) || 'The primary visual batch did not return this family.',
+        reviewNeeded: true,
+        alternatives: [],
+      }));
+      if (missingPrimaryFamilies.length) {
+        trace('review', 'Recovering families missing a primary packet.', {
+          families: missingPrimaryFamilies.length,
+          familyIds: missingPrimaryFamilies.map((family) => family.id).join(','),
+        });
+        progress(
+          'reconciliation',
+          'Recovering missing visual decisions',
+          `The primary classifier missed ${missingPrimaryFamilies.length} ${missingPrimaryFamilies.length === 1 ? 'family' : 'families'}; requesting one complete visual recovery batch.`,
+          80,
+        );
+        for (let offset = 0; offset < recoveryPrimaries.length; offset += 8) {
+          const primaryBatch = recoveryPrimaries.slice(offset, offset + 8);
+          const batchFamilies = primaryBatch.flatMap((primary) => {
+            const family = familyById.get(primary.familyId);
+            return family ? [family] : [];
+          });
+          const challengeReasons = Object.fromEntries(primaryBatch.map((primary) => [
+            primary.familyId,
+            [primary.conflictMessage || 'The primary visual batch did not return a complete packet.'],
+          ]));
+          try {
+            diagnosticsHostedRequests += 1;
+            const recoveryResponse = await hostedAi.reviewFamilies({
+              ...requestBase,
+              families: batchFamilies,
+              reviewTier: 'escalation',
+              hostedScanId,
+              currentAnalyses: primaryBatch,
+              challengeReasons,
+            }, scanController.signal);
+            tierResponses.push(recoveryResponse);
+            const recoveryById = new Map(recoveryResponse.analyses.map((analysis) => [analysis.familyId, analysis]));
+            const resolvedRecovery = primaryBatch.map((primary) => {
+              const resolved = resolveIndependentFamilyAnalysis(primary, recoveryById.get(primary.familyId));
+              return resolved.reviewNeeded
+                ? resolved
+                : {
+                    ...resolved,
+                    conflict: false,
+                    conflictMessage: '',
+                    normalizationReason: 'A complete independent visual recovery replaced a missing primary packet atomically.',
+                  };
+            });
+            responseAnalyses.push(...resolvedRecovery);
+            resolvedRecovery
+              .filter((analysis) => !analysis.reviewNeeded && hasCompleteHostedDiagnosticPacket(analysis))
+              .forEach((analysis) => recoveredPrimaryIds.add(analysis.familyId));
+            hostedProviderCostUsd = Math.max(hostedProviderCostUsd, recoveryResponse.scanProviderCostUsd || 0);
+            diagnosticsProviderRequests = Math.max(diagnosticsProviderRequests, recoveryResponse.scanProviderRequests || 0);
+            diagnosticsFailureMessages.push(...recoveryResponse.failures.map((failure) => safeHostedFailureMessage(failure.message)));
+            trace('review', 'Missing-primary recovery batch completed.', {
+              families: batchFamilies.length,
+              familyIds: batchFamilies.map((family) => family.id).join(','),
+              analyses: recoveryResponse.analyses.length,
+              recovered: resolvedRecovery.filter((analysis) => recoveredPrimaryIds.has(analysis.familyId)).length,
+              failures: recoveryResponse.failures.length,
+              failedFamilyIds: recoveryResponse.failures.map((failure) => failure.familyIds.join(',')).filter(Boolean).join(';'),
+              failureMessages: recoveryResponse.failures.map((failure) => safeHostedFailureMessage(failure.message)).filter(Boolean).join(' | '),
+              requestId: recoveryResponse.requestId || '',
+              providerDiagnostics: recoveryResponse.diagnostics || null,
+            });
+          } catch (error) {
+            diagnosticsFailureMessages.push(safeHostedFailureMessage(error));
+            trace('review', 'Missing-primary recovery batch failed.', {
+              families: batchFamilies.length,
+              familyIds: batchFamilies.map((family) => family.id).join(','),
+              error: safeHostedFailureMessage(error),
+            });
+          }
+        }
+      }
       const batchConsistency = familyBatchConsistencyIssues(responseAnalyses, families);
       const challenges = responseAnalyses.filter((analysis) => (
-        requiresIndependentFamilyReview(analysis, familyById.get(analysis.familyId))
-        || batchConsistency.has(analysis.familyId)
+        !recoveryPrimaries.some((primary) => primary.familyId === analysis.familyId)
+        && (
+          requiresIndependentFamilyReview(analysis, familyById.get(analysis.familyId))
+          || batchConsistency.has(analysis.familyId)
+        )
       ));
       hostedProviderCostUsd = Math.max(0, ...tierResponses.map((response) => response.scanProviderCostUsd || 0));
       diagnosticsProviderRequests = Math.max(
@@ -1260,10 +1462,27 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
             hostedProviderCostUsd = Math.max(hostedProviderCostUsd, response.scanProviderCostUsd || 0);
             diagnosticsProviderRequests = Math.max(diagnosticsProviderRequests, response.scanProviderRequests || 0);
             diagnosticsFailureMessages.push(...response.failures.map((failure) => safeHostedFailureMessage(failure.message)));
-            trace('review', 'Independent review batch completed.', { families: batchFamilies.length, analyses: response.analyses.length, failures: response.failures.length });
+            trace('review', 'Independent review batch completed.', {
+              families: batchFamilies.length,
+              familyIds: batchFamilies.map((family) => family.id).join(','),
+              analyses: response.analyses.length,
+              failures: response.failures.length,
+              failedFamilyIds: response.failures.map((failure) => failure.familyIds.join(',')).filter(Boolean).join(';'),
+              failureMessages: response.failures.map((failure) => safeHostedFailureMessage(failure.message)).filter(Boolean).join(' | '),
+              requestId: response.requestId || '',
+              completePackets: response.analyses.filter((analysis) => hasCompleteHostedDiagnosticPacket(analysis)).length,
+              incompleteFamilyIds: batchFamilies
+                .filter((family) => !response.analyses.some((analysis) => analysis.familyId === family.id && hasCompleteHostedDiagnosticPacket(analysis)))
+                .map((family) => family.id),
+              providerDiagnostics: response.diagnostics || null,
+            });
           } catch (error) {
             diagnosticsFailureMessages.push(safeHostedFailureMessage(error));
-            trace('review', 'Independent review batch failed.', { families: batchFamilies.length, error: safeHostedFailureMessage(error) });
+            trace('review', 'Independent review batch failed.', {
+              families: batchFamilies.length,
+              familyIds: batchFamilies.map((family) => family.id).join(','),
+              error: safeHostedFailureMessage(error),
+            });
           }
         }
         const resolvedById = new Map(challenges.map((analysis) => [
@@ -1277,22 +1496,60 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         snapshot.componentDecisions,
       );
       hostedAnalysisAvailable = responseAnalyses.length > 0;
+      const unresolvedAnalyses = responseAnalyses.filter((analysis) => (
+        analysis.reviewNeeded || analysis.conflict || !hasCompleteHostedDiagnosticPacket(analysis)
+      ));
+      const reviewOutcomes = challenges.map((primary) => {
+        const final = responseAnalyses.find((analysis) => analysis.familyId === primary.familyId);
+        const retainedPrimary = Boolean(final && final.familyName === primary.familyName && final.assetType === primary.assetType && final.role === primary.role);
+        return {
+          familyId: primary.familyId,
+          finalComplete: hasCompleteHostedDiagnosticPacket(final),
+          retainedPrimary,
+          replacementSelected: Boolean(final && !retainedPrimary && hasCompleteHostedDiagnosticPacket(final)),
+          unresolved: Boolean(!final || final.reviewNeeded || final.assetType === 'Unknown' || final.role === 'Unknown'),
+        };
+      });
       trace('resolver', 'Atomic decisions resolved.', {
         analyses: responseAnalyses.length,
         challenged: challenges.length,
-        unresolved: responseAnalyses.filter((analysis) => analysis.reviewNeeded || analysis.assetType === 'Unknown' || analysis.role === 'Unknown').length,
+        reviewOutcomes,
+        reviewFinalComplete: reviewOutcomes.filter((outcome) => outcome.finalComplete).length,
+        reviewRetainedPrimary: reviewOutcomes.filter((outcome) => outcome.retainedPrimary).length,
+        reviewReplacements: reviewOutcomes.filter((outcome) => outcome.replacementSelected).length,
+        reviewUnresolved: reviewOutcomes.filter((outcome) => outcome.unresolved).length,
+        unresolved: unresolvedAnalyses.length,
+        unresolvedFamilyIds: unresolvedAnalyses.slice(0, 24).map((analysis) => analysis.familyId).join(','),
+        unresolvedReasons: unresolvedAnalyses.slice(0, 12).map((analysis) => `${analysis.familyId}: ${analysis.conflictMessage || analysis.reason || 'incomplete decision'}`).join(' | ').slice(0, 2400),
+        selectedDecisions: responseAnalyses.slice(0, 48).map((analysis) => ({
+          familyId: analysis.familyId,
+          name: analysis.familyName,
+          type: analysis.assetType,
+          role: analysis.role,
+          reviewNeeded: analysis.reviewNeeded,
+          conflict: Boolean(analysis.conflict),
+          confidence: analysis.confidence ?? 0,
+        })),
+        selectedDecisionSummary: responseAnalyses.slice(0, 24).map((analysis) => `${analysis.familyId}=${analysis.familyName || '<blank>'}/${analysis.assetType}/${analysis.role};review=${analysis.reviewNeeded ? 1 : 0};conflict=${analysis.conflict ? 1 : 0}`).join(' | ').slice(0, 3600),
       });
       const failures = tierResponses.flatMap((response) => response.failures);
-      const skippedHostedFamilies = [...new Set(tierResponses.flatMap((response) => response.skippedFamilyIds || []))];
+      const resolvedFamilyIds = new Set(responseAnalyses
+        .filter((analysis) => !analysis.reviewNeeded && !analysis.conflict && hasCompleteHostedDiagnosticPacket(analysis))
+        .map((analysis) => analysis.familyId));
+      const unresolvedFailures = failures
+        .map((failure) => ({ ...failure, familyIds: failure.familyIds.filter((familyId) => !resolvedFamilyIds.has(familyId)) }))
+        .filter((failure) => failure.familyIds.length);
+      const skippedHostedFamilies = [...new Set(tierResponses.flatMap((response) => response.skippedFamilyIds || []))]
+        .filter((familyId) => !resolvedFamilyIds.has(familyId));
       diagnosticsCachedFamilies = cachedFamilies;
-      diagnosticsFailedFamilies = failures.reduce((total, failure) => total + failure.familyIds.length, 0);
+      diagnosticsFailedFamilies = unresolvedFailures.reduce((total, failure) => total + failure.familyIds.length, 0);
       diagnosticsBudgetLimitedFamilies = skippedHostedFamilies.length;
       diagnosticsFailureMessages = [...new Set([
         ...diagnosticsFailureMessages,
-        ...failures.map((failure) => `${failure.familyIds.length} ${failure.familyIds.length === 1 ? 'family' : 'families'}: ${safeHostedFailureMessage(failure.message)}`),
+        ...unresolvedFailures.map((failure) => `${failure.familyIds.length} ${failure.familyIds.length === 1 ? 'family' : 'families'}: ${safeHostedFailureMessage(failure.message)}`),
       ])].slice(0, 6);
-      if (!hostedAnalysisAvailable && failures.length) {
-        hostedAnalysisError = safeHostedFailureMessage(failures[0].message);
+      if (!hostedAnalysisAvailable && unresolvedFailures.length) {
+        hostedAnalysisError = safeHostedFailureMessage(unresolvedFailures[0].message);
       } else if (skippedHostedFamilies.length) {
         hostedAnalysisError = `The $${scanBudgetUsd.toFixed(3)} cloud safety ceiling was reached before ${skippedHostedFamilies.length} ${skippedHostedFamilies.length === 1 ? 'family' : 'families'} could be classified.`;
       } else if (!hostedStatus.available && unresolvedFamilies) {
@@ -1330,13 +1587,44 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
     const finalizationStartedAt = Date.now();
     reviewed = prepareComponentsForReview(reviewed);
     stageTimings.finalizationMs = Date.now() - finalizationStartedAt;
+    const unresolvedComponents = reviewed.filter((component) => {
+      if (['duplicate-representation', 'organizational-parent'].includes(component.assetBoundary || '')) return false;
+      return component.assetType === 'Unknown'
+        || component.role === 'Unknown'
+        || component.analysisState === 'needs-review'
+        || component.analysisState === 'provisional'
+        || component.analysisState === 'queued'
+        || component.semanticConflict === true;
+    });
+    const analysisStateCounts = reviewed.reduce<Record<string, number>>((counts, component) => {
+      const state = component.analysisState || 'unknown';
+      counts[state] = (counts[state] || 0) + 1;
+      return counts;
+    }, {});
+    const exportBoundaryCounts = reviewed.reduce<Record<string, number>>((counts, component) => {
+      const boundary = component.assetBoundary || 'standalone';
+      counts[boundary] = (counts[boundary] || 0) + 1;
+      return counts;
+    }, {});
     trace('finalization', 'Scan finalization completed.', {
       components: reviewed.length,
       exportTargets: reviewed.filter((component) => component.exportTarget).length,
-      unresolved: reviewed.filter((component) => component.assetType === 'Unknown' || component.analysisState === 'needs-review' || component.analysisState === 'provisional').length,
+      unresolved: unresolvedComponents.length,
+      unresolvedComponentIds: unresolvedComponents.slice(0, 32).map((component) => component.id).join(','),
+      unresolvedComponentReasons: unresolvedComponents.slice(0, 12).map((component) => `${component.id}: ${component.semanticConflictMessage || component.automationIssues?.[0] || component.analysisReason || 'incomplete decision'}`).join(' | ').slice(0, 2400),
+      analysisStateCounts,
+      exportBoundaryCounts,
+      exportTargetIds: reviewed.filter((component) => component.exportTarget).slice(0, 64).map((component) => component.id),
       elapsedMs: stageTimings.finalizationMs,
     });
-    progress('complete', 'Scan complete', `${reviewed.length} components are ready for automatic asset creation.`, 100);
+    progress(
+      'complete',
+      'Scan complete',
+      unresolvedComponents.length
+        ? `${unresolvedComponents.length} ${unresolvedComponents.length === 1 ? 'component remains' : 'components remain'} unresolved. Rescan before automatic asset creation.`
+        : `${reviewed.length} components are ready for automatic asset creation.`,
+      100,
+    );
     return {
       ...scan,
       components: reviewed,
@@ -1348,6 +1636,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       hostedBudgetUsd,
       scanIntent: { ...scanIntent, structureFingerprint: intentFingerprint },
       diagnostics: {
+        correlationId: scanId,
         totalMs: Date.now() - scanStartedAt,
         stages: stageTimings,
         visualFamilyCount: families.length,
@@ -1368,6 +1657,12 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       },
     };
   } catch (error) {
+    const message = safeHostedFailureMessage(error);
+    trace('scan-error', scanController.signal.aborted ? 'Component scan cancelled.' : 'Component scan failed.', {
+      error: message,
+      elapsedMs: Date.now() - scanStartedAt,
+      aborted: scanController.signal.aborted,
+    });
     if (scanController.signal.aborted) throw new Error('Component scan cancelled.');
     throw error;
   } finally {

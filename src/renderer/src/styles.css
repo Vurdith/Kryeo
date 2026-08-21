@@ -4248,7 +4248,8 @@ textarea::placeholder {
 .preset-bar input,
 .preset-bar select,
 .asset-actions input,
-.settings-control select {
+.settings-control select,
+.settings-control input {
   min-height: 40px;
   background: #fff;
 }

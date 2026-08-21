@@ -4,7 +4,7 @@ Kryeo is a free desktop companion for Affinity scripts and local UI asset workfl
 
 ## Current build
 
-Kryeo `0.15.91` is the current Windows release. The repeatable update, rebuild, install, Cloud Qwen, and cache procedures are documented in [kryeovault/Build.md](kryeovault/Build.md).
+Kryeo `0.15.98` is the current Windows release. The repeatable update, rebuild, install, Cloud Qwen, and cache procedures are documented in [kryeovault/Build.md](kryeovault/Build.md).
 
 ## What it does
 
@@ -97,7 +97,7 @@ qmd query "component scan naming corrections" -c kryeo --no-rerank -n 3 --full-p
 
 ## Delivery scope
 
-Kryeo 0.15.91 prepares production handoff rather than pretending to be a finished Roblox importer. Component Scan and manual delivery now share one `kryeo.roblox.v1` `KryeoManifest.json` contract with stable asset IDs, strict code names, versions, raster paths, dimensions, source boundaries, and deterministic Roblox UI classes. A Studio-side connector can consume this manifest next.
+Kryeo 0.15.98 prepares production handoff rather than pretending to be a finished Roblox importer. Component Scan and manual delivery now share one `kryeo.roblox.v1` `KryeoManifest.json` contract with stable asset IDs, strict code names, versions, raster paths, dimensions, source boundaries, and deterministic Roblox UI classes. A Studio-side connector can consume this manifest next.
 
 The current implementation is summarized here and in the vault's `Build` notes. Historical release snapshots are intentionally excluded from the active documentation set.
 

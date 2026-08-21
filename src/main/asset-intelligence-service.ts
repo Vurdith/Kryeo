@@ -82,6 +82,32 @@ function typeWordsInName(value: string): ComponentAssetType[] {
 }
 
 /**
+ * A compound context word such as `ParentBorder` or `PanelBackground` may
+ * contain a taxonomy word without proposing that taxonomy as a second type.
+ * Keep that generic signal separate from standalone words so the validator
+ * can enforce one final type without rejecting useful hierarchy context.
+ */
+function compoundTypeWordsInSource(value: string): Set<ComponentAssetType> {
+  const sourceTokens = String(value || '')
+    .replace(/[_-]+/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.replace(/[^a-z0-9]/gi, '').toLowerCase())
+    .filter(Boolean);
+  const compounds = new Set<ComponentAssetType>();
+  for (const type of componentAssetTypes) {
+    if (type === 'Unknown') continue;
+    const compactType = titleWords(type).join('').toLowerCase();
+    if (!compactType) continue;
+    if (sourceTokens.some((token) => (
+      token.length > compactType.length
+      && token.includes(compactType)
+      && token !== `${compactType}s`
+    ))) compounds.add(type);
+  }
+  return compounds;
+}
+
+/**
  * A validation boundary, not a rewriting boundary. The complete visual
  * decision owns both name and type; silently swapping a type word in a name
  * after that decision recreates the exact split-brain result Kryeo must avoid.
@@ -90,6 +116,8 @@ export function strictProductionName(value: string, assetType: ComponentAssetTyp
   const naming = normalizeAiName(value);
   if (assetType === 'Unknown') return naming;
   const mentioned = typeWordsInName(naming.displayName);
+  const compoundTypes = compoundTypeWordsInSource(value);
+  const standaloneMentioned = mentioned.filter((type) => !compoundTypes.has(type));
   const issues = [...naming.issues];
   const selectedTypePattern = new RegExp(`\\b${titleWords(assetType).join('\\s+')}s?\\b`, 'gi');
   const selectedTypeMatches = [...naming.displayName.matchAll(selectedTypePattern)];
@@ -99,14 +127,20 @@ export function strictProductionName(value: string, assetType: ComponentAssetTyp
   if (selectedTypeMatches.length > 1) {
     issues.push(`The AI name must include the final ${assetType} type exactly once.`);
   }
-  if (mentioned.some((type) => type !== assetType)) {
+  if (standaloneMentioned.some((type) => type !== assetType)) {
     issues.push('The AI name contains a type that conflicts with the final classification.');
   }
   const finalTypeMatch = selectedTypeMatches.at(-1);
   if (finalTypeMatch) {
     const prefix = naming.displayName.slice(0, finalTypeMatch.index || 0).trim();
     const suffix = naming.displayName.slice((finalTypeMatch.index || 0) + finalTypeMatch[0].length).trim();
-    const allowedSuffixes = new Set(['hover', 'pressed', 'disabled', 'active', 'selected', 'focused', 'default', 'empty', 'filled', 'glow']);
+    const allowedSuffixes = new Set([
+      'hover', 'pressed', 'disabled', 'active', 'selected', 'focused', 'default', 'empty', 'filled', 'glow',
+      'top', 'bottom', 'left', 'right', 'center', 'middle', 'inner', 'outer', 'inset', 'outline',
+      'edge', 'edges', 'side', 'sides', 'corner', 'corners', 'segment', 'segments', 'cluster', 'clusters',
+      'ornament', 'ornaments', 'ornamental', 'border', 'borders', 'frame', 'frames', 'fill', 'background',
+      'holder', 'panel', 'centered', 'structural', 'solid', 'partial', 'full', 'heavy', 'light', 'complete',
+    ]);
     if (!prefix || (suffix && !suffix.toLowerCase().split(/\s+/).every((word) => /^\d+$/.test(word) || allowedSuffixes.has(word)))) {
       issues.push(`The AI name must place the final ${assetType} type after its descriptive identity.`);
     }
@@ -126,9 +160,18 @@ export function buildProductionIdentity(component: ComponentCandidate): {
   issues: string[];
 } {
   const naming = strictProductionName(
-    component.exportName || component.aiSuggestedName || component.aiModelSuggestedName || '',
+    component.exportName || component.aiSuggestedName || component.familyName || '',
     component.assetType,
   );
+  // A generic source label is not a production identity. Keep genuinely
+  // descriptive proposals visible when another field is disputed, but never
+  // let placeholders such as “Layer 7” leak into Affinity, PNG, or manifest
+  // names while the family is unresolved.
+  const hasDistinctiveName = !naming.issues.some((issue) => (
+    /distinctive semantic asset name|Roblox-safe code name could not/i.test(issue)
+  ));
+  const displayName = hasDistinctiveName ? naming.displayName : '';
+  const codeName = displayName ? naming.codeName : '';
   // The visual model returns type and Roblox role as one atomic decision.
   // This production boundary may derive a safe code name, but it must never
   // replace just the role from a type lookup after the decision was accepted.
@@ -139,6 +182,8 @@ export function buildProductionIdentity(component: ComponentCandidate): {
   }
   return {
     ...naming,
+    displayName,
+    codeName,
     robloxClass,
     robloxClassReason: robloxClass === 'Unknown'
       ? 'A Studio class is deferred until the AI returns a complete decision.'

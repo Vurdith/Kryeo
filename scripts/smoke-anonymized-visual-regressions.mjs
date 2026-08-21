@@ -215,5 +215,6 @@ assert.deepEqual(
   ['Neutral Border', 'Border', 'ImageLabel', 'Neutral Border'],
   'A challenger may replace name, type, role, and member identity only as one decision.',
 );
+assert.equal(finalDecision.conflict, false, 'A complete challenger replacement is accepted instead of remaining an export conflict.');
 
 console.log(JSON.stringify({ cases: fixture.cases.map((entry) => entry.id), atomic: finalDecision.assetType }, null, 2));

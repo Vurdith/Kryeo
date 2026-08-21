@@ -31,6 +31,13 @@ assert.match(gatewaySource, /return classifyFamilyBatch\(families, context, \[\]
 assert.match(gatewaySource, /isModelProtocolError\(error\) \|\| retryIncompleteSingle/, 'Malformed packets and incomplete single-family decisions must be retried before a family is failed.');
 assert.match(desktopSource, /hostedAi\.reviewFamilies/, 'Scan-time disagreements must use bounded batch visual review.');
 assert.doesNotMatch(desktopSource, /const challenge = await hostedAi\.explainFamily/, 'Scan-time disagreements must not fan out into one provider call per family.');
+assert.match(gatewaySource, /reviewTier: 'escalation',[\s\S]{0,260}compactResponse: true/, 'Independent review must use the compact atomic replacement packet.');
+assert.match(desktopSource, /const unresolvedComponents = reviewed\.filter/, 'Finalization must compute unresolved decisions before publishing scan completion.');
+assert.match(desktopSource, /unresolvedComponents\.length[\s\S]{0,700}automatic asset creation/, 'A scan with unresolved decisions must never report that every component is ready.');
+assert.match(desktopSource, /Recovering families missing a primary packet/, 'A missing primary packet must enter one bounded recovery lane instead of disappearing.');
+assert.match(hostedServiceSource, /function compactGatewayMember/, 'Gateway requests must send one target preview rather than duplicate UI and hosted thumbnails.');
+assert.match(hostedServiceSource, /function compactGatewayContextMember/, 'Gateway context must stay metadata-only so supporting thumbnails cannot inflate the request.');
+assert.match(gatewaySource, /Request body exceeded the/, 'Oversized gateway payloads must report an actionable body-limit failure.');
 
 const primaryDecision = {
   familyId: 'atomic-decision', fingerprint: 'atomic', familyName: 'Canvas Frame', assetType: 'Frame', role: 'Frame',
@@ -73,6 +80,37 @@ assert.equal(batchReviewedDecision.familyName, 'Decorative Border');
 assert.equal(batchReviewedDecision.assetType, 'Border');
 assert.equal(batchReviewedDecision.role, 'ImageLabel');
 assert.equal(batchReviewedDecision.reviewNeeded, false);
+assert.equal(batchReviewedDecision.conflict, false, 'A complete independent replacement is accepted, not left as an export conflict.');
+assert.match(batchReviewedDecision.normalizationReason, /complete independent visual replacement|confirmed the complete primary decision/i);
+assert.equal(resolvedDecision.conflict, false, 'A complete explain-review replacement is accepted atomically.');
+
+const uncertainButCompleteReview = resolveIndependentFamilyAnalysis(primaryDecision, {
+  ...primaryDecision,
+  familyName: 'Decorative Border',
+  assetType: 'Border',
+  role: 'ImageLabel',
+  memberNames: [{ visualHash: 'atomic-hash', name: 'Decorative Border' }],
+  confidence: 0.58,
+  reviewNeeded: true,
+  alternatives: [{ assetType: 'Frame', reason: 'The perimeter could be structural chrome.' }],
+});
+assert.equal(uncertainButCompleteReview.familyName, 'Decorative Border');
+assert.equal(uncertainButCompleteReview.reviewNeeded, false, 'A complete best answer may be accepted while retaining uncertainty evidence.');
+assert.equal(uncertainButCompleteReview.alternatives[0].assetType, 'Frame');
+
+const incompleteReviewKeepsCompletePrimary = resolveIndependentFamilyAnalysis({
+  ...primaryDecision,
+  familyName: 'Canvas Frame',
+  assetType: 'Frame',
+  role: 'Frame',
+  conflict: true,
+  reviewNeeded: true,
+}, undefined);
+assert.equal(incompleteReviewKeepsCompletePrimary.familyName, 'Canvas Frame');
+assert.equal(incompleteReviewKeepsCompletePrimary.assetType, 'Frame');
+assert.equal(incompleteReviewKeepsCompletePrimary.reviewNeeded, false, 'An incomplete reviewer must not erase a complete primary decision.');
+assert.equal(incompleteReviewKeepsCompletePrimary.conflict, false);
+assert.match(incompleteReviewKeepsCompletePrimary.normalizationReason, /complete primary/i);
 
 const unresolvedDecision = resolveChallengedFamilyAnalysis(primaryDecision, {
   reason: 'The independent reviewer disagreed but could not read the preview clearly.', visualDescription: 'Tiny ambiguous artwork.', confidence: 0.43,
@@ -384,6 +422,16 @@ assert.equal(identityResults[0].assetType, 'Badge');
 assert.equal(identityResults[1].familyName, '', 'A name without its final Texture type must remain unresolved.');
 assert.equal(identityResults[1].assetType, 'Texture');
 assert.equal(identityResults[2].familyName, 'Transparent Overlay');
+
+// Context finalization must not resurrect the raw model proposal after the
+// hosted resolver intentionally cleared an incomplete/contested packet. It
+// must also keep that semantic conflict visible instead of resetting the row
+// to an apparently ready automation state.
+const finalizedIdentityResults = applyComponentSceneContext(identityResults);
+assert.equal(finalizedIdentityResults[0].familyName, '', 'Context finalization must not resurrect a rejected raw model name.');
+assert.equal(finalizedIdentityResults[0].exportName, '', 'An unresolved family must not receive a production export name.');
+assert.equal(finalizedIdentityResults[0].automationState, 'exception', 'A semantic conflict must remain an automation exception.');
+assert.ok((finalizedIdentityResults[0].automationIssues || []).length > 0, 'The unresolved reason must remain visible after context finalization.');
 assert.equal(identityResults[2].assetType, 'Overlay');
 
 const weakHostedScene = candidate(

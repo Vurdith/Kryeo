@@ -425,7 +425,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     const first = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ project: 'Test', documentTitle: 'Document', documentSessionUuid: 'session', families: [family] }),
+      body: JSON.stringify({ project: 'Test', documentTitle: 'Document', documentSessionUuid: 'session', correlationId: `scan-${runId}`, families: [family] }),
     }).then((response) => response.json());
     assert.equal(first.analyses[0].assetType, 'Button');
     assert.equal(first.analyses[0].visualDescription, 'The supplied preview was classified visually as button.');
@@ -434,6 +434,13 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(first.analyses[0].conflict, false);
     assert.equal(first.analyses[0].reviewNeeded, false);
     assert.equal(first.cached, 0);
+    assert.equal(first.diagnostics.correlationId, `scan-${runId}`);
+    assert.equal(first.diagnostics.requestedFamilies, 1);
+    assert.equal(first.diagnostics.analyzedFamilies, 1);
+    assert.equal(first.diagnostics.providerCalls.length, 1);
+    assert.equal(first.diagnostics.providerCalls[0].parsed, true);
+    assert.equal(first.diagnostics.providerCalls[0].httpStatuses[0], 200);
+    assert.ok(first.diagnostics.providerCalls[0].durationMs >= 0);
     assert.match(
       modelPrompts.at(-1),
       /\bjson\b/i,
@@ -503,6 +510,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       headers,
       body: JSON.stringify({
         hostedScanId: `batch-review-scan-${runId}`,
+        correlationId: `review-${runId}`,
         project: 'Test',
         documentTitle: 'Document',
         documentSessionUuid: 'session',
@@ -523,8 +531,16 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     }).then((response) => response.json());
     assert.equal(batchReview.analyses.length, 8);
     assert.equal(batchReview.failures.length, 0);
+    assert.equal(batchReview.diagnostics.correlationId, `review-${runId}`);
+    assert.equal(batchReview.diagnostics.analyzedFamilies, 8);
+    assert.equal(batchReview.diagnostics.providerCalls.length, 1);
     assert.equal(modelCalls - reviewCallsBefore, 1, 'Eight challenged families must share one visual-review provider call.');
     assert.equal(modelNames.at(-1), 'test-vision-model', 'The independent reviewer should use the configured visual model.');
+    assert.equal(
+      modelPrompts.at(-1).includes('Every row is [alias,unused,type,name'),
+      true,
+      'Independent review must use the compact atomic replacement contract so a bounded batch can return every family.',
+    );
 
     const independentFrameAudit = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/explain`, {
       method: 'POST',
