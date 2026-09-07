@@ -10,14 +10,31 @@ const GENERIC_PRODUCTION_NAME = /^(?:untitled(?: asset)?|unknown|asset|component
 const STYLE_ONLY = /^(?:pixel art|ui art|game ui|interface art|graphic|artwork)$/i;
 const BARE_ASSET_TYPE = /^(?:frame|button|icon|panel|slot|bar|badge|label|text|textbox|scrollbar|divider|background|wallpaper|texture|overlay|cursor|tooltip|modal|input|tab|tile|ornament|border|corner|edge|fill|fx)s?$/i;
 
+
+
+const FILE_ARTIFACT_WORDS = new Set([
+  'file', 'filename', 'attachment', 'download', 'upload', 'export',
+  'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'svg', 'psd', 'afdesign',
+]);
+
 export const componentAssetTypes = Object.freeze([
   'Unknown', 'Frame', 'Button', 'Icon', 'Panel', 'Slot', 'Bar', 'Badge', 'Label', 'Text',
   'TextBox', 'ScrollBar', 'Divider', 'Background', 'Wallpaper', 'Texture', 'Overlay', 'Cursor',
   'Tooltip', 'Modal', 'Input', 'Tab', 'Tile', 'Ornament', 'Border', 'Corner', 'Edge', 'Fill', 'FX',
 ] as ComponentAssetType[]);
 
-// This is implementation policy, not a naming policy. Raster exports need a
-// deterministic Studio class after the model has named and typed the artwork.
+const COMPATIBLE_NAME_SUBTYPES: Partial<Record<ComponentAssetType, ReadonlySet<ComponentAssetType>>> = {
+
+
+  Border: new Set(['Corner', 'Edge', 'Ornament', 'Fill']),
+};
+
+export function compatibleNameSubtypes(assetType: ComponentAssetType): ReadonlySet<ComponentAssetType> {
+  return COMPATIBLE_NAME_SUBTYPES[assetType] || new Set<ComponentAssetType>();
+}
+
+
+
 const TYPE_TO_ROLE: Record<ComponentAssetType, RobloxUiRole> = {
   Unknown: 'Unknown', Frame: 'Frame', Button: 'ImageButton', Icon: 'ImageLabel', Panel: 'ImageLabel',
   Slot: 'ImageButton', Bar: 'ImageLabel', Badge: 'ImageLabel', Label: 'TextLabel', Text: 'TextLabel',
@@ -67,6 +84,10 @@ export function normalizeAiName(value: string): { displayName: string; codeName:
   if (!displayName || GENERIC_PRODUCTION_NAME.test(displayName) || STYLE_ONLY.test(displayName) || BARE_ASSET_TYPE.test(displayName)) {
     issues.push('The AI did not provide a distinctive semantic asset name.');
   }
+  const rawWords = titleWords(value).map((word) => word.toLowerCase());
+  if (rawWords.some((word) => FILE_ARTIFACT_WORDS.has(word)) || rawWords.some((word) => /^\d{5,}$/.test(word))) {
+    issues.push('The AI name contains a file or export artefact instead of a visual identity.');
+  }
   if (!codeName) issues.push('A Roblox-safe code name could not be generated.');
   return { displayName, codeName, issues };
 }
@@ -81,30 +102,126 @@ function typeWordsInName(value: string): ComponentAssetType[] {
     });
 }
 
-/**
- * A compound context word such as `ParentBorder` or `PanelBackground` may
- * contain a taxonomy word without proposing that taxonomy as a second type.
- * Keep that generic signal separate from standalone words so the validator
- * can enforce one final type without rejecting useful hierarchy context.
- */
-function compoundTypeWordsInSource(value: string): Set<ComponentAssetType> {
-  const sourceTokens = String(value || '')
-    .replace(/[_-]+/g, ' ')
-    .split(/\s+/)
-    .map((token) => token.replace(/[^a-z0-9]/gi, '').toLowerCase())
-    .filter(Boolean);
-  const compounds = new Set<ComponentAssetType>();
-  for (const type of componentAssetTypes) {
-    if (type === 'Unknown') continue;
-    const compactType = titleWords(type).join('').toLowerCase();
-    if (!compactType) continue;
-    if (sourceTokens.some((token) => (
-      token.length > compactType.length
-      && token.includes(compactType)
-      && token !== `${compactType}s`
-    ))) compounds.add(type);
+const POST_TYPE_QUALIFIERS = new Set([
+  'hover', 'pressed', 'disabled', 'active', 'selected', 'focused', 'default', 'empty', 'filled', 'glow',
+  'set', 'sets', 'collection', 'collections', 'assembly', 'assemblies', 'group', 'groups', 'series', 'pack', 'packs',
+]);
+
+const STRUCTURAL_NAME_WORDS = new Set([
+  'untitled', 'asset', 'component', 'family', 'layer', 'group', 'object', 'shape', 'pixel', 'image', 'raster',
+  'export', 'rectangle', 'ellipse', 'artboard', 'container', 'piece', 'part', 'element', 'visual',
+]);
+
+interface TypePhraseRange {
+  type: ComponentAssetType;
+  start: number;
+  end: number;
+}
+
+function typePhraseRanges(words: string[]): TypePhraseRange[] {
+  const phrases = componentAssetTypes
+    .filter((type) => type !== 'Unknown')
+    .map((type) => ({ type, words: titleWords(type).map((word) => word.toLowerCase()) }))
+    .sort((left, right) => right.words.length - left.words.length || right.type.length - left.type.length);
+  const ranges: TypePhraseRange[] = [];
+  for (let index = 0; index < words.length;) {
+    const match = phrases.find((phrase) => phrase.words.every((word, offset) => {
+      const candidate = words[index + offset]?.toLowerCase();
+      return candidate === word || candidate === `${word}s`;
+    }));
+    if (!match) {
+      index += 1;
+      continue;
+    }
+    ranges.push({ type: match.type, start: index, end: index + match.words.length });
+    index = match.words.length + index;
   }
-  return compounds;
+  return ranges;
+}
+
+function isCompatibleTypePhrase(type: ComponentAssetType, selectedType: ComponentAssetType): boolean {
+  return type === selectedType || compatibleNameSubtypes(selectedType).has(type);
+}
+
+function isPostTypeQualifier(word: string): boolean {
+  return /^\d+$/.test(word) || POST_TYPE_QUALIFIERS.has(word.toLowerCase());
+}
+
+/**
+ * Canonicalise only the grammar of a model-owned name. This splits source-like
+ * CamelCase, preserves every semantic word, and moves the already-selected
+ * type behind its descriptors. It never adds, removes, or substitutes a type
+ * or visual identity, so a disputed semantic packet still has to be replaced
+ * by the visual reviewer.
+ */
+export function canonicalAiNameForType(value: string, assetType: ComponentAssetType): string {
+  const normalized = normalizeAiName(value).displayName;
+  if (!normalized || assetType === 'Unknown') return normalized;
+  const words = titleWords(normalized);
+  const ranges = typePhraseRanges(words);
+  const selected = ranges.filter((range) => range.type === assetType);
+  if (selected.length !== 1 || ranges.some((range) => !isCompatibleTypePhrase(range.type, assetType))) {
+    return normalized;
+  }
+  const target = selected[0];
+  const before = words.slice(0, target.start);
+  const after = words.slice(target.end);
+  const trailingQualifiers = after.filter(isPostTypeQualifier);
+  const trailingDescriptors = after.filter((word) => !isPostTypeQualifier(word));
+  const descriptor = [...before, ...trailingDescriptors];
+  if (!descriptor.some((word) => !/^\d+$/.test(word))) return normalized;
+  return normalizeAiName([
+    ...descriptor,
+    ...words.slice(target.start, target.end),
+    ...trailingQualifiers,
+  ].join(' ')).displayName;
+}
+
+/**
+ * Reconcile a model's semantic words with the final type without inventing a
+ * new visual identity. This is the atomic name/type boundary: it removes a
+ * contradictory taxonomy word, moves a positional descriptor before the
+ * terminal type, and appends a missing final type when the model supplied a
+ * meaningful identity. It deliberately leaves structural placeholders such
+ * as `Layer 1` unresolved.
+ */
+export function reconcileAiNameForType(value: string, assetType: ComponentAssetType): string {
+  const normalized = normalizeAiName(value).displayName;
+  if (!normalized || assetType === 'Unknown') return normalized;
+  const words = titleWords(normalized);
+  const ranges = typePhraseRanges(words);
+  const target = ranges.find((range) => range.type === assetType);
+  const removableTypeWordAt = new Set<number>();
+  for (const range of ranges) {
+    // Keep one final selected-type phrase. A model name can already contain
+    // its type (for example `Health Bar`); copying that name into a sibling
+    // normalizer must not turn it into `Health Bar Bar`.
+    if (range.type === assetType && range !== target) {
+      for (let index = range.start; index < range.end; index += 1) removableTypeWordAt.add(index);
+      continue;
+    }
+    if (isCompatibleTypePhrase(range.type, assetType)) continue;
+    for (let index = range.start; index < range.end; index += 1) removableTypeWordAt.add(index);
+  }
+
+  if (target) {
+    const before = words.slice(0, target.start).filter((_word, index) => !removableTypeWordAt.has(index));
+    const after = words.slice(target.end).filter((_word, index) => !removableTypeWordAt.has(target.end + index));
+    const descriptor = [...before, ...after.filter((word) => !isPostTypeQualifier(word))]
+      .filter((word) => !STRUCTURAL_NAME_WORDS.has(word.toLowerCase()));
+    const qualifiers = after.filter(isPostTypeQualifier);
+    const meaningfulDescriptor = descriptor.filter((word) => !/^\d+$/.test(word));
+    if (!meaningfulDescriptor.length || meaningfulDescriptor.every((word) => STRUCTURAL_NAME_WORDS.has(word.toLowerCase()))) return normalized;
+    return normalizeAiName([...meaningfulDescriptor, ...titleWords(assetType), ...qualifiers].join(' ')).displayName;
+  }
+
+  const descriptor = words.filter((_word, index) => !removableTypeWordAt.has(index));
+  const identity = descriptor
+    .filter((word) => !isPostTypeQualifier(word) && !/^\d+$/.test(word))
+    .filter((word) => !STRUCTURAL_NAME_WORDS.has(word.toLowerCase()));
+  if (!identity.length || identity.every((word) => STRUCTURAL_NAME_WORDS.has(word.toLowerCase()))) return normalized;
+  const qualifiers = descriptor.filter(isPostTypeQualifier);
+  return normalizeAiName([...identity, ...titleWords(assetType), ...qualifiers].join(' ')).displayName;
 }
 
 /**
@@ -113,12 +230,14 @@ function compoundTypeWordsInSource(value: string): Set<ComponentAssetType> {
  * after that decision recreates the exact split-brain result Kryeo must avoid.
  */
 export function strictProductionName(value: string, assetType: ComponentAssetType) {
-  const naming = normalizeAiName(value);
+  const canonicalName = canonicalAiNameForType(value, assetType);
+  const naming = normalizeAiName(canonicalName);
   if (assetType === 'Unknown') return naming;
   const mentioned = typeWordsInName(naming.displayName);
-  const compoundTypes = compoundTypeWordsInSource(value);
-  const standaloneMentioned = mentioned.filter((type) => !compoundTypes.has(type));
   const issues = [...naming.issues];
+  if (/\b(?:layer|group|node|raster|shape|image|asset|element)\s*\d*\b/i.test(naming.displayName)) {
+    issues.push('The AI name contains an editor-default construction label.');
+  }
   const selectedTypePattern = new RegExp(`\\b${titleWords(assetType).join('\\s+')}s?\\b`, 'gi');
   const selectedTypeMatches = [...naming.displayName.matchAll(selectedTypePattern)];
   if (!mentioned.includes(assetType)) {
@@ -127,7 +246,7 @@ export function strictProductionName(value: string, assetType: ComponentAssetTyp
   if (selectedTypeMatches.length > 1) {
     issues.push(`The AI name must include the final ${assetType} type exactly once.`);
   }
-  if (standaloneMentioned.some((type) => type !== assetType)) {
+  if (mentioned.some((type) => type !== assetType && !compatibleNameSubtypes(assetType).has(type))) {
     issues.push('The AI name contains a type that conflicts with the final classification.');
   }
   const finalTypeMatch = selectedTypeMatches.at(-1);
@@ -140,7 +259,11 @@ export function strictProductionName(value: string, assetType: ComponentAssetTyp
       'edge', 'edges', 'side', 'sides', 'corner', 'corners', 'segment', 'segments', 'cluster', 'clusters',
       'ornament', 'ornaments', 'ornamental', 'border', 'borders', 'frame', 'frames', 'fill', 'background',
       'holder', 'panel', 'centered', 'structural', 'solid', 'partial', 'full', 'heavy', 'light', 'complete',
+      'set', 'sets', 'collection', 'collections', 'assembly', 'assemblies', 'group', 'groups', 'series', 'pack', 'packs',
     ]);
+    // A taxonomy word plus a number is a placeholder, not an identity. The
+    // sibling resolver may add an ordinal to an already meaningful name, but
+    // it must never make `Border 1` or `Wallpaper 8` export-ready by itself.
     if (!prefix || (suffix && !suffix.toLowerCase().split(/\s+/).every((word) => /^\d+$/.test(word) || allowedSuffixes.has(word)))) {
       issues.push(`The AI name must place the final ${assetType} type after its descriptive identity.`);
     }
@@ -150,6 +273,15 @@ export function strictProductionName(value: string, assetType: ComponentAssetTyp
 
 export function roleForAssetType(type: ComponentAssetType): RobloxUiRole {
   return TYPE_TO_ROLE[type] || 'Unknown';
+}
+
+/**
+ * This is the global Roblox export contract, not an artwork heuristic. Kryeo
+ * may use it to reject an incoherent model packet and request a complete
+ * model replacement, but it must never change the model's type or role.
+ */
+export function hasCompatibleRobloxRole(type: ComponentAssetType, role: RobloxUiRole): boolean {
+  return type !== 'Unknown' && role !== 'Unknown' && roleForAssetType(type) === role;
 }
 
 export function buildProductionIdentity(component: ComponentCandidate): {

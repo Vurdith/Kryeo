@@ -34,3 +34,6 @@ coverage/
 
 # Obsidian workspace metadata
 kryeovault/.obsidian/
+
+# Codex-local task context and chat artifacts
+.codex/

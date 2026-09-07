@@ -1,15 +1,15 @@
 # Kryeo Build & Release
 
-> Runtime contract documentation for the checked-out `family-v70` source. The installer record below does not prove that a separately running local gateway has been updated or restarted.
+> Runtime contract documentation for the checked-out `family-v83` source. The installer record below does not prove that a separately running local gateway has been updated or restarted.
 
 ## Recorded package state
 
-- Source checkout version: `0.15.98`
-- Installer: `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.98.exe`
-- Installer bytes: `272235125`
-- Installer SHA-256: `B20854EC5DCA2EB14B833BAF94419651E04F8BC258943CF5E7725DB06BA1A46C`
-- Packaged app.asar bytes: `202621430`
-- Packaged app.asar SHA-256: `998C5FDA57E20AD1A82A95F263A04BDEDD2F6F5ABE33E1DF146033DB8E6D6666`
+- Source checkout version: `0.15.139`
+- Installer: `C:\Users\reece\Desktop\Kryeo\release\Kryeo-Setup-0.15.139.exe`
+- Installer bytes: `272234463`
+- Installer SHA-256: `FA5BA50963448F5FD7B7735733571981399800B5EB95B632AFAFFDA71B5207B0`
+- Packaged app.asar bytes: `202635407`
+- Packaged app.asar SHA-256: `116ED3BF2AE9915EC7F0959819209794746A75AA06295F6471D537B567FAF1E9`
 - Installed executable: `C:\Users\reece\AppData\Local\Programs\Kryeo\Kryeo.exe`
 - Installed product version before installing this release: `0.15.78.0`
 - Installed package: `C:\Users\reece\AppData\Local\Programs\Kryeo\resources\app.asar`
@@ -49,7 +49,7 @@ npm run dist
 | Primary model | `qwen/qwen3.7-flash` through OpenRouter |
 | Independent reviewer | `qwen/qwen3.7-flash` through OpenRouter |
 | Local gateway | `http://127.0.0.1:8787` |
-| Analysis contract | `family-v70` |
+| Analysis contract | `family-v83` |
 | Client dispatch | Two concurrent requests; up to 8 families per request |
 | Gateway model slots | `2` |
 | Model deadline | `KRYEO_AI_MODEL_TIMEOUT_MS=35000` by default |
@@ -78,7 +78,7 @@ $headers = @{ Authorization = 'Bearer <Kryeo AI token>' }
 Invoke-RestMethod http://127.0.0.1:8787/health -Headers $headers
 ```
 
-The health response must report Qwen3.7 Flash as both the primary model and independent reviewer, `family-v70`, two model slots, 8-family batching, `maxModelRetries: 0` when unset, a `$0.01` target, and an enforced `$0.03` ceiling. A mismatched `analysisVersion` means the desktop must not scan against that process.
+The health response must report Qwen3.7 Flash as both the primary model and independent reviewer, `family-v83`, two model slots, 10-family batching, `maxModelRetries: 1` when unset, a `$0.01` target, and an enforced `$0.03` ceiling. A mismatched `analysisVersion` means the desktop must not scan against that process.
 
 ## Clear generated family results
 
@@ -90,6 +90,6 @@ The health response must report Qwen3.7 Flash as both the primary model and inde
    Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8787/v1/cache/clear -Headers $headers
    ```
 
-3. Confirm the response contains `cleared: true`, `analysisVersion: family-v70`, and `cacheEntries: 0`.
+3. Confirm the response contains `cleared: true`, `analysisVersion: family-v83`, and `cacheEntries: 0`.
 
 `POST /v1/cache/clear` waits for a pending cache write and refuses with `409` while work is active; it clears both memory and the derived cache file safely. This clears generated hosted analyses only. It does not remove source documents, exported assets, or saved component decisions. Cache clearing is not a substitute for restarting the gateway after source or configuration changes.

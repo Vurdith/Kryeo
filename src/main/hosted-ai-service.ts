@@ -58,7 +58,21 @@ const hostedDiagnosticsSchema = z.object({
   analyzedFamilies: z.number().int().nonnegative().optional(),
   incompleteFamilies: z.array(z.string()).optional(),
   providerCalls: z.array(hostedProviderCallDiagnosticSchema).optional(),
-  recovery: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  // Primary recovery reports counters, while independent visual review also
+  // reports the affected family IDs. Diagnostics must never make the desktop
+  // reject an otherwise complete review response.
+  recovery: z.record(z.string(), z.union([
+    z.number().int().nonnegative(),
+    z.array(z.string()),
+  ])).optional(),
+  rejectedPackets: z.array(z.object({
+    familyId: z.string(),
+    name: z.string(),
+    type: z.string(),
+    role: z.string(),
+    issues: z.array(z.string()),
+    lane: z.string(),
+  })).optional(),
 }).passthrough();
 
 const familyAnalysisSchema = z.object({
@@ -162,10 +176,13 @@ interface StoredConfigurationFile {
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:8787';
 // The desktop and local gateway share a decision contract. Refuse a gateway
 // from an older release rather than silently applying stale classifications.
-const REQUIRED_ANALYSIS_VERSION = 'family-v70';
+const REQUIRED_ANALYSIS_VERSION = 'family-v83';
 const DETAILED_FAMILY_BATCH_SIZE = 2;
-const SIMPLE_FAMILY_BATCH_SIZE = 8;
-const PROGRESSIVE_FAMILY_CONCURRENCY = 2;
+// Four primary requests cover a typical 37-family document. That stays below
+// the shared free-provider burst ceiling while preserving direct previews for
+// every family.
+const SIMPLE_FAMILY_BATCH_SIZE = 10;
+const PROGRESSIVE_FAMILY_CONCURRENCY = 1;
 
 function compactGatewayMember(
   member: ComponentVisualFamily['members'][number],

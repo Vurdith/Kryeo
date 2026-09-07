@@ -11,16 +11,16 @@ try {
     process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
   }
 } catch {
-  // Environment variables remain the production source of truth.
+
 }
 
 const HOST = process.env.KRYEO_AI_HOST || '127.0.0.1';
 const PORT = Number(process.env.KRYEO_AI_PORT || 8787);
 const MODEL_LITE = process.env.KRYEO_AI_MODEL_LITE || process.env.KRYEO_AI_MODEL || 'qwen/qwen3.7-flash';
-// The stronger visual model is reserved for a genuine independent challenge.
-// Primary scans always use the fast visual model; an escalation tier only adds
-// richer image/context payloads so one uncertain family does not silently
-// switch the entire primary decision authority.
+
+
+
+
 const MODEL_ESCALATION = process.env.KRYEO_AI_MODEL_ESCALATION || 'qwen/qwen3.7-flash';
 const MODEL = MODEL_LITE;
 const MODEL_BASE_URL = String(process.env.KRYEO_MODEL_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
@@ -52,9 +52,9 @@ const OPENROUTER_HTTP_REFERER = String(process.env.KRYEO_OPENROUTER_HTTP_REFERER
 const OPENROUTER_TITLE = String(process.env.KRYEO_OPENROUTER_TITLE || 'Kryeo').trim();
 const OPENROUTER_RESPONSE_CACHE = String(process.env.KRYEO_OPENROUTER_RESPONSE_CACHE || 'false').toLowerCase() === 'true';
 const OPENROUTER_PROMPT_CACHE = String(process.env.KRYEO_OPENROUTER_PROMPT_CACHE || 'true').toLowerCase() === 'true';
-// Strict parameter matching can leave a model with no routable endpoints.
-// OpenRouter ignores unsupported options by default, while Kryeo's prompt still
-// requires JSON output, so strict matching remains an explicit opt-in only.
+
+
+
 const OPENROUTER_REQUIRE_PARAMETERS = String(process.env.KRYEO_OPENROUTER_REQUIRE_PARAMETERS || 'false').toLowerCase() === 'true';
 const OPENROUTER_SERVICE_TIER = ['auto', 'default', 'flex', 'priority', 'scale'].includes(
   String(process.env.KRYEO_AI_SERVICE_TIER || '').trim().toLowerCase(),
@@ -67,20 +67,20 @@ const MAX_CACHE_ENTRIES = Math.max(1_000, Number(process.env.KRYEO_AI_MAX_CACHE_
 const TOKENS = String(process.env.KRYEO_AI_TOKENS || '').split(',').map((token) => token.trim()).filter(Boolean);
 const ALLOW_LOOPBACK_WITHOUT_TOKEN = String(process.env.KRYEO_AI_ALLOW_LOOPBACK_WITHOUT_TOKEN || '').toLowerCase() === 'true';
 const MAX_QUEUE = Number(process.env.KRYEO_AI_MAX_QUEUE || 100);
-// Zero disables Kryeo's local request-rate ceiling; cloud-provider quotas remain authoritative.
+
 const RATE_LIMIT = Math.max(0, Number(process.env.KRYEO_AI_RATE_LIMIT_PER_MINUTE ?? 0) || 0);
 const MAX_BODY_BYTES = Number(process.env.KRYEO_AI_MAX_BODY_MB || 18) * 1024 * 1024;
-// A bounded batch keeps one document-aware request compact enough for a
-// reliable complete packet, while still giving the model all peer visuals at
-// once. Each family retains its own labelled preview so small transparent UI
-// artwork is never shrunk into a shared image.
-const FAMILY_BATCH_SIZE = Math.min(16, Math.max(1, Number(process.env.KRYEO_AI_FAMILY_BATCH_SIZE || 8)));
+
+
+
+
+const FAMILY_BATCH_SIZE = Math.min(16, Math.max(1, Number(process.env.KRYEO_AI_FAMILY_BATCH_SIZE || 10)));
 const MAX_MEMBER_IMAGES_PER_FAMILY = Math.min(6, Math.max(1, Number(process.env.KRYEO_AI_MAX_MEMBER_IMAGES_PER_FAMILY || 2)));
 const SCAN_TARGET_USD = Math.max(0, Number(process.env.KRYEO_AI_SCAN_TARGET_USD || 0.01));
 const SCAN_BUDGET_USD = Math.max(SCAN_TARGET_USD, Number(process.env.KRYEO_AI_SCAN_BUDGET_USD || 0.03));
 const ENFORCE_SCAN_BUDGET = String(process.env.KRYEO_AI_ENFORCE_SCAN_BUDGET || 'true').toLowerCase() === 'true';
-// Zero means unlimited. The client still sends bounded batches, so this is a
-// per-scan policy rather than an attempt to put an enormous request in memory.
+
+
 const MAX_HOSTED_FAMILIES_PER_SCAN = Math.max(0, Number(process.env.KRYEO_AI_MAX_HOSTED_FAMILIES_PER_SCAN || 0));
 const MAX_ESCALATION_FAMILIES_PER_SCAN = Math.max(0, Number(process.env.KRYEO_AI_MAX_ESCALATION_FAMILIES_PER_SCAN || 1));
 const ESTIMATED_INPUT_TOKENS_PER_IMAGE = Math.max(1, Number(process.env.KRYEO_AI_ESTIMATED_INPUT_TOKENS_PER_IMAGE || 300));
@@ -96,19 +96,19 @@ const LITE_INPUT_PRICE_PER_MILLION = nonnegativeEnvironmentNumber('KRYEO_AI_LITE
 const LITE_OUTPUT_PRICE_PER_MILLION = nonnegativeEnvironmentNumber('KRYEO_AI_LITE_OUTPUT_PRICE_PER_MILLION', 0.13);
 const ESCALATION_INPUT_PRICE_PER_MILLION = nonnegativeEnvironmentNumber('KRYEO_AI_ESCALATION_INPUT_PRICE_PER_MILLION', 0.104);
 const ESCALATION_OUTPUT_PRICE_PER_MILLION = nonnegativeEnvironmentNumber('KRYEO_AI_ESCALATION_OUTPUT_PRICE_PER_MILLION', 0.416);
-// Reserve enough room for one compact batch repair and provider-side token
-// accounting variance. This is deliberately conservative because the budget is
-// a spending ceiling, not a post-hoc estimate.
+
+
+
 const COST_ESTIMATE_SAFETY_FACTOR = Math.max(1, Number(process.env.KRYEO_AI_COST_ESTIMATE_SAFETY_FACTOR || 2));
-// A scan should keep making progress when one provider request stalls. One
-// bounded batch retry is enough for transient transport failures; turning a
-// batch failure into a fan-out of single-family calls caused the old timeout
-// and rate-limit cascades.
+
+
+
+
 const MODEL_TIMEOUT_MS = Math.min(45_000, Math.max(10_000, Number(process.env.KRYEO_AI_MODEL_TIMEOUT_MS || 35_000)));
-const MAX_MODEL_RETRIES = Math.max(0, Math.min(1, Number(process.env.KRYEO_AI_MAX_MODEL_RETRIES || 0)));
+const MAX_MODEL_RETRIES = Math.max(0, Math.min(1, Number(process.env.KRYEO_AI_MAX_MODEL_RETRIES || 1)));
 const MODEL_CONCURRENCY = Math.max(1, Number(process.env.KRYEO_AI_MODEL_CONCURRENCY || 2));
 const MAX_INFLIGHT_PER_TOKEN = Math.max(1, Number(process.env.KRYEO_AI_MAX_INFLIGHT_PER_TOKEN || MODEL_CONCURRENCY));
-const ANALYSIS_VERSION = 'family-v70';
+const ANALYSIS_VERSION = 'family-v83';
 const EXPLANATION_VERSION = 'family-explanation-v13';
 
 const ASSET_TYPES = [
@@ -118,34 +118,38 @@ const ASSET_TYPES = [
 ];
 const ROBLOX_ROLES = ['Unknown', 'ImageButton', 'ImageLabel', 'Frame', 'TextButton', 'TextLabel', 'TextBox'];
 const DIVE_MODES = ['keep-together', 'children-only', 'parent-and-children'];
-const TYPE_TO_ROLE = {
-  Button: 'ImageButton',
-  Slot: 'ImageButton',
-  Tab: 'ImageButton',
-  Tile: 'ImageButton',
-  Text: 'TextLabel',
-  Label: 'TextLabel',
-  TextBox: 'TextBox',
-  Input: 'TextBox',
-  Panel: 'Frame',
-  ScrollBar: 'Frame',
-  Tooltip: 'Frame',
-  Modal: 'Frame',
-  Frame: 'Frame',
-};
 
+
+
+const ROLE_FOR_ASSET_TYPE = Object.freeze({
+  Unknown: 'Unknown', Frame: 'Frame', Button: 'ImageButton', Icon: 'ImageLabel', Panel: 'ImageLabel',
+  Slot: 'ImageButton', Bar: 'ImageLabel', Badge: 'ImageLabel', Label: 'TextLabel', Text: 'TextLabel',
+  TextBox: 'TextBox', ScrollBar: 'Frame', Divider: 'ImageLabel', Background: 'ImageLabel',
+  Wallpaper: 'ImageLabel', Texture: 'ImageLabel', Overlay: 'ImageLabel', Cursor: 'ImageLabel',
+  Tooltip: 'ImageLabel', Modal: 'ImageLabel', Input: 'TextBox', Tab: 'ImageButton', Tile: 'ImageButton',
+  Ornament: 'ImageLabel', Border: 'ImageLabel', Corner: 'ImageLabel', Edge: 'ImageLabel',
+  Fill: 'ImageLabel', FX: 'ImageLabel',
+});
+const ROLE_CONTRACT_TEXT = Object.entries(ROLE_FOR_ASSET_TYPE)
+  .filter(([type]) => type !== 'Unknown')
+  .map(([type, role]) => `${type}=${role}`)
+  .join(', ');
+
+function hasCompatibleRobloxRole(assetType, role) {
+  return assetType !== 'Unknown' && role !== 'Unknown' && ROLE_FOR_ASSET_TYPE[assetType] === role;
+}
 const LITE_CLASSIFICATION_SYSTEM = [
   'You are Kryeo visual intelligence. Visually classify every supplied numbered UI-asset family; never skip an alias.',
   'Use the image as primary evidence. Meaningful human-authored layer names are supporting intent only; hashes, filenames, numbers, and default layer names are not evidence. Never let a source label replace what is visibly present.',
-  'Ground every word in the name and reason in an observable visual fact. Never invent a setting, vehicle, story, material, colour adjective, or function that is not plainly visible in the supplied preview or neutral observation. When identity is genuinely unreadable, set u=1 rather than making it sound specific.',
-  'Choose the closest allowed type. Complete illustrated scenes are Wallpaper; foundational surfaces are Background; perimeters are Border; sparse transparent treatments are Overlay; reusable material is Texture; discrete content receptacles are Slot; compact markers/counters are Badge; compact symbols are Icon; decorative motifs are Ornament; large structural enclosures are Frame; light/glow/particles are FX.',
+  'A name is a stable asset identifier, not an art caption. Use the shortest clear identity supported by the target itself. Never invent style, era, mood, lore, brand, or story details. One obvious stable visual descriptor such as shape, pattern, colour, position, or UI purpose is useful when it distinguishes the target; omit speculative or purely decorative adjectives. Real states such as Hover, Pressed, Disabled, Selected, or Glow are also valid. When identity is genuinely unreadable, set u=1 rather than making it sound specific.',
+  'Choose the closest allowed type. Complete illustrated scenes are Wallpaper; foundational surfaces are Background; perimeters are Border; sparse transparent treatments are Overlay; reusable material is Texture; discrete content receptacles are Slot; compact markers/counters are Badge; compact symbols are Icon; decorative motifs are Ornament; a Panel is a broad non-interactive content surface, not a catch-all for compact grouped art; large structural enclosures are Frame; light/glow/particles are FX.',
   'Wallpaper requires a dense, complete illustrated or photographic scene across most of the canvas. A sparse grid, guide, checker, or transparent layout treatment is not a Wallpaper; classify its visible function and mark uncertainty when that function is unclear.',
-  'Hierarchy metadata is context only. Name the supplied family itself; never concatenate parent, ancestor, sibling, collection, or group labels into a reusable name. The final name must include the exact selected asset type once as its terminal semantic noun, before only an ordinal or genuine state; never place the type first and never include a compound subtype that implies another enum.',
-  'A GroupNode or structural Frame is implementation metadata, not permission to append Container, Group, Frame, or similar words. Use such a word only when the visible artwork itself is that object.',
+  'Hierarchy metadata is context only. Name the supplied family itself; never concatenate parent, ancestor, sibling, collection, or group labels into a reusable name. The final name must include the exact selected asset type once as its terminal semantic noun, before only an ordinal, genuine state, or a structural qualifier such as Set/Collection/Assembly for a visibly composed family; never place the type first and never include a compound subtype that implies another enum.',
+  'A GroupNode or structural Frame is implementation metadata, not permission to append Container, Group, Frame, or similar words. Use such a word only when the visible artwork itself is that object. A compact visual with an inset, item well, state marker, or repeated-cell function is not a Panel solely because it has a filled centre or is grouped; use Slot when the visible function is a discrete receptacle.',
   'A GroupNode, child count, or square outline never establishes Frame by itself. A transparent decorative rim with an empty centre and visible perimeter artwork is Border with an ImageLabel role; use Frame only for artwork that visibly functions as structural chrome around external UI content.',
   'Do not borrow distinctive words from parent, ancestor, child, or sibling names. A name word is valid only when supported by the target family source identity or visible artwork.',
   'Return one complete human-facing name based on the visible asset. Source labels may support a visually credible name but must not become the name by themselves. Do not use IDs, hashes, filenames, or bare generic type nouns when the artwork supports a clearer identity.',
-  'Keep related construction siblings coherent within this one complete decision: use one short shared visual root and ordinal names in document order when the individual pieces are not directionally distinct. Do not invent colour, material, density, complexity, or style adjectives merely to make siblings different. Prefer a concise 2â€“4 word identity over a descriptive caption.',
+  'Keep related construction siblings coherent within this one complete decision: use one short shared visual root and local 1..N ordinal names in document order when the individual pieces are not directionally distinct. Never use a global layer/document number, never repeat an ordinal, and never invent adjectives merely to make siblings different. Prefer a concise 2-4 word identity over a descriptive caption. Return normal spaced display words, never raw CamelCase or concatenated source tokens.',
   'u is 1 only when the image is unreadable or meaningful evidence genuinely conflicts; otherwise 0. d is 0 keep-together, 1 children-only, or 2 parent-and-children.',
   'For d: use 0 when overlapping pieces form one motif; use 1 only for an organizational parent whose children are reusable and whose parent adds no standalone asset; use 2 when both the assembled parent and independent children are useful exports. When hierarchy evidence is weak, use 0 and set u to 1.',
   `Allowed t values: ${ASSET_TYPES.join(', ')}.`,
@@ -154,11 +158,12 @@ const LITE_CLASSIFICATION_SYSTEM = [
 
 const DECISION_CONTRACT = [
   'You are Kryeo visual intelligence. Return one atomic decision for every requested export scope; never skip an alias. Return valid JSON only.',
-  'Evidence order: target preview and alpha topology first; supporting child previews second; hierarchy and meaningful source labels only as confidence context. Names, hashes, filenames, and group labels never decide the answer on their own.',
+  'Evidence order: target preview and alpha topology first; supporting child previews second; hierarchy and meaningful source labels only as confidence context. Never copy a parent, ancestor, sibling, or collection identity into the target name. When the target has a distinct meaningful direct label and the preview is ambiguous, preserve that target identity only when visually compatible. Names, hashes, filenames, and group labels never decide the answer on their own.',
   'The scope has already been structurally planned. Do not turn a construction child, parent label, or adjacent sibling into the target asset. Decide only the shown export owner.',
   'Return type, Roblox role, name, grouping, confidence, reason, and alternative together. Do not patch one field from another. Use Unknown only when the target preview is absent or unreadable; otherwise choose the closest allowed type and set uncertainty when the reading is genuinely ambiguous.',
+  `Roblox role is a platform-output contract, not a visual clue. Return the matching pair exactly: ${ROLE_CONTRACT_TEXT}.`,
   'When review context is supplied, return the final replacement packet itself rather than criticism of the current packet. Set conflict only if no complete final packet is defensible.',
-  'Use a short, factual human name grounded in visible artwork. It must contain the selected type exactly once as the final semantic noun, followed only by an ordinal or real visual state. Never invent story, setting, material, colour, product, or function details.',
+  'A name is a stable asset identifier, not an art caption. Use the shortest factual human name grounded in the target. It must contain the selected type exactly once as the final semantic noun, followed only by an ordinal, real visual state, or a structural qualifier such as Set/Collection/Assembly for a visibly composed family. Never invent style, era, mood, lore, brand, or story details. One obvious stable descriptor such as shape, pattern, colour, position, or UI purpose is allowed when it is directly supported by the target source identity or plainly observable. Return normal spaced display words, never raw CamelCase or concatenated source tokens.',
   'A filled foundation is Background; a complete illustrated scene is Wallpaper; a reusable material surface is Texture; a sparse treatment is Overlay; a perimeter is Border; a self-contained decorative mark is Ornament or Badge; an item receptacle is Slot; a structural enclosure for external content is Frame. GroupNode is not Frame evidence.',
   'For d, copy the supplied plannedGrouping exactly: 0 keeps a composed parent together, 1 exposes child assets from an organizational parent, and 2 exports both. If the structural plan seems ambiguous, set reviewNeeded and explain it; never silently rewrite its boundary.',
   `Allowed types: ${ASSET_TYPES.join(', ')}. Allowed roles: ${ROBLOX_ROLES.join(', ')}.`,
@@ -169,8 +174,9 @@ const DECISION_CONTRACT = [
 // vision model to choose between this schema and the richer reviewer schema.
 const COMPACT_DECISION_CONTRACT = [
   'You are Kryeo visual intelligence. Make one complete visual decision for every requested family alias. Return JSON only and never skip an alias.',
-  'Use the target preview as primary evidence. Hierarchy and meaningful source labels only adjust confidence; they never become a naming template. Do not invent a story, setting, material, colour, or function that is not visibly supported.',
-  'Name, type, Roblox role, and planned grouping are one decision. The name must contain the selected type exactly once as its final semantic noun, followed only by a real state or document-order ordinal.',
+  'Use the target preview as primary evidence. Hierarchy and meaningful source labels only adjust confidence; they never become a naming template, semantic tie-breaker, or blind override. Never copy a parent, ancestor, sibling, or collection identity into the target name. If the target has a distinct meaningful direct label and the preview is ambiguous, preserve that target identity only when visually compatible. When a static preview genuinely supports two readings, choose the closest visible function, set uncertainty, and name only the target itself. A name is a stable asset identifier, not an art caption: use the shortest factual identity. Never invent style, era, mood, lore, brand, or story details; one obvious stable descriptor such as shape, pattern, colour, position, or UI purpose is allowed when directly supported or plainly visible. Return normal spaced display words, never raw CamelCase or concatenated source tokens.',
+  'Name, type, Roblox role, and planned grouping are one decision. The name must contain the selected type exactly once as its final semantic noun, followed only by a real state, document-order ordinal, or a structural qualifier such as Set/Collection/Assembly for a visibly composed family.',
+  `Return a platform-valid type/role pair exactly: ${ROLE_CONTRACT_TEXT}. Do not use Frame as the role for a Slot, Border, Background, Wallpaper, Texture, or other image asset.`,
   'A perimeter is Border; a foundational surface is Background; a scene is Wallpaper; a reusable material surface is Texture; a sparse treatment is Overlay; an item receptacle is Slot; Frame requires visible structural chrome for external content. GroupNode is not Frame evidence.',
   'Return exactly {"f":[["f1",0,"assetType","complete name",0,0,"role"]]}. Every row is [alias,unused,type,name,uncertain(0|1),plannedGrouping(0 keep-together|1 children-only|2 parent-and-children),role]. Return every requested alias exactly once and no prose.',
   `Allowed types: ${ASSET_TYPES.join(', ')}. Allowed roles: ${ROBLOX_ROLES.join(', ')}.`,
@@ -181,6 +187,7 @@ const EVIDENCE_SYSTEM = [
   'Inspect the supplied image and metadata without assuming the chosen name or type is correct. Explain support when it is correct; when it is wrong, mark a conflict and return the better allowed type, role, and name. If the preview is tiny, unreadable, nearly invisible, or not a functional instance of the chosen type, set ok=false and x=true; do not report high confidence for that chosen type.',
   'A transparent or visibly empty perimeter is Border/ImageLabel, not Frame, Badge, or Slot. A compact Badge is a self-contained filled marker; a Slot visibly receives selectable content; a Background is a foundational surface or fill rather than a surrounding rim. A GroupNode, parent name, child count, or category label is context only and never proves a runtime type.',
   'When rejecting or renaming a decision, return one complete replacement: type, Roblox role, and a concise name that includes the exact replacement type once as its terminal semantic noun, before only an ordinal or genuine state. Never return criticism or a renamed proposal without the complete replacement.',
+  `Audit the type and Roblox role together against this platform contract: ${ROLE_CONTRACT_TEXT}. If the current packet violates it, return one complete replacement packet; do not merely describe the mismatch.`,
   'If a compatible meaningful source identity is clearer than speculative visual adjectives, retain that identity. Source text supports confidence but never overrides contrary visible evidence.',
   'For anonymous construction siblings, use the supplied sibling ordinal and peer decisions to return one concise shared root followed by the final type and document-order number. Do not invent a different style adjective for every piece.',
   'Return JSON only: {"q":"one short reason","v":"one short visual description","c":0.9,"e":[0.9,0.2,0.8,0],"ok":true,"x":false,"xm":"","st":"optional better type","sr":"optional better role","sn":"optional better name","a":[["alternativeType","short reason"]]}.',
@@ -195,6 +202,14 @@ const STRUCTURAL_IDENTITY_WORDS = new Set([
   'left', 'right', 'side', 'sides', 'glow', 'shine', 'highlight', 'light', 'shadow',
 ]);
 
+// Filesystem and export tokens are transport metadata, not visual identity.
+// This is intentionally a generic format list, never document-specific
+// wording, and it mirrors the desktop production-name boundary below.
+const FILE_ARTIFACT_NAME_WORDS = new Set([
+  'file', 'filename', 'attachment', 'download', 'upload', 'export',
+  'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'svg', 'psd', 'afdesign',
+]);
+
 function decisionNameTypeWords(value) {
   const normalized = readableSourceName(value).toLowerCase();
   return ASSET_TYPES
@@ -207,20 +222,110 @@ function decisionNameTypeWords(value) {
     .sort((left, right) => left.index - right.index || right.type.length - left.type.length);
 }
 
+function hasFileArtifactName(value) {
+  const words = readableSourceName(value).toLowerCase().split(/\s+/).filter(Boolean);
+  return words.some((word) => FILE_ARTIFACT_NAME_WORDS.has(word))
+    || words.some((word) => /^\d{5,}$/.test(word));
+}
+
+// Editor-default construction words describe how artwork was authored, not
+// what the exported visual is. Keep this deliberately generic so no document
+// vocabulary can enter the decision contract as a local naming rule.
+function hasEditorConstructionName(value) {
+  return /\b(?:layer|group|node|raster|shape|image|asset|element)\s*\d*\b/i.test(readableSourceName(value));
+}
+
+const DECISION_POST_TYPE_QUALIFIERS = new Set([
+  'hover', 'pressed', 'disabled', 'active', 'selected', 'focused', 'default', 'empty', 'filled', 'glow',
+  'set', 'sets', 'collection', 'collections', 'assembly', 'assemblies', 'group', 'groups', 'series', 'pack', 'packs',
+]);
+
+// This is display grammar only. It preserves every model-owned semantic word,
+// splits source-like CamelCase, and moves an already selected type behind its
+// descriptors. It never adds, removes, or substitutes a type or identity.
+function canonicalDecisionName(value, assetType) {
+  const normalized = readableSourceName(cleanText(value, '', 160));
+  if (!normalized || assetType === 'Unknown') return normalized;
+  const matches = decisionNameTypeWords(normalized);
+  const selectedMatches = matches.filter((match) => match.type === assetType);
+  const compatibleSubtypes = MODEL_COMPATIBLE_NAME_SUBTYPES[assetType] || new Set();
+  if (selectedMatches.length !== 1
+    || matches.some((match) => match.type !== assetType && !compatibleSubtypes.has(match.type))) {
+    return normalized;
+  }
+  const selected = selectedMatches[0];
+  const before = normalized.slice(0, selected.index).trim().split(/\s+/).filter(Boolean);
+  const selectedWords = normalized.slice(selected.index, selected.index + selected.length).trim().split(/\s+/).filter(Boolean);
+  const after = normalized.slice(selected.index + selected.length).trim().split(/\s+/).filter(Boolean);
+  const qualifiers = after.filter((word) => /^\d+$/.test(word) || DECISION_POST_TYPE_QUALIFIERS.has(word.toLowerCase()));
+  const descriptors = after.filter((word) => !/^\d+$/.test(word) && !DECISION_POST_TYPE_QUALIFIERS.has(word.toLowerCase()));
+  if (![...before, ...descriptors].length) return normalized;
+  return readableSourceName([...before, ...descriptors, ...selectedWords, ...qualifiers].join(' '));
+}
+
 function isCompleteDecisionName(value, assetType) {
-  const name = cleanText(value, '', 160);
+  const name = canonicalDecisionName(value, assetType);
   if (!name || !ASSET_TYPES.includes(assetType) || assetType === 'Unknown') return false;
   const matches = decisionNameTypeWords(name);
   const selectedMatches = matches.filter((match) => match.type === assetType);
-  if (selectedMatches.length !== 1 || !matches.every((match) => match.type === assetType)) return false;
+  const compatibleSubtypes = MODEL_COMPATIBLE_NAME_SUBTYPES[assetType] || new Set();
+  if (selectedMatches.length !== 1 || !matches.every((match) => match.type === assetType || compatibleSubtypes.has(match.type))) return false;
   const selected = selectedMatches[0];
   const normalized = readableSourceName(name).toLowerCase();
+  if (hasFileArtifactName(normalized)) return false;
+  if (hasEditorConstructionName(normalized)) return false;
   const prefix = normalized.slice(0, selected.index).trim();
   const suffix = normalized.slice(selected.index + selected.length).trim();
-  const allowedSuffixes = new Set(['hover', 'pressed', 'disabled', 'active', 'selected', 'focused', 'default', 'empty', 'filled', 'glow']);
-  return Boolean(prefix)
-    && (!suffix || suffix.split(/\s+/).every((word) => /^\d+$/.test(word) || allowedSuffixes.has(word)));
+  const suffixIsAllowed = !suffix || suffix.split(/\s+/).every((word) => /^\d+$/.test(word) || DECISION_POST_TYPE_QUALIFIERS.has(word));
+  // A taxonomy plus an ordinal (for example "Border 1") has no identity.
+  // It must receive one bounded visual replacement at the gateway, rather
+  // than passing cache validation here and being rejected later by the app.
+  return Boolean(prefix) && suffixIsAllowed;
 }
+
+function decisionPacketIssues(analysis) {
+  if (!analysis) return ['The model omitted this family.'];
+  const issues = [];
+  if (!analysis.familyName) issues.push('The model returned no production name.');
+  if (!ASSET_TYPES.includes(analysis.assetType) || analysis.assetType === 'Unknown') issues.push('The model returned no usable asset type.');
+  if (!ROBLOX_ROLES.includes(analysis.role) || analysis.role === 'Unknown') issues.push('The model returned no usable Roblox role.');
+  if (analysis.assetType !== 'Unknown' && analysis.role !== 'Unknown' && !hasCompatibleRobloxRole(analysis.assetType, analysis.role)) {
+    issues.push(`The ${analysis.assetType}/${analysis.role} pair violates the generic Roblox output contract.`);
+  }
+  if (analysis.assetType !== 'Unknown' && analysis.familyName && !isCompleteDecisionName(analysis.familyName, analysis.assetType)) {
+    const canonical = canonicalDecisionName(analysis.familyName, analysis.assetType);
+    const matches = decisionNameTypeWords(canonical);
+    const selectedMatches = matches.filter((match) => match.type === analysis.assetType);
+    const compatibleSubtypes = MODEL_COMPATIBLE_NAME_SUBTYPES[analysis.assetType] || new Set();
+    if (selectedMatches.length !== 1) issues.push(`The name must contain ${analysis.assetType} exactly once.`);
+    if (matches.some((match) => match.type !== analysis.assetType && !compatibleSubtypes.has(match.type))) {
+      issues.push('The name contains a conflicting asset type.');
+    }
+    if (hasFileArtifactName(canonical)) issues.push('The name contains a file/export artefact.');
+    if (hasEditorConstructionName(canonical)) issues.push('The name contains an editor-default construction label.');
+    if (selectedMatches.length === 1) {
+      const selected = selectedMatches[0];
+      const prefix = readableSourceName(canonical).slice(0, selected.index).trim();
+      if (!prefix) issues.push('The name has no descriptive identity before its final type.');
+    }
+    if (!issues.length) issues.push('The name does not satisfy the production-name grammar.');
+  }
+  return [...new Set(issues)];
+}
+
+function reviewScopeNameIssues(analyses, families) {
+  // Visual review owns semantic packets. Duplicate or reversed terminal
+  // ordinals are deterministic document-order metadata and are canonicalised
+  // together with the final packet by the desktop resolver. Rejecting a
+  // complete visual decision here caused valid review rows to disappear.
+  void analyses;
+  void families;
+  return new Map();
+}
+
+const MODEL_COMPATIBLE_NAME_SUBTYPES = {
+  Border: new Set(['Corner', 'Edge', 'Ornament', 'Fill']),
+};
 
 class IncompleteFamilyBatchError extends Error {
   constructor(message, partialResults = [], missingFamilies = [], fallbackResults = []) {
@@ -875,6 +980,34 @@ function readableSourceName(value) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function sourceTypeHintFromName(value) {
+  const normalized = readableSourceName(value);
+  if (!normalized) return undefined;
+  const matches = ASSET_TYPES
+    .filter((type) => type !== 'Unknown')
+    .flatMap((type) => {
+      const words = readableSourceName(type).replace(/\s+/g, '\\s+');
+      const match = new RegExp(`\\b${words}s?\\b`, 'i').exec(normalized);
+      return match ? [{ type, index: match.index }] : [];
+    })
+    .sort((left, right) => right.index - left.index || right.type.length - left.type.length);
+  return matches[0]?.type;
+}
+
+function familyTypeHints(family) {
+  const direct = [...new Set((family.members || [])
+    .map((member) => sourceTypeHintFromName(member.layerName || member.name))
+    .filter(Boolean))];
+  const hierarchy = [...new Set([
+    ...(family.parentNames || []),
+    ...(family.hierarchyContext || []).map((context) => context.parentName),
+  ].map(sourceTypeHintFromName).filter(Boolean))];
+  return {
+    sourceTypeHint: family.sourceTypeHint || (direct.length === 1 ? direct[0] : undefined),
+    hierarchyTypeHint: family.hierarchyTypeHint || (hierarchy.length === 1 ? hierarchy[0] : undefined),
+  };
+}
+
 function identityWords(value) {
   return readableSourceName(value)
     .toLowerCase()
@@ -905,14 +1038,34 @@ function meaningfulSourceName(value) {
   return source;
 }
 
-function isSelfContradictoryCloudAssessment(reason, evidence, confidence) {
-  const strongestEvidence = Math.max(0, ...Object.values(evidence || {}).map((value) => confidenceScore(value)));
-  const describesArtifact = /\b(?:tiny|nearly\s+invisible|negligible\s+(?:visible|visual)|artifact|unreadable|not\s+(?:a\s+)?functional|no\s+(?:reliable|visible)\s+(?:visual|evidence))\b/i.test(String(reason || ''));
-  return confidence >= 0.72 && strongestEvidence < 0.12 && describesArtifact;
+function specificIdentityWords(value) {
+  return identityWords(value).filter((word) => !STRUCTURAL_IDENTITY_WORDS.has(word));
 }
 
-function roleForAssetType(type) {
-  return TYPE_TO_ROLE[type] || (type === 'Unknown' ? 'Unknown' : 'ImageLabel');
+// This is a generic review gate, not a name generator. It catches only the
+// case where a proposed target name copies an ancestor's distinctive word
+// while ignoring the target's one meaningful direct identity.
+function sourceIdentityLeakageIssue(familyName, family) {
+  if (!family || !familyName) return '';
+  const directNames = [...new Set((family.members || [])
+    .map((member) => meaningfulSourceName(member.layerName || member.name))
+    .filter((name) => name && !isStructuralIdentity(name) && !isOpaqueIdentity(name)))];
+  if (directNames.length !== 1) return '';
+  const directWords = new Set(specificIdentityWords(directNames[0]));
+  if (!directWords.size) return '';
+  const ancestorWords = new Set([
+    ...(family.parentNames || []),
+    ...(family.hierarchyContext || []).flatMap((context) => [
+      context.parentName,
+      ...(context.ancestorNames || []),
+    ]),
+  ].flatMap(specificIdentityWords));
+  const proposedWords = new Set(specificIdentityWords(familyName));
+  const copiedAncestorIdentity = [...proposedWords].some((word) => ancestorWords.has(word));
+  const omittedDirectIdentity = [...directWords].every((word) => !proposedWords.has(word));
+  return copiedAncestorIdentity && omittedDirectIdentity
+    ? 'The proposed name reused an ancestor identity while omitting the target\'s meaningful direct identity. Return one complete target-specific visual decision.'
+    : '';
 }
 
 function normalizeDiveMode(value) {
@@ -923,22 +1076,25 @@ function normalizeDiveMode(value) {
   return undefined;
 }
 
-function normalizeAnalysis(raw, family, peerFamilies = []) {
+function normalizeAnalysis(raw, family, peerFamilies = [], options = {}) {
   const proposedType = ASSET_TYPES.includes(raw.assetType) ? raw.assetType : 'Unknown';
-  const modelFamilyName = cleanText(raw.familyName, 'Unlabelled visual');
-  // The cloud decision is atomic. Geometry is supplied as visual evidence to
-  // both passes; it must not locally rewrite one field after the model returns.
   const assetType = proposedType;
-  // A packet is atomic: do not silently derive a missing Roblox role from the
-  // proposed type. The model must return name, type, role, and grouping as one
-  // usable decision or the scope remains unresolved for review.
-  const role = ROBLOX_ROLES.includes(raw.role) ? raw.role : 'Unknown';
-  const validName = isCompleteDecisionName(modelFamilyName, assetType);
+  const rawFamilyName = cleanText(raw.familyName, '');
+  const suppliedFamilyName = canonicalDecisionName(rawFamilyName, assetType);
+  const modelFamilyName = rawFamilyName || 'Unlabelled visual';
+  // Name, type, role, and grouping belong to the same visual-model packet.
+  // The gateway validates transport data, but must never generate a name or
+  // substitute a role from a local rule.
+  const modelRole = ROBLOX_ROLES.includes(raw.role) ? raw.role : 'Unknown';
+  const role = modelRole;
   const normalizationReason = '';
   const suppliedDiveMode = normalizeDiveMode(raw.diveMode);
   const diveMode = suppliedDiveMode || family.structuralDiveMode || 'keep-together';
   const names = new Map((Array.isArray(raw.memberNames) ? raw.memberNames : [])
-    .map((member) => [String(member.visualHash || ''), cleanText(member.name, '')]));
+    .map((member) => [
+      String(member.visualHash || ''),
+      canonicalDecisionName(cleanText(member.name, ''), assetType),
+    ]));
   const evidence = {
     visual: confidenceScore(raw.evidence?.visual),
     layerName: confidenceScore(raw.evidence?.layerName),
@@ -964,14 +1120,23 @@ function normalizeAnalysis(raw, family, peerFamilies = []) {
       : 'The family needs user review.',
     400,
   );
-  const selfContradictoryAssessment = !compactPacket
-    && isSelfContradictoryCloudAssessment(modelReason, evidence, reportedConfidence);
-  const confidence = selfContradictoryAssessment ? Math.min(0.55, reportedConfidence) : reportedConfidence;
-  const conflict = booleanValue(raw.conflict) || selfContradictoryAssessment;
+  const confidence = reportedConfidence;
+  const familyName = suppliedFamilyName;
+  const validName = isCompleteDecisionName(familyName, assetType);
+  const validRole = hasCompatibleRobloxRole(assetType, role);
+  const identityLeakage = sourceIdentityLeakageIssue(familyName, family);
+  // In a primary packet, `conflict` means the model itself has no resolved
+  // decision. In an independent review packet it commonly means the reviewer
+  // disagrees with the *previous* decision. Those are opposite meanings: a
+  // complete reviewer replacement must reach the desktop resolver, where it
+  // is selected atomically. Structural/name leakage is still a real conflict
+  // in either lane and remains review-gated.
+  const conflict = Boolean(identityLeakage)
+    || (!options.authoritativeReview && booleanValue(raw.conflict));
   return {
     familyId: family.id,
     fingerprint: family.fingerprint,
-    familyName: modelFamilyName,
+    familyName,
     assetType,
     role,
     modelFamilyName,
@@ -979,12 +1144,10 @@ function normalizeAnalysis(raw, family, peerFamilies = []) {
     normalizationReason: normalizationReason || undefined,
     memberNames: family.members.map((member, index) => ({
       visualHash: member.visualHash,
-      name: cleanText(names.get(member.visualHash) || modelFamilyName, ''),
+      name: canonicalDecisionName(names.get(member.visualHash) || suppliedFamilyName, assetType),
     })),
     diveMode,
-    reason: selfContradictoryAssessment
-      ? `The cloud response described this as an unreadable or non-functional artifact while claiming high confidence. Kryeo marked the classification unreliable. ${normalizationReason ? `${normalizationReason} ` : ''}${modelReason}`
-      : normalizationReason ? `${normalizationReason} ${modelReason}` : modelReason,
+    reason: normalizationReason ? `${normalizationReason} ${modelReason}` : modelReason,
     visualDescription: cleanText(raw.visualDescription, '', 500),
     confidence,
     ...(compactPacket ? { compactPacket: true } : {}),
@@ -992,11 +1155,12 @@ function normalizeAnalysis(raw, family, peerFamilies = []) {
     conflict,
     conflictMessage: cleanText(
       raw.conflictMessage,
-      selfContradictoryAssessment
-          ? 'The cloud response has almost no supporting evidence and describes the preview as an unreadable or non-functional artifact.'
-          : !validName && assetType !== 'Unknown'
+      identityLeakage
+        || (!validName && assetType !== 'Unknown'
             ? 'The cloud response did not return a valid name for its selected type.'
-          : '',
+            : !validRole && assetType !== 'Unknown'
+              ? `The cloud response paired ${assetType} with ${role}; the visual reviewer must return one complete platform-valid replacement.`
+              : ''),
       300,
     ),
     reviewNeeded: Boolean(
@@ -1008,6 +1172,8 @@ function normalizeAnalysis(raw, family, peerFamilies = []) {
       || role === 'Unknown'
       || !suppliedDiveMode
       || !validName
+      || !validRole
+      || Boolean(identityLeakage)
     ),
     alternatives: (Array.isArray(raw.alternatives) ? raw.alternatives : []).slice(0, 3).map((item) => ({
       assetType: ASSET_TYPES.includes(item.assetType) ? item.assetType : 'Unknown',
@@ -1090,7 +1256,25 @@ function compactHierarchyForPrompt(hierarchyContext = []) {
   }));
 }
 
+function renderedStructureCue(metrics) {
+  if (!metrics || typeof metrics !== 'object') return null;
+  const inner = Number(metrics.innerVisibleRatio);
+  const perimeter = Number(metrics.contentPerimeterVisibleRatio);
+  const coverage = Number(metrics.contentPerimeterCoverage);
+  if (Number.isFinite(inner) && Number.isFinite(perimeter) && Number.isFinite(coverage)
+    && inner < 0.12 && perimeter > 0.05 && perimeter > inner * 2 && coverage >= 0.28) {
+    return 'strong-perimeter';
+  }
+  const center = Number(metrics.centerVisibleRatio);
+  const edge = Number(metrics.edgeVisibleRatio);
+  if (Number.isFinite(center) && Number.isFinite(edge) && center < 0.16 && edge > 0.06 && edge > center * 2.2) {
+    return 'perimeter';
+  }
+  return null;
+}
+
 function promptFamilyMetadata(family, familyIndex, compact) {
+  const typeHints = familyTypeHints(family);
   return {
     familyId: compact ? `f${familyIndex + 1}` : family.id,
     familyIndex: familyIndex + 1,
@@ -1098,6 +1282,8 @@ function promptFamilyMetadata(family, familyIndex, compact) {
     structuralDiveMode: family.structuralDiveMode || 'keep-together',
     siblingOrdinal: family.siblingOrdinal,
     siblingCount: family.siblingCount,
+    sourceTypeHint: typeHints.sourceTypeHint || null,
+    hierarchyTypeHint: typeHints.hierarchyTypeHint || null,
     decisionScopeKey: family.decisionScopeKey || family.namingScopeKey || '',
     parentNames: (family.parentNames || []).slice(0, 4),
     hierarchyContext: compact
@@ -1116,8 +1302,9 @@ function promptFamilyMetadata(family, familyIndex, compact) {
             bounds: member.bounds,
             childCount: member.childHierarchyKeys.length,
             visualMetrics: member.visualMetrics || null,
+            renderedStructureCue: renderedStructureCue(member.visualMetrics),
           }),
-    })),
+        })),
     contextMembers: (family.contextMembers || []).slice(0, 8).map((member, memberIndex) => ({
       imageLabel: `family-${familyIndex + 1}-context-${memberIndex + 1}`,
       layerName: member.name,
@@ -1133,10 +1320,42 @@ function isCacheableFamilyAnalysis(analysis) {
     analysis
     && analysis.assetType !== 'Unknown'
     && analysis.role !== 'Unknown'
+    // A complete packet must also be a usable Roblox export decision. This
+    // does not repair a model answer; it routes the whole packet back through
+    // the independent visual reviewer for a complete replacement.
+    && hasCompatibleRobloxRole(analysis.assetType, analysis.role)
     && !analysis.reviewNeeded
     && !analysis.conflict
     && isCompleteDecisionName(analysis.familyName, analysis.assetType)
     && (analysis.memberNames || []).every((member) => isCompleteDecisionName(member.name, analysis.assetType)),
+  );
+}
+
+// A review packet is an explicit atomic replacement candidate. It can carry
+// `conflict`/`reviewNeeded` from the model solely to say that it differs from
+// the primary packet or that the reading is close; those states are resolved
+// by the desktop resolver, not a reason to erase valid name/type/role data in
+// the gateway. Primary cache admission deliberately remains stricter above.
+function isCompleteAuthoritativeReviewPacket(analysis) {
+  return Boolean(
+    analysis
+    && !analysis.conflict
+    && decisionPacketIssues(analysis).length === 0,
+  );
+}
+
+// A batch can be transport-incomplete even when it returned a sound decision
+// for one of its requested scopes. Do not let a later recovery request
+// overwrite that sound reviewer decision merely because another alias was
+// absent. This is deliberately evidence-generic: it applies to any taxonomy
+// type stated by the target's own source label, never to an artwork name.
+function isDirectCueConsistentReviewPacket(analysis, family) {
+  if (!analysis || !family || !isCompleteAuthoritativeReviewPacket(analysis)) return false;
+  const directType = familyTypeHints(family).sourceTypeHint;
+  return Boolean(
+    directType
+    && analysis.assetType === directType
+    && decisionPacketIssues(analysis).length === 0,
   );
 }
 
@@ -1146,6 +1365,7 @@ function roundedMetric(value) {
 }
 
 function compactLiteFamilyMetadata(family, familyIndex) {
+  const typeHints = familyTypeHints(family);
   const hierarchy = compactHierarchyForPrompt(family.hierarchyContext).slice(0, 2).map((item) => [
     item.parentName || '',
     item.ancestorNames || [],
@@ -1169,6 +1389,7 @@ function compactLiteFamilyMetadata(family, familyIndex) {
           roundedMetric(member.visualMetrics.contentPerimeterCoverage),
         ]
       : null,
+    renderedStructureCue(member.visualMetrics),
   ]);
   const contextMembers = (family.contextMembers || []).slice(0, 4).map((member) => [
     member.name,
@@ -1182,6 +1403,8 @@ function compactLiteFamilyMetadata(family, familyIndex) {
     family.structuralDiveMode || 'keep-together',
     Number(family.siblingOrdinal || 0),
     Number(family.siblingCount || 0),
+    typeHints.sourceTypeHint || '',
+    typeHints.hierarchyTypeHint || '',
     (family.parentNames || []).slice(0, 3),
     members,
     contextMembers,
@@ -1196,13 +1419,19 @@ function compactFamilyPrompt(families, context) {
   const content = [{
     type: 'text',
     text: [
-      'Metadata rows use [alias,boundary,plannedGrouping,siblingOrdinal,siblingCount,parentNames,members,supportingChildren,hierarchy,exactCopies].',
-      'Member rows use [sourceName,AffinityType,width,height,childCount,[visibleAlpha,opaqueAlpha,canvasEdgeVisible,canvasCenterVisible,contentInnerVisible,contentPerimeterVisible,contentPerimeterCoverage]].',
-      'Supporting children explain the composition of a composed parent and are not separate output decisions. Hierarchy fields are disambiguation context only, not naming text. Name each target family from its own visible artwork; never concatenate parent, ancestor, sibling, collection, or type labels.',
-      'Sibling ordinal/count records document order only. Use an ordinal in a name only when visually equivalent siblings truly share one root; never use it to copy a neighbour\'s identity.',
+      'Metadata rows use [alias,boundary,plannedGrouping,siblingOrdinal,siblingCount,sourceTypeHint,hierarchyTypeHint,parentNames,members,supportingChildren,hierarchy,exactCopies].',
+      'A direct source-type cue from the target label is creator intent; a hierarchy cue is only immediate context. Neither is a naming template or blind override. The target visual remains primary, but when a target preview is compatible with more than one UI shell, preserve its direct source type. Reject that direct cue only when concrete target pixels or alpha topology make that type incompatible; a generic filled composite, compact grouped motif, or chrome silhouette is not enough. Return uncertainty when the visual remains genuinely ambiguous.',
+      'Member rows use [sourceName,AffinityType,width,height,childCount,[visibleAlpha,opaqueAlpha,canvasEdgeVisible,canvasCenterVisible,contentInnerVisible,contentPerimeterVisible,contentPerimeterCoverage],renderedStructureCue]. A strong-perimeter cue means contentInnerVisible<0.12, contentPerimeterVisible>0.05, perimeter>2x inner, and coverage>=0.28.',
+      'Supporting children explain the composition of a composed parent and are not separate output decisions. Hierarchy is disambiguation context, not a general naming template. Name each target family from its own visible artwork. Only when an anonymous construction sibling has no visible identity of its own may it use one short immediate-parent structural descriptor to distinguish a real sibling sequence; never copy an ancestor or unrelated collection label.',
+      'Sibling ordinal/count records document order only. When visually equivalent siblings share one root, number that root locally as 1..N in document order; never reuse, skip, reverse, or copy a global layer/document number, and never use an ordinal to copy a neighbour\'s identity.',
+      'When a target has a meaningful direct sourceName that differs from its parent or ancestor identity, never reuse the parent/ancestor identity as the target name. Keep those identities distinct even when the preview is small; return the target\'s own concise source-supported identity and set uncertainty if its type is genuinely unclear. If direct sibling sourceName values are meaningfully different, keep their identities distinct and name each target from its own preview; never collapse them into one parent-derived root. If the current names collapse those siblings or their ordinals disagree with document order, return complete replacement rows for every affected sibling.',
       'plannedGrouping is fixed structural ownership. Copy it into d exactly (0=keep-together, 1=children-only, 2=parent-and-children); if it appears ambiguous, set rv=true instead of changing it.',
+      `The selected type and Roblox role must follow this platform output contract exactly: ${ROLE_CONTRACT_TEXT}. This is a required export schema, not source-label evidence. If the current review packet violates it, return a complete visual replacement row instead of repeating the mismatched pair.`,
       'A GroupNode, child count, or Frame field is structural metadata, not a request to call the asset Container, Group, or Frame. A transparent decorative perimeter with a sparse centre is Border/ImageLabel, not Frame, unless it visibly acts as structural chrome for external UI content.',
-      'Names must follow <descriptive visual identity> <final asset type>; include at least one grounded descriptor before the final type. Never return a bare taxonomy word such as Background, Wallpaper, Slot, Frame, Border, Texture, Badge, or Overlay, even with a number. Do not copy source, parent, ancestor, or sibling labels into a target name.',
+      'When renderedStructureCue is strong-perimeter, Frame/Panel/Slot are incompatible choices unless the preview visibly contains a filled structural enclosure; return Border/ImageLabel as the complete decision.',
+      'For a composed parent, judge the assembled visual and its child roles together. Do not promote a decorative perimeter to Frame merely because the node is a GroupNode. Panel is reserved for a broad non-interactive surface intended to contain content: do not use it for a compact item well, stateful cell, marker, or other discrete control merely because it is filled or grouped. For a construction child, a direct background/fill cue is meaningful context; do not call it a reusable Texture unless the preview visibly behaves like a material surface.',
+      'A name is a stable identifier, not an art caption. Use the shortest factual visual identity before the final asset type. Never invent style, era, mood, lore, brand, or story details. One obvious stable descriptor such as shape, pattern, colour, position, or UI purpose is allowed when directly supported or plainly visible; a real UI state and the immediate-parent exception for an anonymous construction sibling are also valid. A visibly composed collection may add Set, Collection, or Assembly after the final type. A bare taxonomy word or taxonomy-plus-number (such as Background, Wallpaper 8, Slot, Frame, Border 1, Texture, Badge, or Overlay) is invalid: use a real visible identity or mark the row uncertain. Do not copy source, parent, ancestor, or sibling labels wholesale into a target name. Return normal spaced display words, never raw CamelCase or concatenated source tokens.',
+      'Editor-default construction tokens such as Layer, Group, Node, Raster, Shape, Image, Asset, and Element are never a visual identity. Do not use them in any final name; name what the target visibly is instead.',
       'When reviewing a current packet, return a complete replacement row whenever the visual supports a decision. Do not return criticism alone, and do not mark a defensible visual Unknown merely because the current name is weak.',
       'Return JSON only in the compact shape {"f":[["f1",0,"assetType","complete name",0,0,"role"]]}. Each row is [alias,ignored,type,name,uncertain(0|1),plannedGrouping(0|1|2),role]. Return every requested alias exactly once; never return prose, markdown, or an incomplete row.',
       `F=${JSON.stringify(families.map(compactLiteFamilyMetadata))}`,
@@ -1282,12 +1511,18 @@ function familyPrompt(families, context = {}) {
     type: 'text',
     text: [
       'Make one complete semantic decision for every requested export scope. Return every requested family exactly once.',
-      'Evidence order: target image and alpha topology first; supporting child images second; immediate hierarchy and meaningful source labels only adjust confidence. Never use IDs, filenames, numbers, group labels, or ancestor text as the name.',
+      'Evidence order: target image and alpha topology first; supporting child images second; immediate hierarchy and meaningful source labels adjust confidence. A direct source-type cue from the target label is creator intent, while a hierarchy cue is context only. When the target preview is compatible with more than one UI shell, preserve its direct source type; reject it only when concrete target pixels or alpha topology make that type incompatible. A generic filled composite, compact grouped motif, or chrome silhouette is not enough to reject a direct target cue. Never use IDs, filenames, numbers, group labels, or ancestor text as the name. Only when an anonymous construction sibling has no visible identity of its own may it use one short immediate-parent structural descriptor to distinguish a real sibling sequence; never copy an ancestor or unrelated collection label.',
+      'A sourceTypeHint disagreement requires an explicit visual resolution in one complete replacement packet. Do not silently keep a mismatched type/name pair, and do not treat a hierarchyTypeHint as a substitute for the target\'s own cue. If a prior proposal is rejected because its name mixes taxonomy words, discard that wording: choose one final type, then generate a fresh name containing that final type exactly once and no other asset-type word. Do not patch only the name or only the type.',
       'The structural boundary is already planned. Supporting construction children are evidence for their parent, not extra assets. Report the supplied plannedGrouping exactly; do not turn a composed owner into loose children or vice versa.',
       'Each decision is atomic: name, assetType, role, plannedGrouping, confidence, reason, and any alternative must agree. If a reading is genuinely plausible but uncertain, select the best complete packet and put the other reading in alternatives. Use Unknown only for a missing or unreadable target preview.',
-      'Name the target itself from visible evidence. Use a short factual identity; never invent a story, location, vehicle, material, colour, brand, or function. Include the final type exactly once as the last semantic noun, then only a real state or document-order ordinal.',
-      'Type guide: a filled foundation is Background; a complete scene is Wallpaper; a reusable surface material is Texture; a sparse treatment is Overlay; an enclosing perimeter is Border; a self-contained decorative mark is Badge, Icon, or Ornament; an item receptacle is Slot; Frame requires visible structural chrome for external content. GroupNode is never Frame evidence by itself.',
+      `Type and Roblox role must also agree with the platform output contract: ${ROLE_CONTRACT_TEXT}. A contract mismatch requires a complete replacement packet, never a partial correction.`,
+      'A name is a stable asset identifier, not an art caption. Name the target itself from visible evidence using the shortest factual identity. Never invent style, era, mood, lore, brand, or story details. One obvious stable descriptor such as shape, pattern, colour, position, or UI purpose is allowed when directly supported or plainly visible. Include the final type exactly once as the last semantic noun, then only a real state, sibling-local ordinal, or a structural Set/Collection/Assembly qualifier for a visibly composed family. A bare taxonomy word or taxonomy-plus-number is never a valid identity; return a real visible identity or mark the row uncertain. Return normal spaced display words, never raw CamelCase or concatenated source tokens.',
+      'Never use editor-default construction tokens (Layer, Group, Node, Raster, Shape, Image, Asset, or Element) as a final visual identity. They describe authoring structure, not the exported artwork.',
+      'Type guide: a filled foundation is Background; a complete scene is Wallpaper; a reusable surface material is Texture; a sparse treatment is Overlay; an enclosing perimeter is Border; a self-contained decorative mark is Badge, Icon, or Ornament; an item receptacle or stateful cell is Slot; Panel is a broad non-interactive surface intended to contain content, not a catch-all for compact grouped art; Frame requires visible structural chrome for external content. GroupNode is never Frame or Panel evidence by itself.',
+      'A strong-perimeter renderedStructureCue is a decisive visual constraint: do not select Frame for an empty-centre rim or border assembly. If the current packet says Frame, replace the full packet with Border/ImageLabel.',
+      'A composed parent with an item-receptacle source cue should be considered as Slot when the assembled visual visibly receives content; a compact visual with an inset, item well, state marker, or repeated-cell function is not Panel solely because it is filled or grouped. A named background/fill child remains a background/fill construction role unless its own preview clearly shows a reusable material.',
       'Use ImageLabel for non-interactive art, an interactive role only for visibly interactive controls, and Frame only for actual structural containers. Related anonymous siblings may share a concise root and use document order, but visually similar scopes must not borrow one another\'s identity.',
+      'When direct sibling sourceName values are meaningfully different, keep their identities distinct and name each target from its own preview; never collapse them into one parent-derived root. If current names collapse siblings or their ordinals are duplicated, skipped, reversed, or derived from global layer order, return complete replacement packets for every affected sibling using one local 1..N sequence.',
       `Allowed asset types: ${ASSET_TYPES.join(', ')}. Allowed roles: ${ROBLOX_ROLES.join(', ')}.`,
       `Requested scopes=${JSON.stringify(families.map((family, index) => promptFamilyMetadata(family, index, false))).slice(0, 12000)}`,
       `Nearby scopes=${JSON.stringify(nearbyScopes).slice(0, 1800)}`,
@@ -1580,7 +1815,9 @@ async function classifyFamilyBatch(families, context, descriptions, signal, mode
       visualDescription: rawById.get(family.id)?.visualDescription
         || descriptions.find((item) => item.familyId === family.id)?.description
         || `The supplied preview was classified visually as ${readableSourceName(rawById.get(family.id)?.assetType || 'Unknown').toLowerCase()}.`,
-    }, family, families));
+    }, family, families, {
+      authoritativeReview: context.reviewTier === 'escalation' || context.reviewTier === 'detail-recovery',
+    }));
   if (missing.length) {
     throw new IncompleteFamilyBatchError(
       `The model omitted or incompletely described ${missing.length} requested visual ${missing.length === 1 ? 'family' : 'families'}.`,
@@ -1620,8 +1857,9 @@ async function analyzeFamilyBatchWithRetry(families, context, signal, model = MO
       return await analyzeFamilyBatch(families, context, signal, model);
     } catch (error) {
       if (signal?.aborted) throw error;
-      const retryIncompleteSingle = error instanceof IncompleteFamilyBatchError && families.length === 1;
-      if ((isModelProtocolError(error) || retryIncompleteSingle) && protocolAttempt < MAX_MODEL_RETRIES) {
+      const retryIncompletePacket = error instanceof IncompleteFamilyBatchError
+        && (families.length === 1 || context.reviewTier === 'escalation' || context.reviewTier === 'detail-recovery');
+      if ((isModelProtocolError(error) || retryIncompletePacket) && protocolAttempt < MAX_MODEL_RETRIES) {
         protocolAttempt += 1;
         await new Promise((resolve) => setTimeout(resolve, 250 * protocolAttempt));
         continue;
@@ -1631,9 +1869,33 @@ async function analyzeFamilyBatchWithRetry(families, context, signal, model = MO
         throw error;
       }
       if (!isRetryableModelError(error) || transientAttempt >= MAX_MODEL_RETRIES) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 500 * (2 ** transientAttempt)));
+      // Shared provider pools often recover a few seconds after a 429. A
+      // bounded delayed retry is much more useful than immediately spending a
+      // second request in the same throttling window.
+      const retryAfterMs = /\b429\b|rate.?limit|insufficient_quota/i.test(error instanceof Error ? error.message : String(error))
+        ? 2_500
+        : 500 * (2 ** transientAttempt);
+      await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
       transientAttempt += 1;
     }
+  }
+}
+
+// A syntactically valid compact reply can still contain a taxonomy-only name
+// such as `Border 1`. Callers may allow one bounded semantic retry; primary
+// document batches and already-detailed reviewer replacements intentionally do
+// not fan out after an invalid semantic reply.
+async function analyzeCompleteFamilyBatchWithRetry(families, context, signal, model = MODEL) {
+  let semanticAttempt = 0;
+  const maxSemanticAttempts = context.retrySemanticIncomplete === false ? 0 : MAX_MODEL_RETRIES;
+  while (true) {
+    const analyses = await analyzeFamilyBatchWithRetry(families, context, signal, model);
+    const incomplete = families.filter((family) => !analyses.some((analysis) => (
+      analysis.familyId === family.id && isCacheableFamilyAnalysis(analysis)
+    )));
+    if (!incomplete.length || semanticAttempt >= maxSemanticAttempts) return analyses;
+    semanticAttempt += 1;
+    await new Promise((resolve) => setTimeout(resolve, 250 * semanticAttempt));
   }
 }
 
@@ -1720,6 +1982,9 @@ async function analyzeFamilies(payload, signal) {
     singleFamilyRecoveryAttempts: 0,
     singleFamilyRecoveries: 0,
     singleFamilyFailures: 0,
+    semanticNameRecoveryBatches: 0,
+    semanticNameRecoveries: 0,
+    semanticNameRecoveryFailures: 0,
   };
   let cached = 0;
   const requestedMaxMemberImages = Math.min(
@@ -1837,7 +2102,9 @@ async function analyzeFamilies(payload, signal) {
   const storeResults = async (results, sourceFamilies) => {
     if (!results.length) return;
     for (const result of results) {
-      analyses.push(result);
+      const existingIndex = analyses.findIndex((analysis) => analysis.familyId === result.familyId);
+      if (existingIndex >= 0) analyses.splice(existingIndex, 1, result);
+      else analyses.push(result);
       const family = sourceFamilies.find((item) => item.id === result.familyId);
       if (!isCacheableFamilyAnalysis(result)) continue;
       storeCachedResult(familyCacheKey(result.fingerprint, family?.cacheContextSignature || '', model), result);
@@ -1851,7 +2118,60 @@ async function analyzeFamilies(payload, signal) {
     const batch = unresolved.slice(index, index + FAMILY_BATCH_SIZE);
     recovery.batchAttempts += 1;
     try {
-      await storeResults(await analyzeFamilyBatchWithRetry(batch, analysisContext, signal, model), batch);
+      const primaryResults = await analyzeFamilyBatchWithRetry(batch, analysisContext, signal, model);
+      await storeResults(primaryResults, batch);
+      const incompletePrimaryFamilies = batch.filter((family) => {
+        const analysis = primaryResults.find((candidate) => candidate.familyId === family.id);
+        // This recovery is specifically for an absent or unusable production
+        // name. A complete but semantically disputed packet still belongs to
+        // the independent reviewer, which has the context to resolve the type
+        // disagreement without overwriting it with a local transport retry.
+        return Boolean(
+          analysis
+          && analysis.assetType !== 'Unknown'
+          && analysis.role !== 'Unknown'
+          && hasFileArtifactName(analysis.familyName),
+        );
+      });
+      // A syntactically valid compact row can still be unusable when the model
+      // copied a filename, extension, hash, or taxonomy-only placeholder into
+      // the name. Recover those packets here with a small detailed request so
+      // they do not reach the desktop as empty names solely because a later
+      // reviewer is unavailable. This is bounded to three families at a time,
+      // never a retry fan-out across the entire document.
+      for (let recoveryIndex = 0; recoveryIndex < incompletePrimaryFamilies.length; recoveryIndex += 3) {
+        const recoveryFamilies = incompletePrimaryFamilies.slice(recoveryIndex, recoveryIndex + 3);
+        recovery.semanticNameRecoveryBatches += 1;
+        try {
+          // Detail recovery is still a provider request. Route it through the
+          // same bounded retry policy as primary batches so a short shared-pool
+          // 429 cannot turn an otherwise identifiable asset into a generic
+          // provisional label. This retries the small recovery group once; it
+          // never fans out into a request per layer.
+          const detailedResults = await analyzeCompleteFamilyBatchWithRetry(
+            recoveryFamilies,
+            {
+              ...analysisContext,
+              reviewTier: 'detail-recovery',
+              // The extra images provide detail; the compact schema keeps the
+              // weak shared model from dropping a required field in a large
+              // explanatory response. A recovery must return one whole atomic
+              // row, not a prose diagnosis plus a partial decision.
+              compactResponse: true,
+              maxMemberImages: 2,
+              includeDocumentContext: false,
+            },
+            signal,
+            model,
+          );
+          const usable = detailedResults.filter((analysis) => isCacheableFamilyAnalysis(analysis));
+          recovery.semanticNameRecoveries += usable.length;
+          await storeResults(detailedResults, recoveryFamilies);
+          if (usable.length !== recoveryFamilies.length) recovery.semanticNameRecoveryFailures += recoveryFamilies.length - usable.length;
+        } catch {
+          recovery.semanticNameRecoveryFailures += recoveryFamilies.length;
+        }
+      }
     } catch (error) {
       let recoveryFamilies = batch;
       if (error instanceof IncompleteFamilyBatchError) {
@@ -1988,12 +2308,6 @@ async function explainFamily(payload, signal) {
   }
   settleScanBudget(payload.hostedScanId, completion.usage);
   let output = completion.output;
-  const initialEvidenceValue = output?.evidence ?? output?.e;
-  const initialEvidence = Array.isArray(initialEvidenceValue)
-    ? { visual: confidenceScore(initialEvidenceValue[0]), layerName: confidenceScore(initialEvidenceValue[1]), hierarchy: confidenceScore(initialEvidenceValue[2]), learned: confidenceScore(initialEvidenceValue[3]) }
-    : { visual: confidenceScore(initialEvidenceValue?.visual), layerName: confidenceScore(initialEvidenceValue?.layerName), hierarchy: confidenceScore(initialEvidenceValue?.hierarchy), learned: confidenceScore(initialEvidenceValue?.learned) };
-  const initialConfidence = confidenceScore(output?.confidence ?? output?.c);
-  const initialSelfContradictory = isSelfContradictoryCloudAssessment(output?.reason ?? output?.q, initialEvidence, initialConfidence);
   const initialRejected = booleanValue(output?.conflict ?? output?.x)
     || (
       (output?.supportsClassification !== undefined || output?.ok !== undefined)
@@ -2011,7 +2325,7 @@ async function explainFamily(payload, signal) {
     || (initialSuggestedName
       && readableSourceName(initialSuggestedName).toLowerCase() !== readableSourceName(payload.familyName).toLowerCase())
   );
-  if ((initialRejected || initialProposesChange) && !initialSelfContradictory && !initialCompleteReplacement) {
+  if ((initialRejected || initialProposesChange) && !initialCompleteReplacement) {
     let repair;
     try {
       repair = await callModelWithUsage([
@@ -2051,17 +2365,10 @@ async function explainFamily(payload, signal) {
   const suggestedType = ASSET_TYPES.includes(suggestedTypeValue) ? suggestedTypeValue : undefined;
   const suggestedRole = ROBLOX_ROLES.includes(suggestedRoleValue)
     ? suggestedRoleValue
-    : suggestedType
-      ? roleForAssetType(suggestedType)
-      : undefined;
+    : undefined;
   const suggestedName = cleanText(output?.suggestedName ?? output?.sn, '', 160) || undefined;
   const reportedConfidence = confidenceScore(output?.confidence ?? output?.c);
-  const selfContradictoryAssessment = isSelfContradictoryCloudAssessment(
-    output?.reason ?? output?.q,
-    evidence,
-    reportedConfidence,
-  );
-  const confidence = selfContradictoryAssessment ? Math.min(0.55, reportedConfidence) : reportedConfidence;
+  const confidence = reportedConfidence;
   const explicitConflict = booleanValue(output?.conflict ?? output?.x);
   const classificationChanged = Boolean(
     (suggestedType && suggestedType !== assetType)
@@ -2071,14 +2378,12 @@ async function explainFamily(payload, signal) {
     suggestedName
     && readableSourceName(suggestedName).toLowerCase() !== readableSourceName(payload.familyName).toLowerCase()
   );
-  const conflict = explicitConflict || classificationChanged || nameChanged || selfContradictoryAssessment;
+  const conflict = explicitConflict || classificationChanged || nameChanged;
   const supportsClassification = output?.supportsClassification !== undefined || output?.ok !== undefined
     ? booleanValue(output?.supportsClassification ?? output?.ok) && !conflict
     : !conflict;
   const result = {
-    reason: selfContradictoryAssessment
-      ? `The cloud response described this as an unreadable or non-functional artifact while claiming high confidence. Treat its classification as unreliable.`
-      : cleanText(output?.reason ?? output?.q, `The cloud reviewer classified the visible family as ${readableSourceName(assetType).toLowerCase()}.`, 300),
+    reason: cleanText(output?.reason ?? output?.q, `The cloud reviewer classified the visible family as ${readableSourceName(assetType).toLowerCase()}.`, 300),
     visualDescription: cleanText(output?.visualDescription ?? output?.v, 'The supplied preview was reviewed visually.', 300),
     confidence,
     evidence,
@@ -2087,9 +2392,7 @@ async function explainFamily(payload, signal) {
       output?.conflictMessage ?? output?.xm,
       classificationChanged
         ? `Independent review suggests ${suggestedType || assetType}/${suggestedRole || payload.role} instead.`
-        : selfContradictoryAssessment
-          ? 'The cloud response has almost no supporting evidence and says this preview is an unreadable or non-functional artifact.'
-          : '',
+        : '',
       240,
     ),
     supportsClassification,
@@ -2122,6 +2425,8 @@ async function reviewFamilies(payload, signal) {
   const challengeReasons = payload.challengeReasons && typeof payload.challengeReasons === 'object'
     ? payload.challengeReasons
     : {};
+  const hasDirectTargetTypeDisagreement = families.some((family) => (challengeReasons[family.id] || [])
+    .some((reason) => /direct source type cue suggests/i.test(String(reason))));
   const reviewSignature = createHash('sha256').update(JSON.stringify({
     current: currentAnalyses.map((analysis) => ({
       familyId: analysis.familyId,
@@ -2144,7 +2449,7 @@ async function reviewFamilies(payload, signal) {
   for (const family of families) {
     const key = `${EXPLANATION_VERSION}:batch-review:${MODEL_ESCALATION}:${family.fingerprint}:${reviewSignature}`;
     const cached = familyCache.get(key);
-    const normalized = cached ? normalizeAnalysis(cached, family, families) : null;
+    const normalized = cached ? normalizeAnalysis(cached, family, families, { authoritativeReview: true }) : null;
     if (normalized && isCacheableFamilyAnalysis(normalized)) analyses.push(normalized);
     else {
       family.batchReviewCacheKey = key;
@@ -2153,6 +2458,15 @@ async function reviewFamilies(payload, signal) {
   }
   const failures = [];
   const providerCalls = [];
+  const recovery = {
+    semanticIncompleteFamilies: [],
+    incompleteResponseFamilies: [],
+    nameConsistencyFamilies: [],
+    detailedReplacementScopes: 0,
+    detailedReplacementFamilies: 0,
+    detailedReplacementAccepted: 0,
+  };
+  const rejectedPackets = [];
   if (unresolved.length) {
     const context = {
       instructions: [],
@@ -2161,13 +2475,14 @@ async function reviewFamilies(payload, signal) {
       sessionId: `kryeo-review-${createHash('sha256').update(String(payload.hostedScanId || randomUUID())).digest('hex').slice(0, 24)}`,
       hostedScanId: String(payload.hostedScanId || randomUUID()),
       reviewTier: 'escalation',
-      // Keep the escalation model, but use the compact atomic packet so one
-      // bounded response can contain a complete replacement for every family.
-      compactResponse: true,
+      // Source-type conflicts need the full target plus construction context:
+      // an otherwise panel-like composed visual can still be a named item
+      // receptacle. Other challenges retain the cheaper compact protocol.
+      compactResponse: !hasDirectTargetTypeDisagreement,
       serviceTier: ['default', 'flex', 'priority', 'scale'].includes(String(payload.serviceTier || '').toLowerCase())
         ? String(payload.serviceTier).toLowerCase()
         : OPENROUTER_SERVICE_TIER,
-      maxMemberImages: 1,
+      maxMemberImages: hasDirectTargetTypeDisagreement ? 2 : 1,
       includeDocumentContext: false,
       correlationId: String(payload.correlationId || payload.hostedScanId || ''),
       providerCalls,
@@ -2201,28 +2516,175 @@ async function reviewFamilies(payload, signal) {
         })),
       })),
     };
+    const runDetailedReplacement = async (recoveryFamilies, compactResults, triggerReason) => {
+      if (!recoveryFamilies.length) return;
+      const recoveryHasDirectTargetTypeDisagreement = recoveryFamilies.some((family) => (
+        context.reviewContext.find((item) => item.familyId === family.id)?.challengeReasons || []
+      ).some((reason) => /direct source type cue suggests/i.test(String(reason))));
+      // A compact packet is an optimisation, not authority. Whether it used a
+      // placeholder name or omitted an alias entirely, make exactly one
+      // complete, higher-detail replacement request for this review scope.
+      recovery.detailedReplacementScopes += 1;
+      recovery.detailedReplacementFamilies += recoveryFamilies.length;
+      const recoveryContext = {
+        ...context,
+        reviewTier: 'detail-recovery',
+        // Preserve detailed target evidence when the review is resolving a
+        // direct target-type disagreement. Downgrading that exact recovery to
+        // a compact contact-sheet erased the source cue and allowed a later
+        // generic shell reading to replace an otherwise sound decision.
+        // Ordinary schema/name recovery remains compact and inexpensive.
+        compactResponse: !recoveryHasDirectTargetTypeDisagreement,
+        maxMemberImages: 2,
+        // This is the second and final semantic attempt for this scope. If it
+        // still returns the same invalid type/name mixture, preserve that
+        // evidence in diagnostics rather than spending a third identical call.
+        retrySemanticIncomplete: false,
+        reviewContext: recoveryFamilies.map((family) => {
+          const currentDecision = compactResults.find((result) => result.familyId === family.id)
+            || currentAnalyses.find((analysis) => analysis.familyId === family.id)
+            || null;
+          const rejectedIssues = decisionPacketIssues(currentDecision);
+          return {
+            familyId: family.id,
+            currentDecision,
+            challengeReasons: [
+              ...((context.reviewContext.find((item) => item.familyId === family.id)?.challengeReasons || []).slice(0, 6)),
+              ...(rejectedIssues.length
+                ? [`The prior proposal is invalid: ${rejectedIssues.join(' ')}`]
+                : []),
+              triggerReason,
+              'Return one complete replacement packet with a factual, export-safe identity. Do not repeat an invalid taxonomy mixture from the prior proposal.',
+            ],
+          };
+        }),
+        documentFamilies: context.documentFamilies.filter((entry) => recoveryFamilies.some((family) => family.id === entry.familyId)),
+      };
+      try {
+        const replacements = await analyzeCompleteFamilyBatchWithRetry(recoveryFamilies, recoveryContext, signal, MODEL_ESCALATION);
+        const individuallyUsable = replacements.filter((result) => isCompleteAuthoritativeReviewPacket(result));
+        const replacementConsistency = reviewScopeNameIssues(individuallyUsable, recoveryFamilies);
+        const usableReplacements = individuallyUsable.filter((result) => !replacementConsistency.has(result.familyId));
+        for (const result of replacements.filter((candidate) => !usableReplacements.includes(candidate))) {
+          rejectedPackets.push({
+            familyId: result.familyId,
+            name: result.familyName,
+            type: result.assetType,
+            role: result.role,
+            issues: [
+              ...decisionPacketIssues(result),
+              ...(replacementConsistency.get(result.familyId) || []),
+            ],
+            lane: 'detailed-replacement',
+          });
+        }
+        const replacedIds = new Set(usableReplacements.map((result) => result.familyId));
+        recovery.detailedReplacementAccepted += usableReplacements.length;
+        for (const replacement of usableReplacements) {
+          analyses.push(replacement);
+          const family = recoveryFamilies.find((candidate) => candidate.id === replacement.familyId);
+          if (family?.batchReviewCacheKey) storeCachedResult(family.batchReviewCacheKey, replacement);
+        }
+        const stillIncomplete = recoveryFamilies
+          .filter((family) => !replacedIds.has(family.id))
+          .map((family) => family.id);
+        if (stillIncomplete.length) {
+          failures.push({
+            familyIds: stillIncomplete,
+            message: 'The detailed visual replacement did not return a complete export-safe decision for this scope.',
+          });
+        }
+      } catch (error) {
+        failures.push({
+          familyIds: recoveryFamilies.map((family) => family.id),
+          message: isRetryableModelError(error)
+            ? 'The detailed visual replacement is temporarily unavailable; these families remain unresolved and can be retried on the next scan.'
+            : error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
     try {
-      const reviewed = await analyzeFamilyBatch(unresolved, context, signal, MODEL_ESCALATION);
-      for (const result of reviewed) {
+      const reviewed = await analyzeFamilyBatchWithRetry(unresolved, context, signal, MODEL_ESCALATION);
+      const individuallyComplete = reviewed.filter((result) => isCompleteAuthoritativeReviewPacket(result));
+      const scopeConsistency = reviewScopeNameIssues(individuallyComplete, unresolved);
+      const complete = individuallyComplete.filter((result) => !scopeConsistency.has(result.familyId));
+      // A direct target cue is not a local override. It is, however, enough to
+      // retain a complete reviewer packet when that packet agrees with the
+      // cue and a different alias made the shared response incomplete. The
+      // previous flow threw this packet away and let a lower-fidelity recovery
+      // reverse it, which is exactly how a target labelled as a Slot could
+      // become a Panel after a successful independent review.
+      const preservedDirectCuePackets = reviewed.filter((result) => {
+        if (complete.includes(result)) return false;
+        const family = unresolved.find((candidate) => candidate.id === result.familyId);
+        return isDirectCueConsistentReviewPacket(result, family);
+      });
+      const accepted = [...complete, ...preservedDirectCuePackets];
+      const incomplete = reviewed.filter((result) => !accepted.includes(result));
+      recovery.nameConsistencyFamilies.push(...scopeConsistency.keys());
+      for (const result of incomplete) {
+        rejectedPackets.push({
+          familyId: result.familyId,
+          name: result.familyName,
+          type: result.assetType,
+          role: result.role,
+          issues: [
+            ...decisionPacketIssues(result),
+            ...(scopeConsistency.get(result.familyId) || []),
+          ],
+          lane: 'compact-review',
+        });
+      }
+      for (const result of accepted) {
         analyses.push(result);
         const family = unresolved.find((candidate) => candidate.id === result.familyId);
-        if (family?.batchReviewCacheKey && isCacheableFamilyAnalysis(result)) storeCachedResult(family.batchReviewCacheKey, result);
+        if (family?.batchReviewCacheKey && isCacheableFamilyAnalysis(result)) {
+          storeCachedResult(family.batchReviewCacheKey, result);
+        }
+      }
+      if (incomplete.length) {
+        // The compact reviewer is deliberately cheap, but a syntactically
+        // valid row such as "Border 1" is still not an exportable decision.
+        // Give the affected *scope* one richer replacement attempt. This is
+        // bounded to one request per review scope: never fan out into a retry
+        // per family and never stitch a local name onto a model type.
+        const recoveryFamilies = incomplete
+          .map((result) => unresolved.find((family) => family.id === result.familyId))
+          .filter(Boolean);
+        recovery.semanticIncompleteFamilies.push(...recoveryFamilies.map((family) => family.id));
+        await runDetailedReplacement(
+          recoveryFamilies,
+          incomplete,
+          scopeConsistency.size
+            ? 'The compact review returned duplicated or out-of-order sibling names. Return distinct complete names with one local 1..N sequence in document order.'
+            : 'The compact review returned a taxonomy-only or otherwise incomplete name.',
+        );
       }
       await persistCache();
     } catch (error) {
-      const partial = error instanceof IncompleteFamilyBatchError ? error.partialResults : [];
-      for (const result of partial) {
-        analyses.push(result);
-        const family = unresolved.find((candidate) => candidate.id === result.familyId);
-        if (family?.batchReviewCacheKey && isCacheableFamilyAnalysis(result)) storeCachedResult(family.batchReviewCacheKey, result);
+      if (error instanceof IncompleteFamilyBatchError) {
+        const partialResults = error.partialResults || [];
+        const preservedDirectCuePackets = partialResults.filter((result) => {
+          const family = unresolved.find((candidate) => candidate.id === result.familyId);
+          return isDirectCueConsistentReviewPacket(result, family);
+        });
+        const preservedIds = new Set(preservedDirectCuePackets.map((result) => result.familyId));
+        analyses.push(...preservedDirectCuePackets);
+        const recoveryFamilies = unresolved.filter((family) => !preservedIds.has(family.id));
+        recovery.incompleteResponseFamilies.push(...recoveryFamilies.map((family) => family.id));
+        await runDetailedReplacement(
+          recoveryFamilies,
+          partialResults,
+          'The compact review omitted one or more required families.',
+        );
+      } else {
+        failures.push({
+          familyIds: unresolved.map((family) => family.id),
+          message: isRetryableModelError(error)
+            ? 'The independent visual-review provider is temporarily busy; these families remain visibly unresolved and can be retried on the next scan.'
+            : error instanceof Error ? error.message : String(error),
+        });
       }
-      const completed = new Set(partial.map((result) => result.familyId));
-      failures.push({
-        familyIds: unresolved.filter((family) => !completed.has(family.id)).map((family) => family.id),
-        message: isRetryableModelError(error)
-          ? 'The independent visual-review provider is temporarily busy; these families remain visibly unresolved and can be retried on the next scan.'
-          : error instanceof Error ? error.message : String(error),
-      });
       await persistCache();
     }
   }
@@ -2249,6 +2711,8 @@ async function reviewFamilies(payload, signal) {
       analyzedFamilies: analyses.length,
       incompleteFamilies: failures.flatMap((failure) => failure.familyIds),
       providerCalls,
+      recovery,
+      rejectedPackets: rejectedPackets.slice(0, 24),
     },
   };
 }

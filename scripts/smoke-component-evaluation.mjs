@@ -130,12 +130,12 @@ const cloudAnalysed = applyHostedFamilyAnalyses(clearComponents, clearFamilies, 
 }]);
 const cloudComponent = cloudAnalysed.find((component) => component.hierarchyKey === '0.0');
 assert.ok(cloudComponent, 'The child decision should remain available after its organizational parent is skipped.');
-assert.equal(cloudComponent.assetType, 'Frame', 'strong perimeter geometry must trigger an independent review, not rewrite one cloud field locally');
+assert.equal(cloudComponent.assetType, 'Frame', 'local perimeter geometry must not rewrite the model type');
 assert.equal(cloudComponent.role, 'Frame');
-assert.equal(cloudComponent.analysisState, 'needs-review');
-assert.equal(cloudComponent.familyName, 'Close Frame', 'Kryeo retains the original complete decision until a reviewer returns a complete replacement.');
+assert.equal(cloudComponent.analysisState, 'analyzed');
+assert.equal(cloudComponent.familyName, 'Close Frame', 'Kryeo applies a complete model decision unchanged.');
 applyComponentIntelligence(cloudAnalysed, false);
-assert.equal(cloudComponent.reviewPriority, 'check');
+assert.equal(cloudComponent.reviewPriority, 'ready');
 
 const provisional = applyHostedFamilyAnalyses([conflictComponent], [conflictFamily], []);
 assert.equal(provisional[0].analysisSource, 'local-provisional');

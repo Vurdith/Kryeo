@@ -8,10 +8,10 @@ function cleanLabel(value: string): string {
 function canonicalName(component: ComponentCandidate): string {
   const remembered = component.remembered ? cleanLabel(component.exportName || '') : '';
   if (remembered) return remembered;
-  // `aiModelSuggestedName` is the raw proposal, not an accepted decision.
-  // The hosted resolver deliberately clears the production fields when a
-  // packet is incomplete or challenged without a complete replacement. Never
-  // resurrect that stale proposal during the later context pass.
+
+
+
+
   const unresolved = component.analysisSource === 'local-provisional'
     || component.analysisSource === 'unavailable'
     || ['provisional', 'queued'].includes(component.analysisState || '');
@@ -77,12 +77,33 @@ export function applyComponentSceneContext(
     // mirrors for persisted-workspace compatibility, never separate names.
     component.familyName = selectedName;
     component.layerLabel = selectedName;
-    component.exportName = selectedName;
     component.namingReason = component.remembered && Boolean(selectedName)
       ? 'Using the production name previously accepted for this visual family.'
       : Boolean(modelName)
         ? 'Using the AI semantic identity for this visual family.'
         : 'No trustworthy AI semantic name was available; Kryeo did not invent one.';
+
+    // A display fallback lets the inspector identify an incomplete row, but
+    // it is never an accepted export identity. Keep the label visible while
+    // withholding the Affinity/PNG/manifest name until the atomic decision is
+    // genuinely production-safe.
+    const pendingSemanticDecision = Boolean(component.semanticConflict)
+      || ['needs-review', 'provisional', 'queued'].includes(component.analysisState || '');
+    if (pendingSemanticDecision) {
+      component.exportName = undefined;
+      component.codeName = undefined;
+      component.namingIssues = ['This visible label is provisional and cannot be applied or exported yet.'];
+      component.automationIssues = [
+        ...component.namingIssues,
+        component.semanticConflict
+          ? (component.semanticConflictMessage || 'Visual and semantic evidence disagree; one complete decision is required.')
+          : 'This visual family does not have one complete accepted decision.',
+      ];
+      component.automationState = 'exception';
+      continue;
+    }
+
+    component.exportName = selectedName;
 
     // Build from the selected semantic name, not from a persisted Affinity
     // label or raw model proposal that may still be present on the candidate.

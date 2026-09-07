@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
 import type { OpenDialogOptions } from 'electron';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -17,7 +17,7 @@ import { HostedAiService } from './hosted-ai-service';
 import { applyComponentIntelligence } from './component-intelligence-service';
 import { applyComponentSceneContext, componentCategory, componentSubcategory } from './component-context-service';
 import { applyScanIntent, normalizeScanIntent, scanIntentContext, structureFingerprint } from './scan-intent-service';
-import { buildProductionIdentity, strictProductionName } from './asset-intelligence-service';
+import { buildProductionIdentity, hasCompatibleRobloxRole, strictProductionName } from './asset-intelligence-service';
 import { DeveloperLogService } from './developer-log-service';
 import {
   applyApprovedFamilies,
@@ -27,6 +27,8 @@ import {
   countLocallyHandledFamilies,
   familyBatchConsistencyIssues,
   familyDecisionConsistencyIssues,
+  familyPrimaryEvidenceIssues,
+  harmonizeFamilyNames,
   planHostedFamilyReview,
   requiresIndependentFamilyReview,
   resolveIndependentFamilyAnalysis,
@@ -77,18 +79,44 @@ function prepareComponentsForReview(components: ComponentCandidate[]): Component
   return applyAssetBoundaries(applyComponentIntelligence(structurallyAssessed, false));
 }
 
+function hostedPacketIssues(analysis: HostedFamilyAnalysis | undefined): string[] {
+  if (!analysis) return ['The reviewer did not return a row for this family.'];
+  const issues: string[] = [];
+  if (!analysis.familyName?.trim()) issues.push('The packet has no overall asset name.');
+  if (analysis.assetType === 'Unknown') issues.push('The packet has no asset type.');
+  if (analysis.role === 'Unknown') issues.push('The packet has no Roblox role.');
+  if (analysis.assetType !== 'Unknown' && analysis.role !== 'Unknown'
+    && !hasCompatibleRobloxRole(analysis.assetType, analysis.role)) {
+    issues.push(`The packet pairs ${analysis.assetType} with incompatible ${analysis.role}.`);
+  }
+  if (analysis.assetType !== 'Unknown' && analysis.familyName?.trim()) {
+    issues.push(...strictProductionName(analysis.familyName, analysis.assetType).issues);
+  }
+  if (!Array.isArray(analysis.memberNames)) issues.push('The packet has no member-name list.');
+  if (!analysis.reason?.trim()) issues.push('The packet has no decision reason.');
+  return [...new Set(issues)];
+}
+
 function hasCompleteHostedDiagnosticPacket(analysis: HostedFamilyAnalysis | undefined): boolean {
-  return Boolean(
-    analysis
-    && typeof analysis.familyName === 'string'
-    && analysis.familyName.trim().length > 0
-    && analysis.assetType !== 'Unknown'
-    && analysis.role !== 'Unknown'
-    && strictProductionName(analysis.familyName, analysis.assetType).issues.length === 0
-    && Array.isArray(analysis.memberNames)
-    && typeof analysis.reason === 'string'
-    && analysis.reason.trim().length > 0,
-  );
+  return hostedPacketIssues(analysis).length === 0;
+}
+
+function hostedReviewIssues(
+  analysis: HostedFamilyAnalysis,
+  family: ComponentVisualFamily | undefined,
+): string[] {
+  const issues = [
+    ...familyPrimaryEvidenceIssues(analysis, family),
+    ...familyDecisionConsistencyIssues(analysis, family),
+  ];
+  if (analysis.assetType === 'Unknown' || analysis.role === 'Unknown') {
+    issues.push('The model packet omitted a complete asset type and Roblox role decision.');
+  } else {
+    // Give the reviewer the exact generic production-name failure. This is
+    // diagnostic context only: no local code supplies replacement wording.
+    issues.push(...strictProductionName(analysis.familyName || '', analysis.assetType).issues);
+  }
+  return [...new Set(issues)];
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -127,6 +155,8 @@ interface HostedScanCandidate {
   tier: HostedReviewTier;
   riskScore: number;
   reasons: string[];
+  /** A direct cue on an assembled owner is eligible for a detailed first decision. */
+  directCueEscalation: boolean;
 }
 
 interface HostedScanSelection {
@@ -169,12 +199,31 @@ function selectHostedFamilies(
   // Clear local plans still use Lite so the local pass remains a cheap source
   // of grouping/context signals rather than silently becoming the final AI.
   const candidates: HostedScanCandidate[] = plans.map((plan) => ({
-    family: plan.family,
-    tier: plan.tier === 'local' ? 'lite' : plan.tier,
-    riskScore: plan.riskScore,
-    reasons: plan.tier === 'local'
+    ...(() => {
+      // An assembled asset with a meaningful direct type cue is eligible for a
+      // detailed first pass because its own composition and supporting
+      // children may need to be visible together. This is evidence routing
+      // only; the visual model still chooses the type. It still shares the
+      // bounded detailed capacity below, so several metadata-rich parents
+      // cannot spend the scan ceiling before the remaining families receive a
+      // baseline visual decision.
+      const directCueEscalation = plan.family.assetBoundary === 'composed-parent'
+        && Boolean(plan.family.sourceTypeHint);
+      return {
+        family: plan.family,
+        tier: directCueEscalation ? 'escalation' : (plan.tier === 'local' ? 'lite' : plan.tier),
+        riskScore: directCueEscalation ? Math.max(plan.riskScore, 0.82) : plan.riskScore,
+        directCueEscalation,
+        reasons: [
+          ...(plan.tier === 'local'
       ? [...plan.reasons, 'Cloud review is enabled for every unresolved family; Lite is used for this locally clear candidate.']
-      : plan.reasons,
+      : plan.reasons),
+          ...(directCueEscalation
+            ? ['A composed owner has a meaningful direct type cue and is eligible for detailed composition evidence when scan capacity allows.']
+            : []),
+        ],
+      };
+    })(),
   }));
   const maxEscalations = Math.max(0, Number(status.maxEscalationFamiliesPerScan ?? 1));
   const selected: HostedScanCandidate[] = [];
@@ -185,12 +234,14 @@ function selectHostedFamilies(
     || (left.tier === 'escalation' ? -1 : 1)
   ));
   for (const candidate of ordered) {
-    // Reserve the more capable model for the highest-risk family, but do not
-    // discard additional escalation candidates when the configured escalation
-    // cap is reached. The Lite reviewer is still safer than leaving a family
-    // with an Unknown provisional result. The gateway performs cache lookup
-    // first, then enforces the shared per-scan dollar ceiling.
-    const selectedTier: HostedReviewTier = candidate.tier === 'escalation' && escalationCount >= maxEscalations
+    // Reserve detailed review for the highest-risk candidates, including a
+    // direct-cue parent when it ranks highly. Every escalation shares one
+    // configured capacity. Remaining candidates retain a Lite first pass,
+    // then independently request richer evidence only if their completed
+    // packet actually conflicts. This guarantees broad scan coverage under
+    // the gateway's finite dollar ceiling instead of starving later families.
+    const selectedTier: HostedReviewTier = candidate.tier === 'escalation'
+      && escalationCount >= maxEscalations
       ? 'lite'
       : candidate.tier;
     const selectedCandidate: HostedScanCandidate = selectedTier === candidate.tier
@@ -498,6 +549,11 @@ ipcMain.handle('kryeo:set-developer-mode', async (_event, enabled: unknown) => {
 });
 ipcMain.handle('kryeo:get-developer-log', () => developerLogger.snapshot());
 ipcMain.handle('kryeo:clear-developer-log', () => developerLogger.clear());
+ipcMain.handle('kryeo:copy-text', (_event, value: unknown) => {
+  if (typeof value !== 'string' || !value) return false;
+  clipboard.writeText(value);
+  return true;
+});
 ipcMain.on('kryeo:set-developer-log-streaming', (event, enabled: unknown) => {
   if (typeof enabled === 'boolean') developerLogger.setRendererStreaming(event.sender.id, enabled);
 });
@@ -1160,6 +1216,13 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         maxModelRetries: hostedStatus.maxModelRetries ?? 0,
         scanTargetUsd: hostedStatus.scanTargetUsd ?? 0.01,
         scanBudgetUsd: hostedStatus.scanBudgetUsd ?? 0.03,
+        selectedTierCounts: hostedFamilies.reduce<Record<string, number>>((counts, candidate) => {
+          counts[candidate.tier] = (counts[candidate.tier] || 0) + 1;
+          return counts;
+        }, {}),
+        detailedTierCapacity: Math.max(0, Number(hostedStatus.maxEscalationFamiliesPerScan ?? 1)),
+        directCueEscalationCandidates: selection.candidates.filter((candidate) => candidate.directCueEscalation).length,
+        directCueEscalations: hostedFamilies.filter((candidate) => candidate.directCueEscalation && candidate.tier === 'escalation').length,
       });
       diagnosticsHostedFamilies = hostedTotal;
       const provisionalBudgetFamilies = selection.budgetLimitedCount;
@@ -1356,7 +1419,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
             tierResponses.push(recoveryResponse);
             const recoveryById = new Map(recoveryResponse.analyses.map((analysis) => [analysis.familyId, analysis]));
             const resolvedRecovery = primaryBatch.map((primary) => {
-              const resolved = resolveIndependentFamilyAnalysis(primary, recoveryById.get(primary.familyId));
+              const resolved = resolveIndependentFamilyAnalysis(primary, recoveryById.get(primary.familyId), familyById.get(primary.familyId));
               return resolved.reviewNeeded
                 ? resolved
                 : {
@@ -1394,7 +1457,24 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
           }
         }
       }
+      responseAnalyses = harmonizeFamilyNames(responseAnalyses, families);
       const batchConsistency = familyBatchConsistencyIssues(responseAnalyses, families);
+      // Local code never derives sibling identity from source labels or
+      // hierarchy. A non-empty result would only represent packet coverage,
+      // not a replacement classification.
+      if (batchConsistency.size) {
+        responseAnalyses = responseAnalyses.map((analysis) => {
+          const issues = batchConsistency.get(analysis.familyId);
+          if (!issues?.length) return analysis;
+          return {
+            ...analysis,
+            conflict: true,
+            reviewNeeded: true,
+            conflictMessage: issues[0],
+            normalizationReason: `${analysis.normalizationReason ? `${analysis.normalizationReason} ` : ''}${issues[0]}`,
+          };
+        });
+      }
       const challenges = responseAnalyses.filter((analysis) => (
         !recoveryPrimaries.some((primary) => primary.familyId === analysis.familyId)
         && (
@@ -1408,33 +1488,63 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         ...tierResponses.map((response) => response.scanProviderRequests || 0),
       );
       if (challenges.length) {
-        trace('review', 'Independent visual review required.', { challengedFamilies: challenges.length, inconsistentScopes: batchConsistency.size });
+        const challengeDiagnostics = Object.fromEntries(challenges.map((analysis) => [
+          analysis.familyId,
+          hostedReviewIssues(analysis, familyById.get(analysis.familyId)),
+        ]));
+        trace('review', 'Independent visual review required.', {
+          challengedFamilies: challenges.length,
+          inconsistentScopes: batchConsistency.size,
+          packetCoverageIssues: challenges.filter((analysis) => (
+            hostedReviewIssues(analysis, familyById.get(analysis.familyId)).length > 0
+          )).length,
+          challengeDiagnostics,
+        });
         progress('reconciliation', 'Resolving visual disagreements', `Independently checking ${challenges.length} uncertain ${challenges.length === 1 ? 'family' : 'families'} before applying one final decision.`, 82);
         const scopes = new Map<string, typeof challenges>();
         for (const analysis of challenges) {
           const family = familyById.get(analysis.familyId);
-          const key = family?.namingScopeKey || analysis.familyId;
+          // A reviewer must see a genuine sibling set together, but unrelated
+          // scopes must never share one compact response. Mixing construction
+          // children from several parents is what led the model to return
+          // placeholders such as `Border 4` instead of a complete scoped
+          // identity. Standalone/composed scopes remain independently reviewable.
+          const key = family?.assetBoundary === 'construction-child'
+            ? (family.members[0]?.parentHierarchyKey || family.namingScopeKey || analysis.familyId)
+            : (family?.namingScopeKey || analysis.familyId);
           const scopeAnalyses = scopes.get(key) || [];
           scopeAnalyses.push(analysis);
           scopes.set(key, scopeAnalyses);
         }
+        // Compact reviewer packets are schema-sensitive. Keeping a review
+        // request to a small coherent sibling set prevents one truncated model
+        // reply from leaving an entire large family scope without names, while
+        // preserving sibling context for ordered construction pieces.
         const reviewBatches: Array<typeof challenges> = [];
-        let pendingBatch: typeof challenges = [];
         for (const scopeAnalyses of scopes.values()) {
-          for (let offset = 0; offset < scopeAnalyses.length; offset += 8) {
-            const unit = scopeAnalyses.slice(offset, offset + 8);
-            if (pendingBatch.length && pendingBatch.length + unit.length > 8) {
-              reviewBatches.push(pendingBatch);
-              pendingBatch = [];
-            }
-            pendingBatch.push(...unit);
-            if (pendingBatch.length === 8) {
-              reviewBatches.push(pendingBatch);
-              pendingBatch = [];
-            }
+          // A direct target-type disagreement asks the reviewer to compare a
+          // richer target image against creator intent. Do not make that
+          // expensive decision wait behind unrelated construction-child name
+          // repairs in the same scope: a timeout used to strand the parent as
+          // Panel while its children kept copied parent names. This is based
+          // solely on the generic evidence reason, never a document label.
+          const directTypeChallenges = scopeAnalyses.filter((analysis) => {
+            const family = familyById.get(analysis.familyId);
+            return hostedReviewIssues(analysis, family)
+              .some((issue) => /direct source type cue suggests/i.test(issue));
+          });
+          const ordinaryChallenges = scopeAnalyses.filter((analysis) => !directTypeChallenges.includes(analysis));
+          for (const analysis of directTypeChallenges) reviewBatches.push([analysis]);
+          // A sibling-coherence repair must see the complete affected naming
+          // scope together. Ordinary semantic challenges stay in smaller
+          // three-family packets for schema reliability.
+          const scopeBatchSize = ordinaryChallenges.some((analysis) => batchConsistency.has(analysis.familyId))
+            ? 8
+            : 3;
+          for (let offset = 0; offset < ordinaryChallenges.length; offset += scopeBatchSize) {
+            reviewBatches.push(ordinaryChallenges.slice(offset, offset + scopeBatchSize));
           }
         }
-        if (pendingBatch.length) reviewBatches.push(pendingBatch);
         const reviewedById = new Map<string, (typeof challenges)[number]>();
         for (const batch of reviewBatches) {
           const batchFamilies = batch.flatMap((analysis) => {
@@ -1444,7 +1554,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
           const challengeReasons = Object.fromEntries(batch.map((analysis) => {
             const family = familyById.get(analysis.familyId);
             return [analysis.familyId, [
-              ...familyDecisionConsistencyIssues(analysis, family),
+              ...hostedReviewIssues(analysis, family),
               ...(batchConsistency.get(analysis.familyId) || []),
             ]];
           }));
@@ -1461,7 +1571,6 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
             response.analyses.forEach((analysis) => reviewedById.set(analysis.familyId, analysis));
             hostedProviderCostUsd = Math.max(hostedProviderCostUsd, response.scanProviderCostUsd || 0);
             diagnosticsProviderRequests = Math.max(diagnosticsProviderRequests, response.scanProviderRequests || 0);
-            diagnosticsFailureMessages.push(...response.failures.map((failure) => safeHostedFailureMessage(failure.message)));
             trace('review', 'Independent review batch completed.', {
               families: batchFamilies.length,
               familyIds: batchFamilies.map((family) => family.id).join(','),
@@ -1474,10 +1583,16 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
               incompleteFamilyIds: batchFamilies
                 .filter((family) => !response.analyses.some((analysis) => analysis.familyId === family.id && hasCompleteHostedDiagnosticPacket(analysis)))
                 .map((family) => family.id),
+              incompletePacketDiagnostics: batchFamilies
+                .map((family) => {
+                  const analysis = response.analyses.find((candidate) => candidate.familyId === family.id);
+                  const issues = hostedPacketIssues(analysis);
+                  return issues.length ? { familyId: family.id, issues } : null;
+                })
+                .filter(Boolean),
               providerDiagnostics: response.diagnostics || null,
             });
           } catch (error) {
-            diagnosticsFailureMessages.push(safeHostedFailureMessage(error));
             trace('review', 'Independent review batch failed.', {
               families: batchFamilies.length,
               familyIds: batchFamilies.map((family) => family.id).join(','),
@@ -1487,9 +1602,28 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
         }
         const resolvedById = new Map(challenges.map((analysis) => [
           analysis.familyId,
-          resolveIndependentFamilyAnalysis(analysis, reviewedById.get(analysis.familyId)),
+          resolveIndependentFamilyAnalysis(analysis, reviewedById.get(analysis.familyId), familyById.get(analysis.familyId)),
         ]));
         responseAnalyses = responseAnalyses.map((analysis) => resolvedById.get(analysis.familyId) || analysis);
+      }
+      responseAnalyses = harmonizeFamilyNames(responseAnalyses, families);
+      const finalBatchConsistency = familyBatchConsistencyIssues(responseAnalyses, families);
+      if (finalBatchConsistency.size) {
+        responseAnalyses = responseAnalyses.map((analysis) => {
+          const issues = finalBatchConsistency.get(analysis.familyId);
+          if (!issues?.length) return analysis;
+          return {
+            ...analysis,
+            conflict: true,
+            reviewNeeded: true,
+            conflictMessage: issues[0],
+            normalizationReason: `${analysis.normalizationReason ? `${analysis.normalizationReason} ` : ''}${issues.join(' ')}`,
+          };
+        });
+        trace('resolver', 'Final family naming consistency check found unresolved siblings.', {
+          affectedFamilies: finalBatchConsistency.size,
+          issues: Object.fromEntries(finalBatchConsistency),
+        });
       }
       reviewed = calibrateComponentConfidence(
         applyHostedFamilyAnalyses(reviewed, families, responseAnalyses),
@@ -1497,7 +1631,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
       );
       hostedAnalysisAvailable = responseAnalyses.length > 0;
       const unresolvedAnalyses = responseAnalyses.filter((analysis) => (
-        analysis.reviewNeeded || analysis.conflict || !hasCompleteHostedDiagnosticPacket(analysis)
+        analysis.conflict || !hasCompleteHostedDiagnosticPacket(analysis)
       ));
       const reviewOutcomes = challenges.map((primary) => {
         const final = responseAnalyses.find((analysis) => analysis.familyId === primary.familyId);
@@ -1510,6 +1644,7 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
           unresolved: Boolean(!final || final.reviewNeeded || final.assetType === 'Unknown' || final.role === 'Unknown'),
         };
       });
+      const reviewOutcomeById = new Map(reviewOutcomes.map((outcome) => [outcome.familyId, outcome]));
       trace('resolver', 'Atomic decisions resolved.', {
         analyses: responseAnalyses.length,
         challenged: challenges.length,
@@ -1526,11 +1661,24 @@ ipcMain.handle('kryeo:scan-components', async (event, input: unknown) => {
           name: analysis.familyName,
           type: analysis.assetType,
           role: analysis.role,
+          assetBoundary: familyById.get(analysis.familyId)?.assetBoundary || null,
+          namingScopeKey: familyById.get(analysis.familyId)?.namingScopeKey || null,
+          parentHierarchyKey: familyById.get(analysis.familyId)?.members[0]?.parentHierarchyKey || null,
+          sourceTypeHint: familyById.get(analysis.familyId)?.sourceTypeHint || null,
+          hierarchyTypeHint: familyById.get(analysis.familyId)?.hierarchyTypeHint || null,
+          consistencyIssues: familyDecisionConsistencyIssues(analysis, familyById.get(analysis.familyId)).slice(0, 4),
+          primaryEvidenceIssues: familyPrimaryEvidenceIssues(analysis, familyById.get(analysis.familyId)).slice(0, 2),
+          reviewApplied: reviewOutcomeById.get(analysis.familyId)?.replacementSelected || false,
+          reviewRetainedPrimary: reviewOutcomeById.get(analysis.familyId)?.retainedPrimary || false,
           reviewNeeded: analysis.reviewNeeded,
           conflict: Boolean(analysis.conflict),
           confidence: analysis.confidence ?? 0,
+          confidenceBasis: analysis.evidence ? 'model-evidence' : 'compact-decision-band',
         })),
-        selectedDecisionSummary: responseAnalyses.slice(0, 24).map((analysis) => `${analysis.familyId}=${analysis.familyName || '<blank>'}/${analysis.assetType}/${analysis.role};review=${analysis.reviewNeeded ? 1 : 0};conflict=${analysis.conflict ? 1 : 0}`).join(' | ').slice(0, 3600),
+        selectedDecisionSummary: responseAnalyses.slice(0, 24).map((analysis) => {
+          const outcome = reviewOutcomeById.get(analysis.familyId);
+          return `${analysis.familyId}=${analysis.familyName || '<blank>'}/${analysis.assetType}/${analysis.role};reviewApplied=${outcome?.replacementSelected ? 1 : 0};needsReview=${analysis.reviewNeeded ? 1 : 0};conflict=${analysis.conflict ? 1 : 0}`;
+        }).join(' | ').slice(0, 3600),
       });
       const failures = tierResponses.flatMap((response) => response.failures);
       const resolvedFamilyIds = new Set(responseAnalyses

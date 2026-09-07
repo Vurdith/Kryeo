@@ -2502,7 +2502,9 @@ function ComponentScanPage({ document, connected, onWorkspace, developerMode }: 
               <div className="developer-trace-actions">
                 <span>Compact scan trace. Open Settings → Developer console for the complete redacted event log.</span>
                 <button className="secondary-button" type="button" disabled={!developerTrace.length} onClick={() => {
-                  void navigator.clipboard.writeText(JSON.stringify(developerTrace, null, 2)).then(() => setMessage('Developer trace copied to clipboard.')).catch(() => setError('Could not copy the developer trace.'));
+                  void window.kryeo.copyText(JSON.stringify(developerTrace, null, 2))
+                    .then((copied) => copied ? setMessage('Developer trace copied to clipboard.') : setError('Could not copy the developer trace.'))
+                    .catch(() => setError('Could not copy the developer trace.'));
                 }}>Copy trace</button>
               </div>
               <pre>{developerTrace.map((entry) => `${entry.at}  [${entry.stage}] ${entry.message}${entry.data ? ` ${JSON.stringify(entry.data)}` : ''}`).join('\n')}</pre>
@@ -3356,8 +3358,8 @@ function SettingsPage({ version, status, onReconnect, onWorkspace, developerMode
     localStorage.setItem('kryeo.developer-mode', String(enabled));
   };
   const copyDeveloperLog = () => {
-    void navigator.clipboard.writeText(JSON.stringify(developerLog.entries, null, 2))
-      .then(() => setMaintenanceMessage('Developer log copied to clipboard.'))
+    void window.kryeo.copyText(JSON.stringify(developerLog.entries, null, 2))
+      .then((copied) => setMaintenanceMessage(copied ? 'Developer log copied to clipboard.' : 'Developer log could not be copied.'))
       .catch(() => setMaintenanceMessage('Developer log could not be copied.'));
   };
   const clearDeveloperLog = () => {

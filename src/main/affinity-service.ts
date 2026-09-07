@@ -43,8 +43,8 @@ export interface AffinityScanPartitionPlan {
   hierarchyDepth: number;
   mode: 'candidate' | 'subtree';
   ancestorPaths: number[][];
-  // A cheap Affinity-side approximation used only to avoid combining several
-  // dense or very large sections in the same remote script.
+
+
   estimatedWork?: number;
 }
 
@@ -75,22 +75,22 @@ export interface AffinityAssistantPreview {
 const SERVER_URL = 'http://localhost:6767/sse';
 const CONNECT_TIMEOUT_MS = 3500;
 const REQUEST_TIMEOUT_MS = 6500;
-// Component export is constrained by Affinity's remote script window, rather
-// than by the MCP round-trip alone. Start conservatively, grow after quick
-// batches, and shrink before a slow document turns into a timeout.
+
+
+
 const INITIAL_COMPONENT_EXPORT_PARTITIONS = 4;
 const MAX_COMPONENT_EXPORT_PARTITIONS = 12;
-// Start inside the known-safe window, then let fast real batches earn a larger
-// work allowance. The previous fixed limit made a large document pay a remote
-// Affinity round-trip for many tiny, already-safe batches.
+
+
+
 const INITIAL_COMPONENT_EXPORT_BATCH_WORK = 24;
 const MIN_COMPONENT_EXPORT_BATCH_WORK = 12;
 const MAX_COMPONENT_EXPORT_BATCH_WORK = 56;
 const FAST_COMPONENT_EXPORT_BATCH_MS = 18_000;
 const SLOW_COMPONENT_EXPORT_BATCH_MS = 42_000;
-// DocumentViewApi.setZoom uses inverse scale rather than the percentage shown
-// by Affinity's UI. On Affinity 3.2, 0.001 produces the maximum practical
-// zoom-in (about 1000%); large values produce a zoomed-out canvas.
+
+
+
 const SCAN_VIEWPORT_MIN_SCALE = 0.001;
 const SCAN_VIEWPORT_MAX_ZOOM_PERCENT = 1_000;
 const SCAN_VIEWPORT_SETTLE_STEP_MS = 100;
@@ -1261,9 +1261,9 @@ function partitionWork(node, mode) {
   const megapixels = bounds
     ? Math.max(0, (Number(bounds.width) * Number(bounds.height)) / (1024 * 1024))
     : 0;
-  // Descendants approximate the number of export selections. Large flat artwork
-  // can also take a long time to rasterise, so give every megapixel a small
-  // weight even when it has no children.
+
+
+
   const descendantWork = mode === 'candidate' ? 1 : Math.min(48, descendants + 1);
   const rasterWork = Math.min(48, Math.ceil(megapixels) * 3);
   return Math.max(1, Math.min(96, descendantWork + rasterWork));
@@ -1305,10 +1305,10 @@ function pushSectionPartitions(node, path, parentPath, parentName, ancestors, pa
   const children = childNodes(node);
   const currentType = nodeType(node);
   const subtreeDescendants = nodeDescendantCount(node);
-  // A non-generic editable group is itself meaningful source artwork, even
-  // when it must be split into smaller export partitions for reliability.
-  // Omitting it here leaves its construction layers loose and lets an
-  // equivalent flattened RasterNode become the only visible asset boundary.
+
+
+
+
   const retainEditableParent = depth < 6
     && children.length > 0
     && children.length <= 16
@@ -1320,10 +1320,10 @@ function pushSectionPartitions(node, path, parentPath, parentName, ancestors, pa
   }
   const childParentHierarchyKey = retainEditableParent ? hierarchyKey(path) : parentHierarchyKey;
   const childHierarchyDepth = retainEditableParent ? hierarchyDepth + 1 : hierarchyDepth;
-  // A single export has to finish inside Affinity's fixed remote MCP window.
-  // Split any dense subtree, regardless of its concrete Affinity node type:
-  // imported/live groups do not consistently identify as a "Group" even when
-  // their descendants are expensive to render.
+
+
+
+
   const shouldSplit = depth < 8 && children.length > 0 && (
     children.length > 2 || subtreeDescendants > 24
   );
@@ -1359,10 +1359,10 @@ if (providedPartitions.length > 0) {
   const selectedRoot = original.length === 1 ? original[0] : null;
   sourceName = selectedRoot ? nodeName(selectedRoot) : original.length + ' selected layers';
   if (selectedRoot && isStorageBoundary(selectedRoot)) {
-    // Storage is an explicit component-scan boundary, including when selected directly.
+
   } else if (selectedRoot && selectedRoot.firstChild) {
-    // Preserve a selected component group as the reviewable parent. Organizational
-    // containers remain transparent because collectDocumentCandidate handles them.
+
+
     collectDocumentCandidate(selectedRoot, [-1, 0], [-1], 'Selection', [], 'Selection', '', 0);
   } else {
     for (let index = 0; index < original.length; index += 1) {
@@ -1383,9 +1383,9 @@ if (providedPartitions.length > 0) {
       const type = nodeType(node);
       const parentName = 'Spread ' + (spreadIndex + 1);
       const topTypeIsComponent = !/Container|Artboard|Spread/i.test(type);
-      // A named top-level assembly is still a real editable component when it
-      // has a repeated set of children. The old <=2 limit dropped collection
-      // groups such as a slot strip before the parent-vs-raster decision ran.
+
+
+
       const retainedParent = topTypeIsComponent
         && !genericLayerName(node)
         && children.length <= 16
@@ -1394,9 +1394,9 @@ if (providedPartitions.length > 0) {
         pushPartition(node, path, [spreadIndex], parentName, [], 'Spread', '', 0, 'subtree');
       } else {
         if (retainedParent) {
-          // Large top-level groups are usually organizational wrappers. Keep
-          // their child sections, but avoid rendering the whole wrapper as one
-          // oversized component request.
+
+
+
           pushPartition(node, path, [spreadIndex], parentName, [], 'Spread', '', 0, 'candidate');
         }
         let childIndex = 0;
@@ -1467,9 +1467,9 @@ function join(a, b) {
   if (rootA !== rootB) parents[rootB] = rootA;
 }
 if (scanScope === 'document') {
-  // Composition is only possible between candidates with the same direct
-  // parent. Bucket first so large documents do not pay an all-document
-  // quadratic comparison cost.
+
+
+
   const siblings = {};
   for (let index = 0; index < candidates.length; index += 1) {
     const key = candidates[index].parentPath.join('.');
@@ -1590,9 +1590,9 @@ try {
       rememberVisibility(items);
     }
     if (refreshNodes.length > 0 && nodes.some((item) => needsRenderRefresh(item, 0))) {
-      // Adjustment-bearing groups need a visibility refresh before Affinity
-      // renders them. Ordinary visible artwork does not, avoiding several
-      // document mutations for every exported component.
+
+
+
       rememberLocalVisibility(refreshNodes);
       doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, refreshNodes, true), false));
       doc.executeCommand(DocumentCommand.createSetVisibility(Selection.create(doc, refreshNodes, true), true));
@@ -1603,17 +1603,17 @@ try {
     }
     let success = false;
     try {
-      // Visibility commands can invalidate a live-adjustment group's previous
-      // selection snapshot. Recreate it only after the render tree is rebuilt.
+
+
       const exportSelection = Selection.create(doc, nodes, true);
       doc.selection = exportSelection;
       const records = doc.export(outputPath, options, FileExportArea.createForSelection(exportSelection));
       for (const record of records.all) if (record.isSuccess) success = true;
     } catch (_) {
-      // Some live-adjustment groups are valid structural parents but cannot be
-      // exported directly. A group preview must still represent its complete
-      // assembled image: substituting its first child makes a real editable
-      // component look unrelated to an equivalent flattened RasterNode.
+
+
+
+
       success = false;
     }
     if (!success && childCount > 0) {
@@ -1627,8 +1627,8 @@ try {
           for (const record of childRecords.all) if (record.isSuccess) success = true;
         }
       } catch (_) {
-        // The structural fallback below remains available only when even the
-        // direct-child composite cannot be rendered by Affinity.
+
+
       }
     }
     restoreVisibility(localChangedNodes, localChangedStates);
@@ -1667,9 +1667,9 @@ try {
   }
   exported.sort((left, right) => left.index - right.index);
 } finally {
-  // Reconcile only nodes whose visibility was actually changed. Restoring the
-  // complete candidate set after every partition was a dominant cost on large
-  // documents, while this retains the same failure safety boundary.
+
+
+
   restoreVisibility(changedVisibilityNodes, changedVisibilityStates);
   doc.selection = Selection.create(doc, original, true);
 }

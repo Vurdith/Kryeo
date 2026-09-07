@@ -231,6 +231,63 @@ function modelResponse(prompt, state = {}) {
     if (state.finalSingleRecoveryCalls === 2) return { unexpected: true };
     return compactPacket(requestedIds, [{ name: 'Final Recovered Button', type: 'Button' }]);
   }
+  if (prompt.includes('Direct Source Cue Recovery')) {
+    state.directSourceCueRecoveryCalls = Number(state.directSourceCueRecoveryCalls || 0) + 1;
+    const slotId = 'direct-source-cue-slot';
+    if (state.directSourceCueRecoveryCalls === 1) {
+      return {
+        families: [
+          {
+            familyId: slotId,
+            familyName: 'Reference Slot',
+            assetType: 'Slot',
+            role: 'ImageButton',
+            memberNames: [],
+            diveMode: 'keep-together',
+            reason: 'The target is an item receptacle and its direct source type agrees with that reading.',
+            visualDescription: 'A compact receptacle with a filled centre and decorative rim.',
+            confidence: 0.58,
+            evidence: { visual: 0.7, layerName: 0.8, hierarchy: 0.2, learned: 0 },
+            conflict: true,
+            reviewNeeded: true,
+            alternatives: [{ assetType: 'Panel', reason: 'The static preview is visually close.' }],
+          },
+          {
+            familyId: 'direct-source-cue-missing',
+            familyName: 'Border 1',
+            assetType: 'Border',
+            role: 'ImageLabel',
+            memberNames: [],
+            diveMode: 'keep-together',
+            reason: 'The target needs a more specific name.',
+            visualDescription: 'A narrow decorative border.',
+            confidence: 0.9,
+            evidence: { visual: 0.9, layerName: 0.1, hierarchy: 0.2, learned: 0 },
+            conflict: false,
+            reviewNeeded: false,
+            alternatives: [],
+          },
+        ],
+      };
+    }
+    return {
+      families: requestedIds.map((familyId) => ({
+        familyId,
+        familyName: 'Recovery Border',
+        assetType: 'Border',
+        role: 'ImageLabel',
+        memberNames: [],
+        diveMode: 'keep-together',
+        reason: 'The target is an enclosing perimeter.',
+        visualDescription: 'A narrow decorative border.',
+        confidence: 0.9,
+        evidence: { visual: 0.9, layerName: 0.1, hierarchy: 0.2, learned: 0 },
+        conflict: false,
+        reviewNeeded: false,
+        alternatives: [],
+      })),
+    };
+  }
   if (prompt.includes('Partial Recovery Family')) {
     const returnedIds = requestedIds.length > 1 ? requestedIds.slice(0, -1) : requestedIds;
     return compactPacket(returnedIds, returnedIds.map(() => ({ name: 'Recovered Button', type: 'Button' })));
@@ -254,6 +311,70 @@ function modelResponse(prompt, state = {}) {
       { name: 'Panel Accent Border', type: 'Border', role: 'ImageLabel' },
       { name: 'Frame', type: 'Frame', role: 'Frame' },
     ]);
+  }
+  if (prompt.includes('RoleContractSlot')) {
+    return compactPacket(requestedIds, [{ name: 'Sample Slot', type: 'Slot', role: 'Frame' }]);
+  }
+  if (prompt.includes('Generic Foundation Background')) {
+    return compactPacket(requestedIds, [{ name: 'Background 1', type: 'Background', role: 'ImageLabel' }]);
+  }
+  if (prompt.includes('Semantic Incomplete Review')) {
+    if (prompt.includes('Return the compact packet')) {
+      if (prompt.includes('taxonomy-only or otherwise incomplete name')) {
+        return compactPacket(requestedIds, requestedIds.map(() => ({ name: 'Sequence Border 1', type: 'Border', role: 'ImageLabel' })));
+      }
+      return compactPacket(requestedIds, requestedIds.map(() => ({ name: 'Border 1', type: 'Border', role: 'ImageLabel' })));
+    }
+    return {
+      families: requestedIds.map((familyId) => ({
+        familyId,
+        familyName: 'Sequence Border 1',
+        assetType: 'Border',
+        role: 'ImageLabel',
+        memberNames: [{ visualHash: 'semantic-incomplete-hash', name: 'Sequence Border 1' }],
+        diveMode: 'keep-together',
+        reason: 'A repeated perimeter fragment belongs to an ordered structural sequence.',
+        visualDescription: 'A narrow decorative perimeter fragment with no independent label.',
+        confidence: 0.91,
+        evidence: { visual: 0.9, layerName: 0.1, hierarchy: 0.8, learned: 0 },
+        conflict: false,
+        reviewNeeded: false,
+        alternatives: [],
+      })),
+    };
+  }
+  if (prompt.includes('Omitted Review Recovery')) {
+    if (prompt.includes('Return the compact packet')) {
+      if (prompt.includes('compact review omitted one or more required families')) {
+        return compactPacket(requestedIds, requestedIds.map((_, index) => ({ name: `Sequence Border ${index + 1}`, type: 'Border', role: 'ImageLabel' })));
+      }
+      return compactPacket(requestedIds.slice(0, 1), [{ name: 'Sequence Border 1', type: 'Border', role: 'ImageLabel' }]);
+    }
+    return {
+      families: requestedIds.map((familyId, index) => ({
+        familyId,
+        familyName: `Sequence Border ${index + 1}`,
+        assetType: 'Border',
+        role: 'ImageLabel',
+        memberNames: [{ visualHash: `omitted-review-hash-${index + 1}`, name: `Sequence Border ${index + 1}` }],
+        diveMode: 'keep-together',
+        reason: 'A repeated perimeter fragment belongs to the ordered sibling sequence.',
+        visualDescription: 'A narrow decorative perimeter fragment with no independent label.',
+        confidence: 0.91,
+        evidence: { visual: 0.9, layerName: 0.1, hierarchy: 0.8, learned: 0 },
+        conflict: false,
+        reviewNeeded: false,
+        alternatives: [],
+      })),
+    };
+  }
+  if (prompt.includes('Sibling Consistency Review')) {
+    const repaired = prompt.includes('duplicated or out-of-order sibling names');
+    return compactPacket(requestedIds, requestedIds.map((_, index) => ({
+      name: repaired ? `Sequence Border ${index + 1}` : 'Sequence Border 1',
+      type: 'Border',
+      role: 'ImageLabel',
+    })));
   }
   if (prompt.includes('CenterMarker')) {
     const semantic = [
@@ -356,6 +477,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       KRYEO_AI_RATE_LIMIT_PER_MINUTE: '1000',
       KRYEO_AI_MODEL_CONCURRENCY: '2',
       KRYEO_AI_MAX_INFLIGHT_PER_TOKEN: '2',
+      KRYEO_AI_FAMILY_BATCH_SIZE: '8',
       KRYEO_AI_MAX_MODEL_RETRIES: '1',
       KRYEO_AI_SCAN_TARGET_USD: '0.01',
       KRYEO_AI_SCAN_BUDGET_USD: '0.03',
@@ -379,7 +501,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       headers: { authorization: `Bearer ${TOKEN}` },
     }).then((response) => response.json());
     assert.equal(health.modelConcurrency, 2);
-    assert.equal(health.familyBatchSize, 8);
+    assert.equal(health.familyBatchSize, 8, 'An explicit local environment override must take precedence over the default.');
     assert.equal(health.maxMemberImagesPerFamily, 2);
     assert.equal(health.modelLite, 'test-vision-model');
     assert.equal(health.modelEscalation, 'test-vision-model');
@@ -394,7 +516,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(health.liteOutputPricePerMillion, 0);
     assert.equal(health.costEstimateSafetyFactor, 2);
     assert.equal(health.maxHostedFamiliesPerScan, 0);
-    assert.equal(health.analysisVersion, 'family-v70');
+    assert.equal(health.analysisVersion, 'family-v83');
     assert.equal(health.maxCacheEntries, 1000);
     assert.equal(modelPrompts.length, 0);
     const unauthorized = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`);
@@ -542,6 +664,217 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       'Independent review must use the compact atomic replacement contract so a bounded batch can return every family.',
     );
 
+    const semanticRecoveryFamily = {
+      ...family,
+      id: 'semantic-incomplete-review',
+      fingerprint: `semantic-incomplete-review-${runId}`,
+      members: [{
+        ...family.members[0],
+        visualHash: 'semantic-incomplete-hash',
+        name: 'Semantic Incomplete Review',
+      }],
+    };
+    const semanticRecoveryCallsBefore = modelCalls;
+    const semanticRecovery = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/review`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        hostedScanId: `semantic-incomplete-review-${runId}`,
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        families: [semanticRecoveryFamily],
+        currentAnalyses: [{
+          familyId: semanticRecoveryFamily.id,
+          familyName: 'Border 1',
+          assetType: 'Border',
+          role: 'Frame',
+          memberNames: [],
+          diveMode: 'keep-together',
+          reason: 'Compact proposal.',
+          reviewNeeded: true,
+          alternatives: [],
+        }],
+        challengeReasons: { [semanticRecoveryFamily.id]: ['The current packet violates the Roblox type and role contract.'] },
+      }),
+    }).then((response) => response.json());
+    assert.equal(semanticRecovery.analyses.length, 1);
+    assert.equal(semanticRecovery.analyses[0].familyName, 'Sequence Border 1');
+    assert.equal(semanticRecovery.failures.length, 0);
+    assert.equal(modelCalls - semanticRecoveryCallsBefore, 2, 'An invalid compact review may use one scoped detailed replacement, never per-family retries.');
+    assert.deepEqual(semanticRecovery.diagnostics.recovery, {
+      semanticIncompleteFamilies: ['semantic-incomplete-review'],
+      incompleteResponseFamilies: [],
+      nameConsistencyFamilies: [],
+      detailedReplacementScopes: 1,
+      detailedReplacementFamilies: 1,
+      detailedReplacementAccepted: 1,
+    });
+
+    const omittedRecoveryFamilies = [1, 2].map((index) => ({
+      ...family,
+      id: `omitted-review-recovery-${index}`,
+      fingerprint: `omitted-review-recovery-${index}-${runId}`,
+      members: [{
+        ...family.members[0],
+        visualHash: `omitted-review-hash-${index}`,
+        name: `Omitted Review Recovery ${index}`,
+      }],
+    }));
+    const omittedRecoveryCallsBefore = modelCalls;
+    const omittedRecovery = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/review`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        hostedScanId: `omitted-review-recovery-${runId}`,
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        families: omittedRecoveryFamilies,
+        currentAnalyses: omittedRecoveryFamilies.map((item) => ({
+          familyId: item.id,
+          familyName: 'Sequence Border',
+          assetType: 'Border',
+          role: 'ImageLabel',
+          memberNames: [],
+          diveMode: 'keep-together',
+          reason: 'Primary decision.',
+          reviewNeeded: true,
+          alternatives: [],
+        })),
+        challengeReasons: Object.fromEntries(omittedRecoveryFamilies.map((item) => [item.id, ['The primary decision requires review.']])),
+      }),
+    }).then((response) => response.json());
+    assert.equal(omittedRecovery.analyses.length, 2);
+    assert.equal(omittedRecovery.failures.length, 0);
+    assert.equal(modelCalls - omittedRecoveryCallsBefore, 3, `A compact response that omits aliases must receive one bounded schema retry followed by one detailed scope replacement. ${JSON.stringify(omittedRecovery)}`);
+    assert.deepEqual(omittedRecovery.diagnostics.recovery, {
+      semanticIncompleteFamilies: [],
+      incompleteResponseFamilies: omittedRecoveryFamilies.map((family) => family.id),
+      nameConsistencyFamilies: [],
+      detailedReplacementScopes: 1,
+      detailedReplacementFamilies: 2,
+      detailedReplacementAccepted: 2,
+    });
+
+    const directSourceCueFamilies = [
+      {
+        ...family,
+        id: 'direct-source-cue-slot',
+        fingerprint: `direct-source-cue-slot-${runId}`,
+        sourceTypeHint: 'Slot',
+        members: [{
+          ...family.members[0],
+          visualHash: 'direct-source-cue-slot-hash',
+          name: 'Direct Source Cue Recovery Slot',
+        }],
+      },
+      {
+        ...family,
+        id: 'direct-source-cue-missing',
+        fingerprint: `direct-source-cue-missing-${runId}`,
+        members: [{
+          ...family.members[0],
+          visualHash: 'direct-source-cue-missing-hash',
+          name: 'Direct Source Cue Recovery Border',
+        }],
+      },
+    ];
+    const directSourceCueCallsBefore = modelCalls;
+    const directSourceCueRecovery = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/review`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        hostedScanId: `direct-source-cue-recovery-${runId}`,
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        families: directSourceCueFamilies,
+        currentAnalyses: directSourceCueFamilies.map((item) => ({
+          familyId: item.id,
+          familyName: item.id === 'direct-source-cue-slot' ? 'Reference Panel' : 'Recovery Border',
+          assetType: item.id === 'direct-source-cue-slot' ? 'Panel' : 'Border',
+          role: 'ImageLabel',
+          memberNames: [],
+          diveMode: 'keep-together',
+          reason: 'Primary decision.',
+          reviewNeeded: true,
+          alternatives: [],
+        })),
+        challengeReasons: {
+          'direct-source-cue-slot': [
+            "The target's direct source type cue suggests Slot, while the primary visual packet selected Panel; an independent visual reviewer must resolve the disagreement with one complete decision.",
+          ],
+          'direct-source-cue-missing': ['The primary decision requires review.'],
+        },
+      }),
+    }).then((response) => response.json());
+    assert.equal(directSourceCueRecovery.analyses.length, 2);
+    assert.equal(
+      directSourceCueRecovery.analyses.find((analysis) => analysis.familyId === 'direct-source-cue-slot').assetType,
+      'Slot',
+      `A complete direct-cue-consistent review row must survive another alias missing from the same batch. ${JSON.stringify(directSourceCueRecovery)}`,
+    );
+    assert.deepEqual(directSourceCueRecovery.diagnostics.recovery.semanticIncompleteFamilies, ['direct-source-cue-missing']);
+    assert.deepEqual(directSourceCueRecovery.diagnostics.recovery.incompleteResponseFamilies, []);
+    assert.equal(directSourceCueRecovery.diagnostics.recovery.detailedReplacementFamilies, 1);
+    assert.equal(modelCalls - directSourceCueCallsBefore, 2, 'Only the missing sibling may receive a recovery request.');
+    assert.equal(
+      !modelPrompts.at(-2).includes('Return the compact packet')
+        && modelPrompts.at(-1).includes('Return the compact packet'),
+      true,
+      'The direct target-type review must stay detailed; once its valid packet is retained, unrelated recovery may stay compact.',
+    );
+
+    const consistencyFamilies = [1, 2].map((index) => ({
+      ...family,
+      id: `sibling-consistency-review-${index}`,
+      fingerprint: `sibling-consistency-review-${index}-${runId}`,
+      namingScopeKey: 'shared-consistency-scope',
+      decisionScopeKey: 'shared-consistency-scope',
+      assetBoundary: 'construction-child',
+      siblingOrdinal: index,
+      siblingCount: 2,
+      members: [{
+        ...family.members[0],
+        id: `sibling-consistency-member-${index}`,
+        visualHash: `sibling-consistency-hash-${index}`,
+        name: `Sibling Consistency Review ${index}`,
+        hierarchyKey: `shared-parent.${index}`,
+        parentHierarchyKey: 'shared-parent',
+      }],
+    }));
+    const consistencyCallsBefore = modelCalls;
+    const consistencyRecovery = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/review`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        hostedScanId: `sibling-consistency-${runId}`,
+        families: consistencyFamilies,
+        currentAnalyses: consistencyFamilies.map((item) => ({
+          familyId: item.id,
+          fingerprint: item.fingerprint,
+          familyName: 'Sequence Border 1',
+          assetType: 'Border',
+          role: 'ImageLabel',
+          memberNames: [{ visualHash: item.members[0].visualHash, name: 'Sequence Border 1' }],
+          diveMode: 'keep-together',
+          reason: 'Primary sibling proposal.',
+          reviewNeeded: true,
+          alternatives: [],
+        })),
+        challengeReasons: Object.fromEntries(consistencyFamilies.map((item) => [item.id, ['Sibling names must be distinct and ordered.']])),
+      }),
+    }).then((response) => response.json());
+    assert.deepEqual(consistencyRecovery.analyses.map((analysis) => analysis.familyName), ['Sequence Border 1', 'Sequence Border 1']);
+    assert.equal(consistencyRecovery.failures.length, 0);
+    assert.equal(modelCalls - consistencyCallsBefore, 1, 'Ordinal-only differences must not consume a second visual review request.');
+    assert.deepEqual(consistencyRecovery.diagnostics.recovery.nameConsistencyFamilies, []);
+    assert.equal(consistencyRecovery.diagnostics.rejectedPackets.length, 0);
+
     const independentFrameAudit = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/explain`, {
       method: 'POST',
       headers,
@@ -611,10 +944,10 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
         sourceName: 'Audit Unreadable Slot',
       }),
     }).then((response) => response.json());
-    assert.equal(contradictorySlotAudit.supportsClassification, false);
-    assert.equal(contradictorySlotAudit.conflict, true);
-    assert.equal(contradictorySlotAudit.confidence, 0.55);
-    assert.match(contradictorySlotAudit.conflictMessage, /almost no supporting evidence/i);
+    assert.equal(contradictorySlotAudit.supportsClassification, true);
+    assert.equal(contradictorySlotAudit.conflict, false);
+    assert.equal(contradictorySlotAudit.confidence, 0.9);
+    assert.equal(contradictorySlotAudit.conflictMessage, '');
 
     const concurrentResults = await Promise.all(['one', 'two'].map((suffix) => fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',
@@ -780,7 +1113,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       }),
     }).then((response) => response.json());
     assert.equal(incomplete.analyses.length, 1);
-    assert.equal(incomplete.analyses[0].familyName, 'Unlabelled visual');
+    assert.equal(incomplete.analyses[0].familyName, '', 'A missing model name must remain empty rather than becoming a production identity.');
     assert.equal(incomplete.analyses[0].assetType, 'Unknown');
     assert.equal(incomplete.analyses[0].role, 'Unknown');
     assert.equal(incomplete.analyses[0].reviewNeeded, true);
@@ -892,8 +1225,8 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       }),
     }).then((response) => response.json());
     assert.equal(sixteenFamilyBatch.analyses.length, 16, JSON.stringify(sixteenFamilyBatch));
-    assert.equal(modelCalls - callsBeforeSixteen, 2, 'sixteen families should use two schema-reliable eight-family decisions');
-    assert.equal(modelImageCounts.at(-1), 8, 'each schema-reliable batch should preserve eight direct family previews');
+    assert.equal(modelCalls - callsBeforeSixteen, 2, 'sixteen families should respect the explicit eight-family test override');
+    assert.equal(modelImageCounts.at(-1), 8, 'the overridden batch should preserve eight direct family previews');
 
     const callsBeforeShiftedBatch = modelCalls;
     const shiftedBatch = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
@@ -1037,6 +1370,27 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
     assert.equal(semanticById.get('family-sample-cell').familyName, 'Sample Cell Slot');
     assert.equal(semanticById.get('family-sample-cell').assetType, 'Slot');
     assert.equal(semanticById.get('family-sample-cell').role, 'ImageButton');
+
+    const roleContractSlot = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        project: 'Test',
+        documentTitle: 'Document',
+        documentSessionUuid: 'session',
+        families: [{
+          ...family,
+          id: 'role-contract-slot',
+          fingerprint: `role-contract-slot-${runId}`,
+          members: [{ ...family.members[0], name: 'RoleContractSlot' }],
+        }],
+      }),
+    }).then((response) => response.json());
+    assert.equal(roleContractSlot.analyses[0].assetType, 'Slot');
+    assert.equal(roleContractSlot.analyses[0].role, 'Frame', 'The gateway must preserve the model role instead of substituting a locally mapped role.');
+    assert.equal(roleContractSlot.analyses[0].normalizationReason, undefined);
+    assert.equal(roleContractSlot.analyses[0].reviewNeeded, true, 'An incompatible role must be returned unchanged but marked for a complete visual replacement.');
+    assert.match(roleContractSlot.analyses[0].conflictMessage, /Slot with Frame/i);
 
     const scopeGuard = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/v1/families/analyze`, {
       method: 'POST',
@@ -1235,7 +1589,7 @@ test('authenticated gateway analyses, reconciles, chats, and caches', async () =
       method: 'POST',
       headers,
     }).then((response) => response.json());
-    assert.deepEqual(clearedCache, { cleared: true, analysisVersion: 'family-v70', cacheEntries: 0 });
+    assert.deepEqual(clearedCache, { cleared: true, analysisVersion: 'family-v83', cacheEntries: 0 });
     const clearedCacheHealth = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`, { headers })
       .then((response) => response.json());
     assert.equal(clearedCacheHealth.cacheEntries, 0, 'cache clearing must remove derived decisions before the next scan');

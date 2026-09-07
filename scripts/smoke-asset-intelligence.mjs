@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   buildProductionIdentity,
   normalizeAiName,
+  reconcileAiNameForType,
   roleForAssetType,
   strictProductionName,
 } from '../src/main/asset-intelligence-service.ts';
@@ -29,15 +30,21 @@ assert.equal(mismatchedTypeName.displayName, 'Canvas Frame');
 assert.ok(mismatchedTypeName.issues.some((issue) => /conflicts/i.test(issue)));
 assert.ok(strictProductionName('Background Perimeter Border', 'Border').issues.some((issue) => /conflicts/i.test(issue)));
 assert.ok(strictProductionName('Sample Borders Border', 'Border').issues.some((issue) => /exactly once/i.test(issue)));
-assert.ok(strictProductionName('Slot Sample 1', 'Slot').issues.some((issue) => /after its descriptive identity/i.test(issue)));
+assert.deepEqual(strictProductionName('Slot Sample 1', 'Slot'), {
+  displayName: 'Sample Slot 1',
+  codeName: 'sample_slot_1',
+  issues: [],
+}, 'Type-first output is canonicalised grammatically without inventing or removing semantic words.');
 assert.deepEqual(strictProductionName('Sample Slot 1', 'Slot').issues, []);
 assert.deepEqual(strictProductionName('Close Button Hover', 'Button').issues, []);
 assert.ok(strictProductionName('Border 1', 'Border').issues.some((issue) => /descriptive identity/i.test(issue)));
 assert.deepEqual(strictProductionName('ParentBorder Top', 'Border').issues, []);
 assert.deepEqual(strictProductionName('ParentBorder Side', 'Border').issues, []);
-assert.deepEqual(strictProductionName('ParentBorder Frame', 'Frame').issues, []);
-assert.deepEqual(strictProductionName('PanelBackground Texture', 'Texture').issues, []);
+assert.ok(strictProductionName('ParentBorder Frame', 'Frame').issues.some((issue) => /conflicts/i.test(issue)));
+assert.ok(strictProductionName('PanelBackground Texture', 'Texture').issues.some((issue) => /conflicts/i.test(issue)));
 assert.deepEqual(strictProductionName('Decorative Ornament Center', 'Ornament').issues, []);
+assert.deepEqual(strictProductionName('Decorative Corner Set', 'Corner').issues, [], 'Composed visual collections may use a structural qualifier after the type.');
+assert.ok(strictProductionName('Glowing Texture Background', 'Texture').issues.some((issue) => /conflicts/i.test(issue)), 'A second taxonomy type must still invalidate the packet.');
 
 assert.ok(strictProductionName('Layer 12', 'Unknown').issues.length > 0);
 assert.ok(strictProductionName('Pixel Art', 'Unknown').issues.length > 0);
@@ -66,6 +73,10 @@ assert.deepEqual(normalizeAiName('Close_Button_Hover'), {
   codeName: 'close_button_hover',
   issues: [],
 });
+assert.equal(reconcileAiNameForType('Full Border Frame', 'Border'), 'Full Border');
+assert.equal(reconcileAiNameForType('Pattern Grid', 'Texture'), 'Pattern Grid Texture');
+assert.equal(reconcileAiNameForType('Background Middle', 'Background'), 'Middle Background');
+assert.equal(reconcileAiNameForType('Layer 1', 'Border'), 'Layer 1', 'Structural placeholders must remain unresolved rather than being given a fabricated identity.');
 assert.ok(normalizeAiName('Border').issues.length > 0, 'The validator must flag bare type names instead of inventing a descriptor.');
 assert.equal(
   buildProductionIdentity({ exportName: '', aiSuggestedName: '', familyName: 'Layer 7', layerLabel: 'Layer 7', name: 'Layer 7', assetType: 'Button', role: 'ImageButton', remembered: false }).displayName,

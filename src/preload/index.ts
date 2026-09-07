@@ -15,6 +15,7 @@ const api: KryeoApi = {
   setDeveloperMode: (enabled) => ipcRenderer.invoke('kryeo:set-developer-mode', enabled),
   getDeveloperLog: () => ipcRenderer.invoke('kryeo:get-developer-log'),
   clearDeveloperLog: () => ipcRenderer.invoke('kryeo:clear-developer-log'),
+  copyText: (value) => ipcRenderer.invoke('kryeo:copy-text', value),
   setDeveloperLogStreaming: (enabled) => ipcRenderer.send('kryeo:set-developer-log-streaming', enabled),
   onDeveloperLog: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, entries: Parameters<typeof listener>[0]) => listener(entries);

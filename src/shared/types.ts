@@ -355,6 +355,17 @@ export interface ComponentVisualFamily {
   siblingOrdinal?: number;
   /** Number of export-capable siblings in the immediate scope. */
   siblingCount?: number;
+  /**
+   * A single type-bearing token found in the target's direct source labels.
+   * This is evidence for the visual model, never a local type override.
+   */
+  sourceTypeHint?: ComponentAssetType;
+  /**
+   * A single type-bearing token found in the immediate hierarchy context.
+   * It helps resolve parent/child semantics without copying ancestor text into
+   * a production name.
+   */
+  hierarchyTypeHint?: ComponentAssetType;
   /** Supporting direct-child visuals for a composed parent; never receive this family's semantic decision. */
   contextMembers?: ComponentFamilyMember[];
   parentNames: string[];
@@ -543,7 +554,15 @@ export interface HostedAnalysisDiagnostics {
   analyzedFamilies?: number;
   incompleteFamilies?: string[];
   providerCalls?: HostedProviderCallDiagnostic[];
-  recovery?: Record<string, number>;
+  recovery?: Record<string, number | string[]>;
+  rejectedPackets?: Array<{
+    familyId: string;
+    name: string;
+    type: string;
+    role: string;
+    issues: string[];
+    lane: string;
+  }>;
 }
 
 export interface DocumentReconciliationIssue {
@@ -1056,6 +1075,7 @@ export interface KryeoApi {
   setDeveloperMode(enabled: boolean): Promise<DeveloperLogSnapshot>;
   getDeveloperLog(): Promise<DeveloperLogSnapshot>;
   clearDeveloperLog(): Promise<DeveloperLogSnapshot>;
+  copyText(value: string): Promise<boolean>;
   setDeveloperLogStreaming(enabled: boolean): void;
   onDeveloperLog(listener: (entries: DeveloperLogEntry[]) => void): () => void;
   cancelJob(id: string): Promise<boolean>;

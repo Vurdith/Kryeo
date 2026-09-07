@@ -128,7 +128,7 @@ for (const entry of fixture.cases) {
       confidence: 0.9,
       reviewNeeded: false,
       alternatives: [],
-    }, families[0]), false, `${entry.id}: source disagreement alone must remain confidence context, not trigger a second visual call`);
+    }, families[0]), false, `${entry.id}: a direct source label must remain model context, not a local review gate`);
   }
   if (entry.expect.parentKind) {
     const parent = components.find((component) => component.id === 'assembly');
@@ -173,7 +173,7 @@ for (const entry of fixture.cases) {
     && component.diveMode === expectedDecision.diveMode
     && component.exportTarget === true
     && component.analysisState === 'analyzed'
-  )), `${entry.id}: a complete hosted packet must apply name, type, role, grouping, and export state atomically even when source context differs`);
+  )), `${entry.id}: a complete hosted packet must apply name, type, role, grouping, and export state atomically`);
   assert.ok(resolved.filter((component) => component.assetBoundary === 'construction-child').every((component) => (
     component.exportTarget === false
     && component.assetType === expectedType
